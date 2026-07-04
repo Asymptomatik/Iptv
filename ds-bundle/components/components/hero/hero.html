@@ -1,0 +1,341 @@
+<!-- @dsCard group="Components" -->
+<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hero immersif</title>
+<style>
+/* ============================================================================
+   IptvApp — "Cinematic Glass" Design System
+   Direction: near-black premium, frosted glass surfaces, violet→cyan gradient
+   accent, immersive hero, soft 20px radii. Dual form factor (mobile + Android TV).
+   This file is the single source of truth for tokens — transposed 1:1 to the
+   Compose theme (Color.kt / Type.kt / Shape.kt / Dimens.kt).
+   ============================================================================ */
+
+:root {
+  /* ── Backgrounds ─────────────────────────────────────────────────────── */
+  --bg-base:      #0A0A0F;   /* app background — deep violet-tinted near-black */
+  --bg-elevated:  #12121B;   /* raised background band                         */
+  --bg-sunken:    #050507;   /* scrim / modal base                            */
+
+  /* ── Glass surfaces (frosted) ────────────────────────────────────────── */
+  --glass-fill:        rgba(255, 255, 255, 0.055);
+  --glass-fill-strong: rgba(255, 255, 255, 0.09);
+  --glass-border:        rgba(255, 255, 255, 0.10);
+  --glass-border-strong: rgba(255, 255, 255, 0.18);
+  --glass-blur: 22px;
+  --glass-saturate: 135%;
+
+  /* ── Accent — violet → cyan gradient ─────────────────────────────────── */
+  --accent-violet:   #8B5CF6;
+  --accent-cyan:     #22D3EE;
+  --accent-gradient: linear-gradient(120deg, #8B5CF6 0%, #6D8BFF 45%, #22D3EE 100%);
+  --accent-solid:    #7C6BF5;   /* single-colour accent (focus ring, dots)    */
+  --accent-glow:     rgba(124, 107, 245, 0.45);
+
+  /* ── Text ────────────────────────────────────────────────────────────── */
+  --text-primary:   #F5F5FA;
+  --text-secondary: #A6A6BC;
+  --text-dimmed:    #6C6C82;
+  --text-on-accent: #0A0A0F;
+
+  /* ── Semantic ────────────────────────────────────────────────────────── */
+  --success: #34D399;
+  --error:   #FB7185;
+  --warning: #FBBF24;
+  --live:    #FF4D6D;
+
+  /* ── Radii ───────────────────────────────────────────────────────────── */
+  --radius-sm:   10px;
+  --radius-md:   16px;
+  --radius-lg:   20px;   /* poster cards */
+  --radius-xl:   28px;   /* sheets, hero */
+  --radius-pill: 999px;
+
+  /* ── Spacing scale (4pt) ─────────────────────────────────────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-8: 48px;
+  --space-10: 64px;
+
+  /* ── Typography ──────────────────────────────────────────────────────── */
+  --font: "Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --fs-display:  56px;  --lh-display:  60px;  --fw-display:  700;
+  --fs-h1:       34px;  --lh-h1:       40px;  --fw-h1:       700;
+  --fs-h2:       26px;  --lh-h2:       32px;  --fw-h2:       650;
+  --fs-h3:       20px;  --lh-h3:       26px;  --fw-h3:       600;
+  --fs-title:    16px;  --lh-title:    22px;  --fw-title:    600;
+  --fs-body:     15px;  --lh-body:     22px;  --fw-body:     400;
+  --fs-label:    13px;  --lh-label:    18px;  --fw-label:    600;
+  --fs-caption:  12px;  --lh-caption:  16px;  --fw-caption:  500;
+  --tracking-wide: 0.14em;
+
+  /* ── Elevation ───────────────────────────────────────────────────────── */
+  --shadow-card:  0 10px 34px rgba(0, 0, 0, 0.50);
+  --shadow-sheet: 0 24px 70px rgba(0, 0, 0, 0.65);
+  --shadow-focus: 0 16px 48px var(--accent-glow);
+}
+
+/* ── Base ─────────────────────────────────────────────────────────────── */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font);
+  color: var(--text-primary);
+  background:
+    radial-gradient(1100px 620px at 78% -8%, rgba(139, 92, 246, 0.18), transparent 60%),
+    radial-gradient(900px 560px at 8% 4%, rgba(34, 211, 238, 0.12), transparent 55%),
+    var(--bg-base);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+  line-height: 1.4;
+}
+
+/* Ambient backdrop used inside preview cards to show glass over content */
+.stage {
+  position: relative;
+  min-height: 100%;
+  padding: var(--space-6);
+  background:
+    radial-gradient(1000px 600px at 80% -10%, rgba(139, 92, 246, 0.20), transparent 60%),
+    radial-gradient(760px 520px at 6% 2%, rgba(34, 211, 238, 0.14), transparent 55%),
+    var(--bg-base);
+}
+
+/* ── Typography helpers ──────────────────────────────────────────────── */
+.t-display { font-size: var(--fs-display); line-height: var(--lh-display); font-weight: var(--fw-display); letter-spacing: -0.02em; }
+.t-h1 { font-size: var(--fs-h1); line-height: var(--lh-h1); font-weight: var(--fw-h1); letter-spacing: -0.015em; }
+.t-h2 { font-size: var(--fs-h2); line-height: var(--lh-h2); font-weight: var(--fw-h2); letter-spacing: -0.01em; }
+.t-h3 { font-size: var(--fs-h3); line-height: var(--lh-h3); font-weight: var(--fw-h3); }
+.t-title { font-size: var(--fs-title); line-height: var(--lh-title); font-weight: var(--fw-title); }
+.t-body { font-size: var(--fs-body); line-height: var(--lh-body); font-weight: var(--fw-body); color: var(--text-secondary); }
+.t-label { font-size: var(--fs-label); line-height: var(--lh-label); font-weight: var(--fw-label); }
+.t-caption { font-size: var(--fs-caption); line-height: var(--lh-caption); font-weight: var(--fw-caption); color: var(--text-dimmed); }
+.eyebrow { font-size: var(--fs-caption); font-weight: 700; letter-spacing: var(--tracking-wide); text-transform: uppercase; color: var(--text-secondary); }
+.grad-text {
+  background: var(--accent-gradient);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+
+/* ── Glass surface primitive ─────────────────────────────────────────── */
+.glass {
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-border);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  border-radius: var(--radius-lg);
+}
+.glass-strong {
+  background: var(--glass-fill-strong);
+  border-color: var(--glass-border-strong);
+}
+
+/* ── Buttons ─────────────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  height: 46px; padding: 0 var(--space-5);
+  border-radius: var(--radius-pill); border: none; cursor: pointer;
+  font-family: var(--font); font-size: var(--fs-title); font-weight: 650;
+  transition: transform .18s ease, box-shadow .18s ease, background .18s ease;
+}
+.btn-primary { background: var(--accent-gradient); color: var(--text-on-accent); box-shadow: 0 8px 26px var(--accent-glow); }
+.btn-primary:hover { transform: translateY(-1px); box-shadow: 0 12px 34px var(--accent-glow); }
+.btn-ghost {
+  background: var(--glass-fill); color: var(--text-primary);
+  border: 1px solid var(--glass-border);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+}
+.btn-ghost:hover { background: var(--glass-fill-strong); }
+.btn-icon {
+  width: 46px; height: 46px; padding: 0; justify-content: center;
+  border-radius: var(--radius-pill);
+  background: var(--glass-fill); border: 1px solid var(--glass-border); color: var(--text-primary);
+}
+
+/* ── Category chips ──────────────────────────────────────────────────── */
+.chip {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  height: 34px; padding: 0 var(--space-4);
+  border-radius: var(--radius-pill);
+  background: var(--glass-fill); border: 1px solid var(--glass-border);
+  font-size: var(--fs-label); font-weight: 600; color: var(--text-secondary);
+}
+.chip.is-active {
+  color: var(--text-on-accent);
+  background: var(--accent-gradient); border-color: transparent;
+}
+
+/* ── Poster card ─────────────────────────────────────────────────────── */
+.card {
+  position: relative; width: 156px; flex: 0 0 auto;
+  border-radius: var(--radius-lg); overflow: hidden;
+  background: var(--glass-fill); border: 1px solid var(--glass-border);
+  transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease;
+}
+.card .poster { width: 100%; aspect-ratio: 2 / 3; object-fit: cover; display: block; }
+.card .poster.landscape { aspect-ratio: 16 / 9; }
+.card .meta { padding: var(--space-3); }
+.card .meta .name { font-size: var(--fs-label); font-weight: 600; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .meta .sub { font-size: var(--fs-caption); color: var(--text-dimmed); margin-top: 2px; }
+
+/* Focus state — the TV D-pad selection language: lift + gradient ring + glow */
+.card.is-focused {
+  transform: translateY(-6px) scale(1.06);
+  border-color: transparent;
+  box-shadow: var(--shadow-focus), 0 0 0 2.5px transparent;
+  background-image:
+    linear-gradient(var(--bg-elevated), var(--bg-elevated)),
+    var(--accent-gradient);
+  background-origin: border-box;
+  background-clip: padding-box, border-box;
+}
+.card .badge {
+  position: absolute; top: var(--space-2); left: var(--space-2);
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 9px; border-radius: var(--radius-pill);
+  font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  background: rgba(10,10,15,0.55); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  color: var(--text-primary);
+}
+.badge .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--live); box-shadow: 0 0 8px var(--live); }
+/* progress bar for continue-watching */
+.card .progress { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: rgba(255,255,255,0.14); }
+.card .progress > i { display: block; height: 100%; background: var(--accent-gradient); }
+
+/* ── Section title / row ─────────────────────────────────────────────── */
+.section-head { display: flex; align-items: baseline; gap: var(--space-3); margin: var(--space-6) 0 var(--space-3); }
+.section-head h2 { font-size: var(--fs-h3); font-weight: 650; letter-spacing: -0.01em; }
+.section-head .more { margin-left: auto; font-size: var(--fs-label); color: var(--text-secondary); }
+.row { display: flex; gap: var(--space-3); overflow: hidden; }
+
+/* ── Hero ────────────────────────────────────────────────────────────── */
+.hero {
+  position: relative; border-radius: var(--radius-xl); overflow: hidden;
+  min-height: 300px; display: flex; align-items: flex-end;
+}
+.hero img.bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.hero .scrim {
+  position: absolute; inset: 0;
+  background:
+    linear-gradient(90deg, rgba(10,10,15,0.92) 0%, rgba(10,10,15,0.55) 42%, rgba(10,10,15,0.05) 100%),
+    linear-gradient(0deg, rgba(10,10,15,0.90) 0%, transparent 55%);
+}
+.hero .content { position: relative; padding: var(--space-8); max-width: 62%; }
+.hero .content .tags { display: flex; gap: var(--space-2); margin: var(--space-3) 0 var(--space-4); }
+.hero .content .actions { display: flex; gap: var(--space-3); margin-top: var(--space-5); }
+
+/* ── Nav ─────────────────────────────────────────────────────────────── */
+.tabbar {
+  display: flex; gap: var(--space-2); padding: var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--glass-fill); border: 1px solid var(--glass-border);
+  -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px);
+}
+.tabbar .tab { display: flex; align-items: center; gap: var(--space-2);
+  padding: 10px var(--space-4); border-radius: var(--radius-pill);
+  font-size: var(--fs-label); font-weight: 600; color: var(--text-secondary); }
+.tabbar .tab.is-active { color: var(--text-on-accent); background: var(--accent-gradient); }
+.tab .ico { width: 18px; height: 18px; }
+
+.railnav { width: 84px; padding: var(--space-5) 0; display: flex; flex-direction: column;
+  align-items: center; gap: var(--space-5); border-radius: var(--radius-xl); }
+.railnav .item { width: 52px; height: 52px; display: grid; place-items: center;
+  border-radius: var(--radius-md); color: var(--text-secondary); }
+.railnav .item.is-active { color: var(--text-on-accent); background: var(--accent-gradient); box-shadow: 0 8px 22px var(--accent-glow); }
+
+/* ── Text field ──────────────────────────────────────────────────────── */
+.field { display: flex; flex-direction: column; gap: var(--space-2); }
+.field label { font-size: var(--fs-label); color: var(--text-secondary); font-weight: 600; }
+.field .input {
+  height: 52px; padding: 0 var(--space-4); display: flex; align-items: center; gap: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--glass-fill); border: 1px solid var(--glass-border);
+  color: var(--text-primary); font-size: var(--fs-body);
+}
+.field .input.is-focused { border-color: transparent;
+  box-shadow: 0 0 0 2px var(--accent-solid), 0 8px 26px var(--accent-glow); }
+.field .input .ph { color: var(--text-dimmed); }
+
+/* ── EPG timeline ────────────────────────────────────────────────────── */
+.epg { display: flex; flex-direction: column; gap: var(--space-2); }
+.epg .slot { display: flex; gap: var(--space-3); align-items: center; padding: var(--space-3);
+  border-radius: var(--radius-md); background: var(--glass-fill); border: 1px solid transparent; }
+.epg .slot.now { border-color: var(--glass-border-strong); background: var(--glass-fill-strong); }
+.epg .slot .time { font-size: var(--fs-label); font-weight: 700; color: var(--text-secondary); width: 54px; }
+.epg .slot .bar { flex: 1; height: 6px; border-radius: var(--radius-pill); background: rgba(255,255,255,0.10); overflow: hidden; }
+.epg .slot .bar > i { display: block; height: 100%; background: var(--accent-gradient); }
+.epg .live-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.08em; color: var(--live); }
+
+/* ── Player controls ─────────────────────────────────────────────────── */
+.player { position: relative; border-radius: var(--radius-xl); overflow: hidden; min-height: 340px;
+  display: flex; flex-direction: column; justify-content: flex-end; }
+.player img.bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.player .veil { position: absolute; inset: 0; background: linear-gradient(0deg, rgba(5,5,7,0.85), rgba(5,5,7,0.15) 55%, rgba(5,5,7,0.5)); }
+.player .bar { position: relative; padding: var(--space-5); display: flex; flex-direction: column; gap: var(--space-4); }
+.player .scrub { height: 6px; border-radius: var(--radius-pill); background: rgba(255,255,255,0.18); position: relative; }
+.player .scrub > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: var(--radius-pill); background: var(--accent-gradient); }
+.player .scrub .knob { position: absolute; top: 50%; width: 16px; height: 16px; border-radius: 50%;
+  transform: translate(-50%, -50%); background: #fff; box-shadow: 0 0 0 4px var(--accent-glow); }
+.player .controls { display: flex; align-items: center; gap: var(--space-4); }
+.player .controls .spacer { flex: 1; }
+.player .play-lg { width: 62px; height: 62px; border-radius: 50%; background: var(--accent-gradient);
+  display: grid; place-items: center; color: var(--text-on-accent); box-shadow: 0 10px 30px var(--accent-glow); }
+
+/* ── Avatar (profiles) ───────────────────────────────────────────────── */
+.avatar { width: 116px; height: 116px; border-radius: var(--radius-xl); display: grid; place-items: center;
+  font-size: 40px; font-weight: 700; color: var(--text-on-accent); }
+.avatar.is-focused { box-shadow: var(--shadow-focus); transform: scale(1.06); }
+.g-violet { background: linear-gradient(135deg, #8B5CF6, #6D8BFF); }
+.g-cyan   { background: linear-gradient(135deg, #22D3EE, #34D399); }
+.g-pink   { background: linear-gradient(135deg, #F472B6, #8B5CF6); }
+.g-amber  { background: linear-gradient(135deg, #FBBF24, #FB7185); }
+
+/* ── Layout utilities used in mockups ────────────────────────────────── */
+.stack { display: flex; flex-direction: column; }
+.rowflex { display: flex; align-items: center; }
+.spacer { flex: 1; }
+.gap-2 { gap: var(--space-2); } .gap-3 { gap: var(--space-3); } .gap-4 { gap: var(--space-4); } .gap-5 { gap: var(--space-5); }
+.wrap { flex-wrap: wrap; }
+.phone { width: 380px; border-radius: 34px; overflow: hidden; border: 1px solid var(--glass-border);
+  background: var(--bg-base); box-shadow: var(--shadow-sheet); }
+.tv { width: 900px; border-radius: 18px; overflow: hidden; border: 1px solid var(--glass-border);
+  background: var(--bg-base); box-shadow: var(--shadow-sheet); }
+.pad { padding: var(--space-5); }
+.swatch { height: 74px; border-radius: var(--radius-md); border: 1px solid var(--glass-border); display: flex;
+  align-items: flex-end; padding: var(--space-2); font-size: 11px; font-weight: 600; }
+html,body{height:100%}
+.p{background:linear-gradient(160deg,#3a2b74,#1c2a63)}
+.p2{background:linear-gradient(160deg,#5a2b57,#241a55)}
+.p3{background:linear-gradient(160deg,#1f5266,#123a5e)}
+.p4{background:linear-gradient(160deg,#6b2f3f,#2a1b45)}
+.p5{background:linear-gradient(160deg,#2b5a4a,#153a4e)}
+.p6{background:linear-gradient(160deg,#4a3b74,#5a2b57)}
+.ph-bg{background:linear-gradient(120deg,#241a55 0%,#3a2b74 40%,#1f5266 100%)}
+</style></head>
+<body>
+<div class="stage">
+  <div class="hero" style="width:840px">
+    <img class="bg ph-bg" style="border:0"/>
+    <div class="ph-bg" style="position:absolute;inset:0"></div>
+    <div class="scrim"></div>
+    <div class="content">
+      <div class="eyebrow">Film · En vedette</div>
+      <div class="t-display" style="margin-top:6px">Interstellar</div>
+      <div class="tags">
+        <span class="chip">Sci-Fi</span><span class="chip">2014</span><span class="chip">2h49</span>
+      </div>
+      <p class="t-body" style="max-width:80%">Une équipe d’explorateurs franchit un trou de ver pour tenter d’assurer la survie de l’humanité au-delà de notre galaxie.</p>
+      <div class="actions">
+        <button class="btn btn-primary">▸ Lecture</button>
+        <button class="btn btn-ghost">ⓘ Détails</button>
+        <button class="btn-icon">＋</button>
+      </div>
+    </div>
+  </div>
+</div></body></html>

@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    AndroidManifest — dual form-factor configuration (phone + Android TV).
+
+    Key design points:
+      - android.software.leanback required=false  → app installs on phones too
+      - android.hardware.touchscreen required=false → app installs on Android TV
+      - MainActivity declares both LAUNCHER and LEANBACK_LAUNCHER intent-filters
+        so it appears on the phone home screen AND the Android TV home screen.
+
+    Theme, Compose content, and Hilt Application are wired in Tasks 3 and 4.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- ── Permissions ────────────────────────────────────────────────────── -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- ── Form-factor feature declarations ──────────────────────────────── -->
+    <!--
+        required="false" on leanback: the app is not TV-only, so it can be
+        distributed and installed on phones and tablets through the Play Store.
+    -->
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false" />
+
+    <!--
+        required="false" on touchscreen: Android TV devices do not have a
+        touchscreen; omitting this would block Play Store distribution on TV.
+    -->
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+
+    <!--
+        ── Application ───────────────────────────────────────────────────────
+
+        android:usesCleartextTraffic="true" (ADR-005, Task 14):
+          Most Xtream Codes IPTV servers are reachable over plain http:// only
+          (no TLS). Without this flag, Android 9+ (API 28+) blocks all
+          cleartext network traffic by default, which would make the
+          onboarding authentication call — and every subsequent catalog /
+          stream request — fail against the large majority of real-world
+          Xtream servers. See ADR-005 in the Second Brain vault for the full
+          rationale and accepted mitigations.
+
+        android:allowBackup="false" (ADR-005 / ADR-003, Task 14):
+          DataStoreCredentialsProvider (Task 9) persists the Xtream password
+          in plaintext (see ADR-003). Without this flag, Android's default
+          Auto Backup would include that DataStore file in cloud backups tied
+          to the user's Google account, exposing the plaintext password
+          outside the device. Disabling backup keeps credentials confined to
+          the device's private app data directory.
+    -->
+    <application
+        android:name=".IptvApplication"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:banner="@drawable/ic_tv_banner"
+        android:supportsRtl="true"
+        android:hardwareAccelerated="true"
+        android:usesCleartextTraffic="true"
+        android:allowBackup="false"
+        android:theme="@style/Theme.IptvApp">
+
+        <!--
+            MainActivity — placeholder for dual phone + TV entry point.
+            Real Compose content is implemented in Task 3 (theme + scaffold).
+            Hilt @AndroidEntryPoint annotation is added in Task 4 (DI setup).
+
+            TWO intent-filters are required:
+              1. LAUNCHER      → appears on phone / tablet home screen
+              2. LEANBACK_LAUNCHER → appears on Android TV home screen
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+
+            <!-- Phone / tablet launcher -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Android TV launcher -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+
+        </activity>
+
+    </application>
+
+</manifest>

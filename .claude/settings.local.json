@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gradle -v)",
+      "Bash(where gradle *)",
+      "Bash(where java *)",
+      "Bash(curl -s -m 5 -o /dev/null -w \"%{http_code}\\\\n\" \"https://dl.google.com/dl/android/maven2/androidx/media3/media3-exoplayer-ffmpeg/1.4.1/media3-exoplayer-ffmpeg-1.4.1.pom\")",
+      "Bash(curl -s -m 5 -o /dev/null -w \"mavenCentral: %{http_code}\\\\n\" \"https://repo1.maven.org/maven2/androidx/media3/media3-exoplayer-ffmpeg/1.4.1/media3-exoplayer-ffmpeg-1.4.1.pom\")",
+      "Bash(curl -s -m 5 -o /dev/null -w \"google other versions check 1.4.0: %{http_code}\\\\n\" \"https://dl.google.com/dl/android/maven2/androidx/media3/media3-exoplayer-ffmpeg/1.4.0/media3-exoplayer-ffmpeg-1.4.0.pom\")",
+      "Bash(curl -s -m 5 \"https://dl.google.com/dl/android/maven2/androidx/media3/group-index.xml\")",
+      "Bash(obsidian path *)",
+      "PowerShell(Out-Null *)",
+      "Bash(adb devices *)",
+      "Bash(git --version)",
+      "Bash(git config *)",
+      "Bash(apt-cache policy *)",
+      "Bash(sudo -n true)",
+      "Bash(echo \"sudo_check_exit=$?\")"
+    ]
+  }
+}

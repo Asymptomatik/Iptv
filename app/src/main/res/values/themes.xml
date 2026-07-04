@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    XML window / decor theme that the OS uses before Compose draws its first frame.
+
+    This is intentionally minimal: the real design system lives in the Compose
+    IptvAppTheme / IptvAppTvTheme wrappers defined in Theme.kt. This XML stub
+    exists solely to:
+      1. Avoid a white or default-coloured flash on cold launch.
+      2. Switch status / navigation bar appearance to dark before Compose takes over.
+
+    Full edge-to-edge inset handling (WindowCompat.setDecorFitsSystemWindows,
+    enableEdgeToEdge) is wired in Task 4 where the Activity gets Hilt support.
+-->
+<resources>
+    <style name="Theme.IptvApp" parent="android:Theme.Material.NoActionBar">
+        <!-- Prevent white flash on cold launch — matches BackgroundBlack (#000000). -->
+        <item name="android:windowBackground">@android:color/black</item>
+        <!-- Dark window chrome — matches BackgroundPrimary (#141414 ≈ black). -->
+        <item name="android:statusBarColor">@android:color/black</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+        <!--
+            API 23+: disable light (dark-icon) status bar so icons are white,
+            matching the dark-only theme. minSdk is 24 so this always applies.
+        -->
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

@@ -1,0 +1,27 @@
+package com.bobot.iptvapp.data.local.entity
+
+import androidx.room.Entity
+import androidx.room.PrimaryKey
+
+/**
+ * Room entity caching an Xtream Codes live broadcast channel.
+ *
+ * Corresponds to domain model [com.bobot.iptvapp.domain.model.Channel].
+ * Entity-to-domain mapping is handled in Task 11 local repositories.
+ *
+ * [categoryId] is a logical foreign key to [CategoryEntity.id] (no DB-level constraint;
+ * referential integrity is managed at the repository layer).
+ *
+ * ## Migration policy
+ * Catalog cache — destructive fallback is acceptable. The next app launch
+ * re-fetches and rebuilds the cache from the Xtream Codes API.
+ */
+@Entity(tableName = "channels")
+data class ChannelEntity(
+    @PrimaryKey val id: String,
+    val name: String,
+    val logoUrl: String?,
+    /** Logical FK to [CategoryEntity.id]. */
+    val categoryId: String,
+    val epgChannelId: String?,
+)

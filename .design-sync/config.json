@@ -1,0 +1,6 @@
+{
+  "projectId": "4c9f6d74-f1f4-467a-865c-7fb21bbb9618",
+  "projectName": "IptvApp Design System",
+  "shape": "hand-authored",
+  "note": "Compose/Kotlin app — no JS design-system to convert. Bundle is hand-authored HTML/CSS mockups of the 'Cinematic Glass' direction (violet->cyan gradient accent), pushed as preview cards for visual validation, then transposed to Compose."
+}
