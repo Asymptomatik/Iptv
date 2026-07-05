@@ -17,21 +17,25 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -110,6 +114,8 @@ fun HomeScreen(
         onNavigateToSearch = onNavigateToSearch,
         onNavigateToSettings = onNavigateToSettings,
         onRetry = viewModel::onRetry,
+        onCatalogTabSelected = viewModel::onCatalogTabSelected,
+        onLanguageSelected = viewModel::onLanguageSelected,
         modifier = modifier,
     )
 }
@@ -121,9 +127,89 @@ private fun ContentType.toDetailContentType(): String = when (this) {
     ContentType.SERIES -> "series"
 }
 
+// --- Home tabs (Task 1) ---
+
+/**
+ * Local, UI-only home catalog tab — never touches [HomeViewModel] or [HomeUiState].
+ * Ordinal order defines both the [TabRow] display order and the initial selection ([HOME]).
+ *
+ *  - [HOME]   — hero + "Reprendre" (continue watching) + "Ma liste" (favorites), the
+ *               pre-existing Home behavior.
+ *  - [LIVE]   — only [HomeUiState.liveRows].
+ *  - [MOVIES] — only [HomeUiState.movieRows].
+ *  - [SERIES] — only [HomeUiState.seriesRows].
+ */
+private enum class HomeTab(val label: String) {
+    HOME("Accueil"),
+    LIVE("Chaines"),
+    MOVIES("Films"),
+    SERIES("Series"),
+}
+
+/**
+ * Maps a catalog [HomeTab] to the [ContentType] whose on-demand loading it triggers via
+ * [HomeViewModel.onCatalogTabSelected] (see [HomeContent]'s `LaunchedEffect(selectedTab)`), or
+ * `null` for [HomeTab.HOME] — the Home tab's rows (Reprendre/Ma liste) are not gated behind any
+ * catalog tab selection (see [HomeViewModel] KDoc "On-demand catalog loading").
+ */
+private fun HomeTab.toContentTypeOrNull(): ContentType? = when (this) {
+    HomeTab.HOME -> null
+    HomeTab.LIVE -> ContentType.LIVE
+    HomeTab.MOVIES -> ContentType.MOVIE
+    HomeTab.SERIES -> ContentType.SERIES
+}
+
+/** The rows rendered as horizontal category rows for [tab] (excludes the hero — see [heroItemFor]). */
+private fun HomeUiState.rowsFor(tab: HomeTab): List<HomeRow> = when (tab) {
+    HomeTab.HOME -> continueWatchingRows + myListRows
+    HomeTab.LIVE -> liveRows
+    HomeTab.MOVIES -> movieRows
+    HomeTab.SERIES -> seriesRows
+}
+
+/**
+ * Hero banner item for [tab] — only the [HomeTab.HOME] tab ever shows a hero, matching the
+ * pre-existing behavior (a movie, then series, then live highlight, in that priority order).
+ */
+private fun HomeUiState.heroItemFor(tab: HomeTab): HomeCardItem? =
+    if (tab != HomeTab.HOME) {
+        null
+    } else {
+        movieRows.firstOrNull()?.items?.firstOrNull()
+            ?: seriesRows.firstOrNull()?.items?.firstOrNull()
+            ?: liveRows.firstOrNull()?.items?.firstOrNull()
+    }
+
+/** First card of [tab]'s own rows — used as the D-pad initial-focus fallback when [tab] has no hero. */
+private fun HomeUiState.firstRowItemFor(tab: HomeTab): HomeCardItem? = when (tab) {
+    HomeTab.HOME -> continueWatchingRows.firstOrNull()?.items?.firstOrNull()
+        ?: myListRows.firstOrNull()?.items?.firstOrNull()
+    else -> rowsFor(tab).firstOrNull()?.items?.firstOrNull()
+}
+
+/** `true` once [tab] has a hero or at least one row — drives per-tab loading/error/empty selection. */
+private fun HomeUiState.hasContentFor(tab: HomeTab): Boolean =
+    heroItemFor(tab) != null || rowsFor(tab).isNotEmpty()
+
 /**
  * Stateless content — separated from [HomeScreen] so it can be exercised directly in
  * @Preview without a Hilt ViewModel.
+ *
+ * ## Task 1 — home tabs
+ * Restructured around a local [HomeTab] selection: the loading/error/empty vs. rows-content
+ * choice below is now evaluated against the *active tab's* content ([HomeUiState.hasContentFor])
+ * rather than the whole [HomeUiState] ([HomeUiState.hasAnyRows] is no longer used here). The
+ * [HomeHeader] (title row + [TabRow]) is always floated above whichever state is showing so the
+ * user can switch away from a still-loading or empty tab into one that already has content —
+ * sections load independently (see [HomeViewModel] "On-demand catalog loading").
+ *
+ * ## On-demand catalog loading (OOM fix)
+ * A `LaunchedEffect(selectedTab)` below calls [onCatalogTabSelected] with the [ContentType]
+ * mapped from [selectedTab] (see [toContentTypeOrNull]) every time the user switches tabs,
+ * ignored for [HomeTab.HOME] (`null` mapping — Home's rows are not gated behind a catalog tab
+ * selection, see [HomeViewModel] KDoc). [HomeViewModel.onCatalogTabSelected] is itself idempotent
+ * per content type, so re-selecting an already-loaded tab (including recomposition re-running this
+ * effect) is a no-op.
  */
 @Composable
 private fun HomeContent(
@@ -134,35 +220,92 @@ private fun HomeContent(
     onNavigateToSettings: () -> Unit,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
+    onCatalogTabSelected: (ContentType) -> Unit = {},
+    onLanguageSelected: (ContentType, String?) -> Unit = { _, _ -> },
 ) {
+    var selectedTab by remember { mutableStateOf(HomeTab.HOME) }
+    val hasTabContent = uiState.hasContentFor(selectedTab)
+
+    LaunchedEffect(selectedTab) {
+        selectedTab.toContentTypeOrNull()?.let(onCatalogTabSelected)
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(BackgroundBase),
     ) {
         when {
-            uiState.isLoading && !uiState.hasAnyRows -> HomeLoadingState()
+            uiState.isLoading && !hasTabContent -> HomeLoadingState()
 
-            uiState.errorMessage != null && !uiState.hasAnyRows -> HomeErrorState(
+            uiState.errorMessage != null && !hasTabContent -> HomeErrorState(
                 message = uiState.errorMessage,
                 onRetry = onRetry,
             )
 
-            !uiState.hasAnyRows -> HomeEmptyState()
+            !hasTabContent -> HomeEmptyState()
 
             else -> HomeRowsContent(
                 uiState = uiState,
+                selectedTab = selectedTab,
                 onCardClick = onCardClick,
                 onNavigateToDetail = onNavigateToDetail,
                 onRetry = onRetry,
                 onNavigateToSearch = onNavigateToSearch,
                 onNavigateToSettings = onNavigateToSettings,
+                onTabSelected = { selectedTab = it },
+                onLanguageSelected = onLanguageSelected,
+            )
+        }
+
+        // HomeRowsContent renders its own scroll-reactive header (shares the hero's collapse
+        // fraction). The full-screen states above have no scrolling content of their own, so
+        // float a solid (non-collapsing) header above them here instead.
+        if (!hasTabContent) {
+            HomeHeader(
+                selectedTab = selectedTab,
+                onTabSelected = { selectedTab = it },
+                onNavigateToSearch = onNavigateToSearch,
+                onNavigateToSettings = onNavigateToSettings,
+                collapseFraction = 1f,
             )
         }
     }
 }
 
-// --- Top bar ---
+// --- Top bar + tabs (Task 1) ---
+
+/**
+ * Floating header combining [HomeTopBar] (title + search/settings actions) and [HomeTabBar]
+ * (Accueil / Chaines / Films / Series). Always rendered above the active body — see
+ * [HomeContent] and [HomeRowsContent] — so the user can switch tabs regardless of whether the
+ * active tab is loading, empty, errored, or showing rows.
+ */
+@Composable
+private fun HomeHeader(
+    selectedTab: HomeTab,
+    onTabSelected: (HomeTab) -> Unit,
+    onNavigateToSearch: () -> Unit,
+    onNavigateToSettings: () -> Unit,
+    collapseFraction: Float,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        HomeTopBar(
+            onNavigateToSearch = onNavigateToSearch,
+            onNavigateToSettings = onNavigateToSettings,
+            collapseFraction = collapseFraction,
+        )
+        HomeTabBar(
+            selectedTab = selectedTab,
+            onTabSelected = onTabSelected,
+            // The top bar's scrim already fades toward transparent near its bottom edge
+            // (see topBarScrim below) so tab labels can lose contrast against a bright hero
+            // frame at collapseFraction 0. Floor the tab bar's own background at 75% opacity
+            // so the tabs stay legible and tappable at every scroll position.
+            containerColor = BackgroundBase.copy(alpha = maxOf(0.75f, collapseFraction)),
+        )
+    }
+}
 
 @Composable
 private fun HomeTopBar(
@@ -203,6 +346,40 @@ private fun HomeTopBar(
         Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
             FocusableTextButton(label = "Recherche", onClick = onNavigateToSearch)
             FocusableTextButton(label = "Reglages", onClick = onNavigateToSettings)
+        }
+    }
+}
+
+/**
+ * Home catalog tab bar — Accueil / Chaines / Films / Series (Task 1). Local UI-only
+ * selection: never reads from or writes to [HomeViewModel] / [HomeUiState].
+ */
+@Composable
+private fun HomeTabBar(
+    selectedTab: HomeTab,
+    onTabSelected: (HomeTab) -> Unit,
+    modifier: Modifier = Modifier,
+    containerColor: Color = BackgroundBase,
+) {
+    TabRow(
+        selectedTabIndex = selectedTab.ordinal,
+        modifier = modifier.fillMaxWidth(),
+        containerColor = containerColor,
+        contentColor = AccentSolid,
+    ) {
+        HomeTab.entries.forEach { tab ->
+            Tab(
+                selected = selectedTab == tab,
+                onClick = { onTabSelected(tab) },
+                text = {
+                    Text(
+                        text = tab.label,
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                },
+                selectedContentColor = AccentSolid,
+                unselectedContentColor = TextSecondary,
+            )
         }
     }
 }
@@ -277,39 +454,46 @@ private fun HomeEmptyState() {
 // --- Content (hero + rows) ---
 
 /**
- * Renders the optional hero banner ([HomeHero]) followed by the category rows, inside a
- * single [LazyColumn]. The top-bar floats as an overlay above the hero so the hero image
- * extends edge-to-edge behind it.
+ * Renders the optional hero banner ([HomeHero]) followed by the [selectedTab]'s category rows,
+ * inside a single [LazyColumn]. The header ([HomeHeader]: title row + [HomeTabBar]) floats as
+ * an overlay above the hero so the hero image extends edge-to-edge behind it.
+ *
+ * ## Task 1 — home tabs
+ * Only [selectedTab]'s sections are added to the [LazyColumn] (see [HomeUiState.rowsFor] /
+ * [HomeUiState.heroItemFor]):
+ *  - [HomeTab.HOME]: hero + "Reprendre" + "Ma liste" — unchanged pre-existing behavior.
+ *  - [HomeTab.LIVE] / [HomeTab.MOVIES] / [HomeTab.SERIES]: only that tab's own rows, no hero.
+ *
+ * The [LazyListState] and initial D-pad [FocusRequester] are both re-created per [selectedTab]
+ * (keyed on it) so switching tabs starts each tab's list at the top and re-targets the initial
+ * focus at that tab's own hero/first card instead of a global, Home-tab-only target.
  */
 @Composable
 private fun HomeRowsContent(
     uiState: HomeUiState,
+    selectedTab: HomeTab,
     onCardClick: (HomeCardItem) -> Unit,
     onNavigateToDetail: (contentType: String, contentId: String) -> Unit,
     onRetry: () -> Unit,
     onNavigateToSearch: () -> Unit,
     onNavigateToSettings: () -> Unit,
+    onTabSelected: (HomeTab) -> Unit,
+    onLanguageSelected: (ContentType, String?) -> Unit,
 ) {
     val isTv = rememberIsTvDevice()
     val horizontalPadding = if (isTv) LayoutDimens.ContentPaddingTv else LayoutDimens.ContentPaddingPhone
     val cardWidth = if (isTv) CardDimens.PosterWidthTv else CardDimens.PosterWidthPhone
 
-    val heroItem = uiState.movieRows.firstOrNull()?.items?.firstOrNull()
-        ?: uiState.seriesRows.firstOrNull()?.items?.firstOrNull()
-        ?: uiState.liveRows.firstOrNull()?.items?.firstOrNull()
+    val heroItem = uiState.heroItemFor(selectedTab)
+    val firstRowItem = uiState.firstRowItemFor(selectedTab)
 
-    val firstRowItem = uiState.continueWatchingRows.firstOrNull()?.items?.firstOrNull()
-        ?: uiState.myListRows.firstOrNull()?.items?.firstOrNull()
-        ?: uiState.liveRows.firstOrNull()?.items?.firstOrNull()
-        ?: uiState.movieRows.firstOrNull()?.items?.firstOrNull()
-        ?: uiState.seriesRows.firstOrNull()?.items?.firstOrNull()
-
-    val initialFocusRequester = remember { FocusRequester() }
+    val initialFocusRequester = remember(selectedTab) { FocusRequester() }
     val rowsFocusTarget: HomeCardItem? = if (heroItem == null) firstRowItem else null
 
-    // Scroll-driven top-bar background: transparent scrim while the first item (hero)
-    // is at the top, fading to a fully solid bar once the user scrolls past it.
-    val listState = rememberLazyListState()
+    // Scroll-driven header background: transparent scrim while the first item (hero, when
+    // present) is at the top, fading to a fully solid bar once the user scrolls past it.
+    // Re-created per selectedTab so each tab starts fresh at the top of its own list.
+    val listState = remember(selectedTab) { LazyListState() }
     val density = LocalDensity.current
     val collapseThresholdPx = remember(density) { with(density) { 200.dp.toPx() } }
     val topBarCollapseFraction by remember {
@@ -323,6 +507,7 @@ private fun HomeRowsContent(
     }
 
     LaunchedEffect(
+        selectedTab,
         uiState.continueWatchingRows,
         uiState.myListRows,
         uiState.liveRows,
@@ -353,12 +538,12 @@ private fun HomeRowsContent(
                     )
                 }
             } else {
-                // Reserve space for the top bar when there is no hero
+                // Reserve space for the floating header (title row + tab bar) when there is no hero
                 item(key = "topbar-spacer") {
                     Spacer(
                         modifier = Modifier
                             .statusBarsPadding()
-                            .height(Spacing.xxl),
+                            .height(LayoutDimens.TopBarHeight + LayoutDimens.TabRowHeight),
                     )
                 }
             }
@@ -373,61 +558,94 @@ private fun HomeRowsContent(
                 }
             }
 
-            homeSection(
-                sectionTitle = "Reprendre",
-                rows = uiState.continueWatchingRows,
-                horizontalPadding = horizontalPadding,
-                cardWidth = cardWidth,
-                onCardClick = onCardClick,
-                initialFocusItem = rowsFocusTarget,
-                initialFocusRequester = initialFocusRequester,
-                isContinueWatching = true,
-            )
+            when (selectedTab) {
+                HomeTab.HOME -> {
+                    homeSection(
+                        sectionTitle = "Reprendre",
+                        rows = uiState.continueWatchingRows,
+                        horizontalPadding = horizontalPadding,
+                        cardWidth = cardWidth,
+                        onCardClick = onCardClick,
+                        initialFocusItem = rowsFocusTarget,
+                        initialFocusRequester = initialFocusRequester,
+                        isContinueWatching = true,
+                    )
 
-            homeSection(
-                sectionTitle = "Ma liste",
-                rows = uiState.myListRows,
-                horizontalPadding = horizontalPadding,
-                cardWidth = cardWidth,
-                onCardClick = onCardClick,
-                initialFocusItem = rowsFocusTarget,
-                initialFocusRequester = initialFocusRequester,
-            )
+                    homeSection(
+                        sectionTitle = "Ma liste",
+                        rows = uiState.myListRows,
+                        horizontalPadding = horizontalPadding,
+                        cardWidth = cardWidth,
+                        onCardClick = onCardClick,
+                        initialFocusItem = rowsFocusTarget,
+                        initialFocusRequester = initialFocusRequester,
+                    )
+                }
 
-            homeSection(
-                sectionTitle = "En direct",
-                rows = uiState.liveRows,
-                horizontalPadding = horizontalPadding,
-                cardWidth = cardWidth,
-                onCardClick = onCardClick,
-                initialFocusItem = rowsFocusTarget,
-                initialFocusRequester = initialFocusRequester,
-                isLive = true,
-            )
+                HomeTab.LIVE -> {
+                    homeLanguageFilterRow(
+                        key = "language-filter-live",
+                        languages = uiState.liveLanguages,
+                        selected = uiState.selectedLiveLanguage,
+                        horizontalPadding = horizontalPadding,
+                        onLanguageSelected = { language -> onLanguageSelected(ContentType.LIVE, language) },
+                    )
+                    homeSection(
+                        sectionTitle = "En direct",
+                        rows = uiState.liveRows,
+                        horizontalPadding = horizontalPadding,
+                        cardWidth = cardWidth,
+                        onCardClick = onCardClick,
+                        initialFocusItem = rowsFocusTarget,
+                        initialFocusRequester = initialFocusRequester,
+                        isLive = true,
+                    )
+                }
 
-            homeSection(
-                sectionTitle = "Films",
-                rows = uiState.movieRows,
-                horizontalPadding = horizontalPadding,
-                cardWidth = cardWidth,
-                onCardClick = onCardClick,
-                initialFocusItem = rowsFocusTarget,
-                initialFocusRequester = initialFocusRequester,
-            )
+                HomeTab.MOVIES -> {
+                    homeLanguageFilterRow(
+                        key = "language-filter-movies",
+                        languages = uiState.movieLanguages,
+                        selected = uiState.selectedMovieLanguage,
+                        horizontalPadding = horizontalPadding,
+                        onLanguageSelected = { language -> onLanguageSelected(ContentType.MOVIE, language) },
+                    )
+                    homeSection(
+                        sectionTitle = "Films",
+                        rows = uiState.movieRows,
+                        horizontalPadding = horizontalPadding,
+                        cardWidth = cardWidth,
+                        onCardClick = onCardClick,
+                        initialFocusItem = rowsFocusTarget,
+                        initialFocusRequester = initialFocusRequester,
+                    )
+                }
 
-            homeSection(
-                sectionTitle = "Series",
-                rows = uiState.seriesRows,
-                horizontalPadding = horizontalPadding,
-                cardWidth = cardWidth,
-                onCardClick = onCardClick,
-                initialFocusItem = rowsFocusTarget,
-                initialFocusRequester = initialFocusRequester,
-            )
+                HomeTab.SERIES -> {
+                    homeLanguageFilterRow(
+                        key = "language-filter-series",
+                        languages = uiState.seriesLanguages,
+                        selected = uiState.selectedSeriesLanguage,
+                        horizontalPadding = horizontalPadding,
+                        onLanguageSelected = { language -> onLanguageSelected(ContentType.SERIES, language) },
+                    )
+                    homeSection(
+                        sectionTitle = "Series",
+                        rows = uiState.seriesRows,
+                        horizontalPadding = horizontalPadding,
+                        cardWidth = cardWidth,
+                        onCardClick = onCardClick,
+                        initialFocusItem = rowsFocusTarget,
+                        initialFocusRequester = initialFocusRequester,
+                    )
+                }
+            }
         }
 
-        // Top bar floats above the LazyColumn so the hero image extends full-bleed underneath
-        HomeTopBar(
+        // Header floats above the LazyColumn so the hero image extends full-bleed underneath
+        HomeHeader(
+            selectedTab = selectedTab,
+            onTabSelected = onTabSelected,
             onNavigateToSearch = onNavigateToSearch,
             onNavigateToSettings = onNavigateToSettings,
             collapseFraction = topBarCollapseFraction,
@@ -507,6 +725,58 @@ private fun LazyListScope.homeSection(
             isContinueWatching = isContinueWatching,
             isLive = isLive,
         )
+    }
+}
+
+/**
+ * Adds one language filter chip row to the enclosing [LazyColumn], for a Chaines/Films/Series
+ * tab only (Task 3 — never rendered for [HomeTab.HOME], which has no language concept). One
+ * "Toutes" [CategoryChip] (clears the filter, `selected = selected == null`) plus one chip per
+ * entry in [languages] (the tab's distinct detected language tags — see
+ * [com.bobot.iptvapp.domain.util.CategoryLanguage] via [HomeUiState.liveLanguages]/
+ * [HomeUiState.movieLanguages]/[HomeUiState.seriesLanguages]).
+ *
+ * No-ops when [languages] is empty — mirrors [homeSection]'s early return: a lone "Toutes" chip
+ * with nothing else to filter by would add visual noise with no value, so the whole row is
+ * skipped until at least one language tag has been detected for that tab.
+ *
+ * Selecting a chip only calls [onLanguageSelected] with the chip's language (or `null` for
+ * "Toutes") — the actual filtering already happened upstream, in [HomeViewModel], before
+ * [HomeUiState.liveRows]/[HomeUiState.movieRows]/[HomeUiState.seriesRows] reached this screen
+ * (see [HomeViewModel] KDoc "Per-tab language filter"), so no client-side filtering happens here.
+ */
+private fun LazyListScope.homeLanguageFilterRow(
+    key: String,
+    languages: List<String>,
+    selected: String?,
+    horizontalPadding: Dp,
+    onLanguageSelected: (String?) -> Unit,
+) {
+    if (languages.isEmpty()) return
+
+    item(key = key) {
+        LazyRow(
+            contentPadding = PaddingValues(
+                horizontal = horizontalPadding,
+                vertical = LayoutDimens.LazyRowFocusPadding,
+            ),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+        ) {
+            item(key = "$key-all") {
+                CategoryChip(
+                    label = "Toutes",
+                    selected = selected == null,
+                    onClick = { onLanguageSelected(null) },
+                )
+            }
+            items(languages, key = { language -> "$key-$language" }) { language ->
+                CategoryChip(
+                    label = language,
+                    selected = selected == language,
+                    onClick = { onLanguageSelected(language) },
+                )
+            }
+        }
     }
 }
 
@@ -668,8 +938,9 @@ private fun HomeHero(
         )
 
         // 4. Hero content — aligned to bottom-start, max 62% width per styles.css.
-        // Top inset reserves the status bar + floating top-bar zone so the hero
-        // title never overlaps the "Accueil / Recherche / Reglages" overlay.
+        // Top inset reserves the status bar + floating header zone (title row + tab bar,
+        // Task 1) so the hero title never overlaps the "Accueil / Recherche / Reglages" +
+        // tabs overlay.
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -678,7 +949,7 @@ private fun HomeHero(
                     start = Spacing.xxl,
                     end = Spacing.xxl,
                     bottom = Spacing.xxl,
-                    top = LayoutDimens.TopBarHeight,
+                    top = LayoutDimens.TopBarHeight + LayoutDimens.TabRowHeight,
                 ),
             contentAlignment = Alignment.BottomStart,
         ) {
@@ -824,6 +1095,12 @@ private fun HomeContentPreview() {
                 seriesRows = listOf(previewSeriesRow),
                 isLoading = false,
                 errorMessage = null,
+                liveLanguages = listOf("FR", "EN"),
+                movieLanguages = listOf("FR", "VOSTFR"),
+                seriesLanguages = listOf("FR", "EN"),
+                selectedLiveLanguage = null,
+                selectedMovieLanguage = "FR",
+                selectedSeriesLanguage = null,
             ),
             onCardClick = {},
             onNavigateToSearch = {},

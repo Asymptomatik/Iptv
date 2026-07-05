@@ -83,6 +83,7 @@ fun SearchScreen(
         onQueryChange = viewModel::onQueryChange,
         onResultClick = { item -> onNavigateToDetail(item.contentType.toDetailContentType(), item.id) },
         onRetry = viewModel::onRetry,
+        onLanguageSelected = viewModel::onLanguageSelected,
         modifier = modifier,
     )
 }
@@ -107,6 +108,7 @@ private fun SearchContent(
     onQueryChange: (String) -> Unit,
     onResultClick: (SearchResultItem) -> Unit,
     onRetry: () -> Unit,
+    onLanguageSelected: (String?) -> Unit = { },
     modifier: Modifier = Modifier,
 ) {
     val isTv = rememberIsTvDevice()
@@ -171,6 +173,13 @@ private fun SearchContent(
             }
         }
 
+        SearchLanguageFilterRow(
+            languages = uiState.availableLanguages,
+            selected = uiState.selectedLanguage,
+            horizontalPadding = horizontalPadding,
+            onLanguageSelected = onLanguageSelected,
+        )
+
         Box(modifier = Modifier.fillMaxSize()) {
             when {
                 uiState.query.isBlank() -> SearchEmptyQueryState()
@@ -192,6 +201,59 @@ private fun SearchContent(
 
                 else -> SearchNoResultsState(query = uiState.query)
             }
+        }
+    }
+}
+
+/**
+ * Single, global language filter chip row (Task 5) — one "Toutes" [CategoryChip] (clears the
+ * filter, `selected = selected == null`) plus one chip per entry in [languages].
+ *
+ * Unlike [com.bobot.iptvapp.ui.screen.home.HomeScreen]'s equivalent
+ * (`homeLanguageFilterRow`, Task 3), which is a `LazyListScope` extension added as an `item {}`
+ * inside a `LazyColumn` per Home tab, this is a plain `@Composable` because [SearchContent] places
+ * its chip rows directly in a [Column] (see the pre-existing content-type `CategoryChip` `LazyRow`
+ * above) rather than inside a `LazyColumn` — Search combines Live/Movies/Series into a single
+ * scrollable [SearchResultsContent], so there is only one language selector for all three types,
+ * not one per tab like Home.
+ *
+ * No-ops when [languages] is empty, mirroring `homeLanguageFilterRow`'s early return: a lone
+ * "Toutes" chip with nothing else to filter by would add visual noise with no value.
+ *
+ * Selecting a chip only calls [onLanguageSelected] with the chip's language (or `null` for
+ * "Toutes") — filtering of [SearchUiState.liveResults]/[SearchUiState.movieResults]/
+ * [SearchUiState.seriesResults] already happened upstream in [SearchViewModel] (see that class's
+ * KDoc "Global language filter"), so no client-side filtering happens here.
+ */
+@Composable
+private fun SearchLanguageFilterRow(
+    languages: List<String>,
+    selected: String?,
+    horizontalPadding: Dp,
+    onLanguageSelected: (String?) -> Unit,
+) {
+    if (languages.isEmpty()) return
+
+    LazyRow(
+        contentPadding = PaddingValues(
+            horizontal = horizontalPadding,
+            vertical = LayoutDimens.LazyRowFocusPadding,
+        ),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+    ) {
+        item(key = "search-language-all") {
+            CategoryChip(
+                label = "Toutes",
+                selected = selected == null,
+                onClick = { onLanguageSelected(null) },
+            )
+        }
+        items(languages, key = { language -> "search-language-$language" }) { language ->
+            CategoryChip(
+                label = language,
+                selected = selected == language,
+                onClick = { onLanguageSelected(language) },
+            )
         }
     }
 }

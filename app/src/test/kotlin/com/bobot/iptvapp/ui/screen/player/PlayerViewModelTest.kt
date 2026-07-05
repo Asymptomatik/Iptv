@@ -225,6 +225,90 @@ class PlayerViewModelTest {
         coVerify(exactly = 0) { playbackProgressRepository.upsertProgress(any()) }
     }
 
+    // ── stall detection (application-level watchdog on continuous STATE_BUFFERING) ──────────
+
+    @Test
+    fun `continuous buffering beyond the stall timeout sets hasError and clears isBuffering`() {
+        // Regression test for the real-world Xtream bug: a VOD stream that keeps delivering
+        // bytes too slowly to ever reach STATE_READY (so `onPlayerError` never fires) must not
+        // spin forever — after ~20s of continuous STATE_BUFFERING, the ViewModel should trip
+        // the same error overlay `onPlayerError` uses.
+        val listenerSlot = slot<Player.Listener>()
+        every { player.addListener(capture(listenerSlot)) } just Runs
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+
+        viewModel.initialize("http://example.com:8080/movie/u/p/42.mp4", "42")
+        testDispatcher.scheduler.runCurrent()
+
+        listenerSlot.captured.onPlaybackStateChanged(Player.STATE_BUFFERING)
+        testDispatcher.scheduler.advanceTimeBy(20_000L)
+        testDispatcher.scheduler.runCurrent()
+
+        assertTrue("hasError should be true after a stall beyond the timeout", viewModel.uiState.value.hasError)
+        assertFalse("isBuffering should be cleared once the stall is reported", viewModel.uiState.value.isBuffering)
+    }
+
+    @Test
+    fun `buffering that resolves to STATE_READY before the stall timeout does not trigger hasError`() {
+        val listenerSlot = slot<Player.Listener>()
+        every { player.addListener(capture(listenerSlot)) } just Runs
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+
+        viewModel.initialize("http://example.com:8080/movie/u/p/42.mp4", "42")
+        testDispatcher.scheduler.runCurrent()
+
+        listenerSlot.captured.onPlaybackStateChanged(Player.STATE_BUFFERING)
+        testDispatcher.scheduler.advanceTimeBy(5_000L)
+        testDispatcher.scheduler.runCurrent()
+        listenerSlot.captured.onPlaybackStateChanged(Player.STATE_READY)
+
+        // Advance well past the stall timeout — the watchdog should have been cancelled by the
+        // STATE_READY transition above, so no false positive should fire.
+        testDispatcher.scheduler.advanceTimeBy(20_000L)
+        testDispatcher.scheduler.runCurrent()
+
+        assertFalse("a brief/legitimate rebuffer must not trigger hasError", viewModel.uiState.value.hasError)
+    }
+
+    @Test
+    fun `retry re-arms the stall watchdog even when the player stays in STATE_BUFFERING without a new Media3 callback`() {
+        // Regression test for the Code Reviewer blocker on this feature: Media3 only invokes
+        // `onPlaybackStateChanged` when the *integer* playback state value actually changes. If
+        // the stream was already stuck in continuous STATE_BUFFERING when the first watchdog
+        // fired `hasError = true` (this exact scenario), a fresh `prepare()` after `retry()` can
+        // leave the player in STATE_BUFFERING with no detectable value change — so this test
+        // deliberately does NOT simulate a second `onPlaybackStateChanged(STATE_BUFFERING)` call
+        // after `retry()`, proving `retry()` itself must explicitly re-arm the watchdog rather
+        // than relying on a future Media3 callback that may never come.
+        //
+        // This test fails without the `startStallDetection()` call in `retry()` (hasError would
+        // stay false after the second timeout) and passes with it.
+        val listenerSlot = slot<Player.Listener>()
+        every { player.addListener(capture(listenerSlot)) } just Runs
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+
+        viewModel.initialize("http://example.com:8080/movie/u/p/42.mp4", "42")
+        testDispatcher.scheduler.runCurrent()
+
+        // First attempt stalls and trips the watchdog.
+        listenerSlot.captured.onPlaybackStateChanged(Player.STATE_BUFFERING)
+        testDispatcher.scheduler.advanceTimeBy(20_000L)
+        testDispatcher.scheduler.runCurrent()
+        assertTrue("first stall should trigger hasError", viewModel.uiState.value.hasError)
+
+        // User taps "Réessayer" — the stream stalls again in exactly the same STATE_BUFFERING
+        // value, so no new Media3 callback is simulated here on purpose.
+        viewModel.retry()
+        testDispatcher.scheduler.advanceTimeBy(20_000L)
+        testDispatcher.scheduler.runCurrent()
+
+        assertTrue(
+            "retry must re-arm the watchdog even without a fresh Media3 callback, so a repeat " +
+                "stall surfaces hasError again instead of spinning forever",
+            viewModel.uiState.value.hasError,
+        )
+    }
+
     // ── togglePlayPause ───────────────────────────────────────────────────────
 
     @Test

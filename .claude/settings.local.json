@@ -17,5 +17,8 @@
       "Bash(sudo -n true)",
       "Bash(echo \"sudo_check_exit=$?\")"
     ]
+  },
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787"
   }
 }

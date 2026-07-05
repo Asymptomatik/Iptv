@@ -16,17 +16,16 @@ import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.repository.FavoritesRepository
 import com.bobot.iptvapp.domain.repository.PlaybackProgressRepository
 import com.bobot.iptvapp.domain.util.Resource
+import com.bobot.iptvapp.domain.util.languageTag
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -74,9 +73,12 @@ data class HomeRow(
 )
 
 /**
- * Quintet-resource (ContinueWatching, MyList, Live, Movies, Series) produced by
- * [HomeViewModel.buildAllSectionsFlow]. Task 23: "Reprendre" (Continue Watching) is positioned
- * first, ahead of "Ma liste", per Netflix convention (see [HomeScreen] KDoc).
+ * Quintet-resource (ContinueWatching, MyList, Live, Movies, Series) combined in [HomeViewModel]'s
+ * `init` block from the two always-active personalization flows
+ * ([HomeViewModel.buildContinueWatchingFlow], [HomeViewModel.buildMyListFlow]) and the three
+ * on-demand catalog tab row states (see [HomeViewModel] KDoc "On-demand catalog loading"). Task
+ * 23: "Reprendre" (Continue Watching) is positioned first, ahead of "Ma liste", per Netflix
+ * convention (see [HomeScreen] KDoc).
  */
 private data class HomeSectionResources(
     val continueWatching: Resource<List<HomeRow>>,
@@ -91,35 +93,58 @@ private data class HomeSectionResources(
  *
  * @property continueWatchingRows A single row (0 or 1 item) built from
  *                            [PlaybackProgressRepository.observeContinueWatching] combined with the
- *                            movies catalog Flow (MOVIE entries) and [CatalogRepository]'s cache
- *                            resolution (SERIES entries), positioned first (ahead of "Ma liste") per
- *                            Netflix convention. See [HomeViewModel.buildContinueWatchingFlow] KDoc
- *                            for the MOVIE + SERIES resolution details (Task 23 / Task 24-25). Keeps
- *                            its last known value across an in-flight reload (see [HomeViewModel]
- *                            KDoc "Partial reloads").
+ *                            shared movies catalog state (MOVIE entries) and [CatalogRepository]'s
+ *                            cache resolution (SERIES entries), positioned first (ahead of "Ma
+ *                            liste") per Netflix convention. See [HomeViewModel.buildContinueWatchingFlow]
+ *                            KDoc for the MOVIE + SERIES resolution details (Task 23 / Task 24-25).
+ *                            Never blocked on a catalog tab having been opened — see [HomeViewModel]
+ *                            KDoc "On-demand catalog loading". Keeps its last known value across an
+ *                            in-flight reload (see [HomeViewModel] KDoc "Partial reloads").
  * @property myListRows    A single row (0 or 1 item) built from [FavoritesRepository.observeFavorites]
  *                            combined with the three shared, category-scoped content states (see
- *                            [HomeViewModel] KDoc "Category-scoped, on-demand loading (OOM fix)"),
- *                            positioned second per Netflix convention to highlight personalized
- *                            content. Keeps its last known value across an in-flight reload (see
- *                            [HomeViewModel] KDoc "Partial reloads").
+ *                            [HomeViewModel] KDoc "Sharing the category-scoped item state across
+ *                            consumers"), positioned second per Netflix convention to highlight
+ *                            personalized content. Never blocked on a catalog tab having been opened
+ *                            — see [HomeViewModel] KDoc "On-demand catalog loading". Keeps its last
+ *                            known value across an in-flight reload (see [HomeViewModel] KDoc
+ *                            "Partial reloads").
  * @property liveRows      Rows built from [CatalogRepository.observeLiveCategories] combined with
- *                            [CatalogRepository.getLiveChannels] fetched one category at a time (see
- *                            [HomeViewModel] KDoc "Category-scoped, on-demand loading (OOM fix)").
- *                            Keeps its last known value across an in-flight reload (see
- *                            [HomeViewModel] KDoc "Partial reloads").
+ *                            [CatalogRepository.getLiveChannels] fetched one category at a time —
+ *                            but only once [HomeViewModel.onCatalogTabSelected] has been called with
+ *                            [ContentType.LIVE] (see [HomeViewModel] KDoc "On-demand catalog
+ *                            loading"). Empty until then. Keeps its last known value across an
+ *                            in-flight reload (see [HomeViewModel] KDoc "Partial reloads").
  * @property movieRows     Rows built from [CatalogRepository.observeVodCategories] combined with
- *                            [CatalogRepository.getMovies] fetched one category at a time.
+ *                            [CatalogRepository.getMovies] fetched one category at a time, only once
+ *                            [HomeViewModel.onCatalogTabSelected] has been called with
+ *                            [ContentType.MOVIE]. Empty until then.
  * @property seriesRows    Rows built from [CatalogRepository.observeSeriesCategories] combined with
- *                            [CatalogRepository.getSeriesList] fetched one category at a time.
+ *                            [CatalogRepository.getSeriesList] fetched one category at a time, only
+ *                            once [HomeViewModel.onCatalogTabSelected] has been called with
+ *                            [ContentType.SERIES]. Empty until then.
  * @property isLoading     `true` while any of the five sections above is still in
- *                            [Resource.Loading]. Drives the full-screen spinner (loading state)
- *                            when nothing has ever loaded yet (see [HomeScreen]'s state-selection
- *                            logic).
+ *                            [Resource.Loading]. A catalog tab section that has never been
+ *                            requested via [HomeViewModel.onCatalogTabSelected] is
+ *                            [Resource.Success] with an empty list (not [Resource.Loading]) — see
+ *                            [HomeViewModel] KDoc "On-demand catalog loading" — so this flag never
+ *                            gets stuck `true` just because the user has not opened every tab yet.
+ *                            Drives the full-screen spinner (loading state) when nothing has ever
+ *                            loaded yet (see [HomeScreen]'s state-selection logic).
  * @property errorMessage  Human-readable message from the first section currently in
  *                            [Resource.Error], or `null` if none. Drives both the full-screen error
  *                            state (nothing loaded yet) and the non-blocking retry banner (partial
  *                            failure, other sections already showing content).
+ * @property liveLanguages  Distinct language tags ([com.bobot.iptvapp.domain.util.Category.languageTag])
+ *                            found among [liveRows]' underlying, currently loaded Chaines categories
+ *                            — derived dynamically as categories load progressively (see
+ *                            [HomeViewModel] KDoc "Per-tab language filter"). Never includes `null`.
+ * @property movieLanguages Films tab equivalent of [liveLanguages].
+ * @property seriesLanguages Series tab equivalent of [liveLanguages].
+ * @property selectedLiveLanguage The Chaines tab's currently active language filter — `null` means
+ *                            "Toutes" (no filter, every loaded category shown). Set via
+ *                            [HomeViewModel.onLanguageSelected].
+ * @property selectedMovieLanguage Films tab equivalent of [selectedLiveLanguage].
+ * @property selectedSeriesLanguage Series tab equivalent of [selectedLiveLanguage].
  */
 data class HomeUiState(
     val continueWatchingRows: List<HomeRow> = emptyList(),
@@ -129,6 +154,12 @@ data class HomeUiState(
     val seriesRows: List<HomeRow> = emptyList(),
     val isLoading: Boolean = true,
     val errorMessage: String? = null,
+    val liveLanguages: List<String> = emptyList(),
+    val movieLanguages: List<String> = emptyList(),
+    val seriesLanguages: List<String> = emptyList(),
+    val selectedLiveLanguage: String? = null,
+    val selectedMovieLanguage: String? = null,
+    val selectedSeriesLanguage: String? = null,
 ) {
     /** `true` once at least one row exists in any section — used to pick which visual state to render. */
     val hasAnyRows: Boolean
@@ -140,76 +171,81 @@ data class HomeUiState(
 }
 
 /**
- * Hilt ViewModel driving [HomeScreen] (Task 17 + Task 22 + Task 23) — follows the `@HiltViewModel` +
- * `@Inject constructor` convention established by
+ * Hilt ViewModel driving [HomeScreen] (Task 17 + Task 22 + Task 23 + on-demand loading OOM fix) —
+ * follows the `@HiltViewModel` + `@Inject constructor` convention established by
  * [com.bobot.iptvapp.ui.screen.profiles.ProfilesViewModel] (Task 16): only a
  * `domain.repository` / `data.preferences` / `data.source` collaborators are injected (never
  * concrete `data.remote` / `data.local` types), and a single `StateFlow<HomeUiState>` exposes
  * everything [HomeScreen] needs to render.
  *
- * ## Category-scoped, on-demand loading (OOM fix)
- * A production `OutOfMemoryError` was diagnosed (reproduced identically on both a physical device
- * and the emulator) in the previous design, which fired three *concurrent*, *unfiltered*
- * (`categoryId = null`, "fetch the entire catalog in one HTTP call") network requests via
- * `combine()` — each one fully buffered in memory by Retrofit/kotlinx.serialization/okio before
- * the first byte of grouping logic could run. [buildAllSectionsFlow] now replaces that pattern
- * with "fetch categories first (cheap, small), then fetch items **one category at a time** from
- * the server" via [loadCategoryScopedItems]:
- *  - Live channels, movies, and series are loaded **strictly sequentially, one content type after
- *    another** (Movies' per-category loop does not start until every Live category has been
- *    fetched; Series waits for Movies) — see the single `launch { ... }` block inside
- *    [buildAllSectionsFlow] where the three [loadCategoryScopedItems] calls are awaited in order,
- *    never combined/started concurrently.
- *  - Within one content type, categories are fetched **one at a time** (a plain `for` loop over
- *    suspend calls — no `async`/`combine` fan-out), so at most one category's raw+parsed payload
- *    is ever held in memory at once, across all three content types combined.
- *  - All categories are eventually loaded (not just the first N) — this was chosen over a
- *    "first N eagerly, rest on some trigger" split because it requires no new lazy-loading
- *    trigger/UI (out of scope per the brief: no new category-browse screen, no pagination UI) and
- *    is simpler to reason about/verify while still fully bounding peak memory to ~1 category.
- *  - Each content type's accumulated items are published progressively to a private
- *    [MutableStateFlow] (`channelsState` / `moviesState` / `seriesState`) after every category, so
- *    [buildRowsFlow] (unchanged internally) renders newly available rows as soon as they arrive
- *    instead of waiting for the entire content type to finish — the Home screen therefore now
- *    populates section-by-section (and row-by-row within a section) rather than all at once (see
- *    "Concerns / Trade-offs" in the delivery report for this being an accepted, documented UX
- *    change rather than a regression to fix here).
- *  - A single category's fetch failing is treated as "no items for that category" (the row is
- *    simply absent) rather than failing the whole section — one flaky category endpoint should
- *    not blank out rows already successfully built from other categories. Only a failure of the
- *    *categories* list itself (few, cheap requests) surfaces as a section-level [Resource.Error].
- *  - [CatalogRepository]'s `categoryId = null` methods are never called from this loading path
- *    anymore; its in-memory full-list caches (`cachedAllChannels`/`cachedAllMovies`/
- *    `cachedAllSeries`) simply go unused by Home now (other callers, e.g. Search, are a separate
- *    concern/fix).
+ * ## On-demand catalog loading (OOM fix)
+ * A production `OutOfMemoryError` was diagnosed on a real, large Xtream account: the *previous*
+ * design fetched Live channels, Movies, and Series **unconditionally, sequentially, from `init`**
+ * (category-by-category — see git history for the original per-category-fetch fix) regardless of
+ * which tab, if any, the user actually opened. On a big-enough catalog, the accumulated in-memory
+ * lists alone exceeded the available heap — notably, the crash reproduced while the user opened a
+ * movie from the Films tab, having never visited the (largest) Chaines tab, whose channels were
+ * nonetheless being fetched in the background.
+ *
+ * The fix: **no content type is fetched until [onCatalogTabSelected] is called for it.**
+ *  - [HomeScreen] calls [onCatalogTabSelected] from a `LaunchedEffect(selectedTab)` whenever the
+ *    user switches to the Chaines/Films/Series tab (never for Accueil — see [HomeScreen] KDoc).
+ *  - [onCatalogTabSelected] is **idempotent per [ContentType] for this ViewModel instance**: the
+ *    first call for a given type starts [loadCatalogTab]; every subsequent call for that same type
+ *    is a no-op, guarded by [requestedContentTypes] (a plain `MutableSet`, checked/inserted
+ *    synchronously via [MutableSet.add] before anything is launched — safe because both
+ *    [onCatalogTabSelected] and Compose's `LaunchedEffect` run on the main thread).
+ *  - [channelsState] / [moviesState] / [seriesState] (the shared, category-scoped item states) and
+ *    [liveRowsState] / [movieRowsState] / [seriesRowsState] (their grouped-by-category row
+ *    projections, exposed via [HomeUiState]) are each created **once**, at construction, and
+ *    default to `Resource.Success(emptyList())` — not `Resource.Loading` — so an unrequested
+ *    catalog tab reads as "nothing to show yet" rather than "stuck loading forever" in
+ *    [HomeUiState.isLoading] (see that property's KDoc).
+ *  - Within one requested content type, [loadCategoryScopedItems] is unchanged from the previous
+ *    fix: categories are fetched first (cheap, small), then items are fetched **one category at a
+ *    time** (a plain suspend `for` loop, never `async`/`combine`), so at most one category's
+ *    raw+parsed payload is held in memory at once *for that content type*. Because loading is now
+ *    triggered by distinct user actions (opening a tab) rather than one single automatic startup
+ *    sequence, two or three content types can in principle be mid-load concurrently if the user
+ *    switches tabs fast enough — an accepted trade-off (see "Concerns / Trade-offs" in the delivery
+ *    report) since the user has explicitly asked for each of those tabs, unlike the original bug
+ *    where an unopened tab's content was fetched anyway.
+ *  - [onRetry] re-triggers [loadCatalogTab] only for content types already present in
+ *    [requestedContentTypes] — a tab that was never opened has nothing to retry (see [onRetry]
+ *    KDoc).
+ *  - [CatalogRepository]'s `categoryId = null` methods are still never called from this loading
+ *    path (unchanged since the previous fix).
  *
  * ## Grouping categories with content, per content type
- * [buildRowsFlow] combines a categories Flow with an items Flow (now the progressively-growing
- * [MutableStateFlow] described above, instead of a single unfiltered items Flow) and groups the
- * items by [Channel.categoryId] / [Movie.categoryId] / [Series.categoryId] in memory. Categories
- * with no matching items (yet, or ever) are dropped (see [toRows]) so the UI never renders an
- * empty row.
+ * [buildRowsFlow] combines a categories Flow with an items Flow (the progressively-growing
+ * [MutableStateFlow] populated by [loadCategoryScopedItems] once its content type is requested)
+ * and groups the items by [Channel.categoryId] / [Movie.categoryId] / [Series.categoryId] in
+ * memory. Categories with no matching items (yet, or ever) are dropped (see [toRows]) so the UI
+ * never renders an empty row. [loadCatalogTab] forwards every emission of this combined Flow into
+ * the relevant `*RowsState` so the tab's rows render progressively as categories complete.
  *
  * ## Sharing the category-scoped item state across consumers
- * `channelsState` / `moviesState` / `seriesState` (local `MutableStateFlow`s created inside
- * [buildAllSectionsFlow]) are each created exactly ONCE per [buildAllSectionsFlow] call and
- * shared across [buildRowsFlow], [buildMyListFlow], and
- * [buildContinueWatchingFlow] — preserving the single-fetch-per-consumer-set guarantee introduced
- * by the Task 23 hoist, just sourced from the new category-scoped loader instead of a single
- * unfiltered repository Flow.
+ * [channelsState] / [moviesState] / [seriesState] are created exactly once, as instance
+ * properties, and shared across [buildRowsFlow] (via [loadCatalogTab]), [buildMyListFlow], and
+ * [buildContinueWatchingFlow] — the same single-fetch-per-consumer-set guarantee as the previous
+ * design, just persistent for the ViewModel's lifetime instead of being recreated per retry (see
+ * "On-demand catalog loading" above for why they now default to an empty [Resource.Success]
+ * instead of [Resource.Loading]).
  *
- * ## "Reprendre" (Continue Watching) row — Task 23 / Task 24-25 / OOM fix (MOVIE fallback)
+ * ## "Reprendre" (Continue Watching) row — Task 23 / Task 24-25 / on-demand loading
  * [buildContinueWatchingFlow] combines [PlaybackProgressRepository.observeContinueWatching] with
  * the shared movies state to build a single synthetic [HomeRow], positioned first (ahead of "Ma
- * liste") per Netflix convention. **Scope: MOVIE + SERIES** (Task 24-25 closes the gap left by
- * Task 23) — see [buildContinueWatchingFlow] KDoc for how [ContentType.SERIES] entries are
- * resolved via [CatalogRepository.getCachedEpisodeWithSeries] (untouched by the OOM fix — already
- * cache-only). [ContentType.LIVE] remains excluded (unchanged since Task 23 — see
- * [com.bobot.iptvapp.ui.screen.player.PlayerViewModel.saveProgress]). Since the category-scoped
- * loader above no longer guarantees the *entire* movie catalog is resident in memory at the
- * moment a MOVIE entry is resolved, a MOVIE entry not (yet) present in the shared movies state now
- * falls back to a one-shot [CatalogRepository.getMovieDetail] call via [resolveMovieOrFallback]
- * instead of being silently skipped — see that function's KDoc.
+ * liste") per Netflix convention. **Scope: MOVIE + SERIES** (Task 24-25 closes the Task 23 gap) —
+ * see [buildContinueWatchingFlow] KDoc for how [ContentType.SERIES] entries are resolved via
+ * [CatalogRepository.getCachedEpisodeWithSeries] (cache-only — inherently independent of whether
+ * the Series tab has ever been opened, since it reads the Room cache populated by
+ * `getSeriesDetail`, not the on-demand catalog state). [ContentType.LIVE] remains excluded
+ * (unchanged since Task 23 — see [com.bobot.iptvapp.ui.screen.player.PlayerViewModel.saveProgress]).
+ * Because catalog loading is now on-demand, [moviesState] may legitimately never contain a given
+ * MOVIE entry (its tab may never be opened this session) — a MOVIE entry not present there falls
+ * back to a one-shot [CatalogRepository.getMovieDetail] call via [resolveMovieOrFallback] instead
+ * of being silently skipped, so "Reprendre" renders correctly even when the Films tab was never
+ * visited — see that function's KDoc.
  *
  * ## Credentials caching (Task 23)
  * [activeCredentials] is fetched once at [init] (same lifecycle as [activeProfileId]) and reused
@@ -222,31 +258,74 @@ data class HomeUiState(
  * "Suspend calls inside `combine`"), so `activeCredentials` can simply be read as a plain field
  * without needing a `flatMapLatest`/suspend-block restructuring.
  *
- * ## "Ma liste" (My List / Favorites) row — OOM fix (MOVIE fallback)
+ * ## "Ma liste" (My List / Favorites) row — on-demand loading (MOVIE + SERIES fallback)
  * Task 22 adds a profile-scoped favorites row ("Ma liste") combining
  * [FavoritesRepository.observeFavorites] with the three shared catalog item states to build a
  * single synthetic [HomeRow] that includes every favorited item currently available in the loaded
- * catalog (matched by contentId + contentType). LIVE and SERIES items whose catalog entry is not
- * (yet) loaded are silently skipped (unchanged); MOVIE items now fall back to
- * [CatalogRepository.getMovieDetail] via [resolveMovieOrFallback] before being skipped — same
- * rationale as the "Reprendre" row above. The row disappears entirely when empty. The active
- * profile ID is fetched once at initialization and cannot change during the ViewModel's lifetime
- * (consistent with [AppNavGraph]'s behavior of re-creating [HomeViewModel] on profile switches).
+ * catalog (matched by contentId + contentType). Because catalog loading is on-demand, an entry's
+ * content type may never have been requested this session, so each type falls back to a one-shot
+ * lookup when missing from the shared state, matching [buildContinueWatchingFlow]'s MOVIE fallback:
+ *  - **MOVIE** falls back to [CatalogRepository.getMovieDetail] via [resolveMovieOrFallback].
+ *  - **SERIES** falls back to [CatalogRepository.getSeriesDetail] via [resolveSeriesOrFallback] —
+ *    a genuine single-item Xtream endpoint (`get_series_info`), the Series-side equivalent of
+ *    [CatalogRepository.getMovieDetail]. (Note this is a different resolution path than
+ *    [buildContinueWatchingFlow]'s SERIES handling: Continue Watching stores an *episode* id and
+ *    resolves it cache-only via [CatalogRepository.getCachedEpisodeWithSeries], whereas a favorite
+ *    stores the *series* id directly, so [CatalogRepository.getSeriesDetail] — keyed by series id
+ *    — is the correct one-shot fallback here instead.)
+ *  - **LIVE** has no single-item Xtream endpoint to fall back to (unchanged, accepted, documented
+ *    limitation): a favorited channel whose category has not (yet, or ever) been loaded via the
+ *    Chaines tab is silently skipped.
+ * The row disappears entirely when empty. The active profile ID is fetched once at initialization
+ * and cannot change during the ViewModel's lifetime (consistent with [AppNavGraph]'s behavior of
+ * re-creating [HomeViewModel] on profile switches).
  *
  * ## Partial reloads
  * [reduceUiState] only overwrites a section's rows when that section's [Resource] is currently
- * [Resource.Success] — while one section is [Resource.Loading] (e.g. right after [onRetry]) or
- * [Resource.Error], the previous rows for that section are preserved in [HomeUiState] instead of
- * being wiped to an empty list, so a slow or failing section never blanks content that already
- * rendered successfully from a different section.
+ * [Resource.Success] — while one section is [Resource.Loading] (e.g. right after [onCatalogTabSelected]
+ * or [onRetry]) or [Resource.Error], the previous rows for that section are preserved in
+ * [HomeUiState] instead of being wiped to an empty list, so a slow or failing section never blanks
+ * content that already rendered successfully from a different section.
  *
  * ## Retry (Resource contract)
  * [com.bobot.iptvapp.domain.util.Resource] documents that every [Resource.Error] consumer "should
- * show an error card ... with a retry action". [onRetry] implements that contract: it clears
- * [CatalogRepository]'s session cache via [CatalogRepository.invalidateCaches] and re-emits on
- * [retryTrigger], which every section Flow is re-built from via `flatMapLatest` — so a retry
- * genuinely re-invokes the repository (and, transitively, re-fetches from the data source now
- * that the cache is empty) rather than just re-reading a stale cached value.
+ * show an error card ... with a retry action". [onRetry] implements that contract for catalog tabs:
+ * it clears [CatalogRepository]'s session cache via [CatalogRepository.invalidateCaches] and
+ * re-runs [loadCatalogTab] for every content type already in [requestedContentTypes] — a tab that
+ * was never opened has no error to retry and is left alone. "Reprendre"/"Ma liste" are not
+ * explicitly re-triggered by [onRetry]: they react live to their own source Flows
+ * ([PlaybackProgressRepository.observeContinueWatching] / [FavoritesRepository.observeFavorites])
+ * and to [channelsState]/[moviesState]/[seriesState] changing as a side effect of the catalog tabs
+ * being retried, and [CatalogRepository.invalidateCaches] clearing the repository's in-memory
+ * caches means their [resolveMovieOrFallback]/[resolveSeriesOrFallback] one-shot fallbacks will
+ * genuinely re-fetch rather than replay a stale in-memory value on their next recomposition.
+ *
+ * ## Per-tab language filter
+ * Each catalog tab (LIVE/MOVIE/SERIES) has its own independent language filter, derived from
+ * [com.bobot.iptvapp.domain.util.CategoryLanguage] (already reviewed/approved utility — consumed
+ * as-is here, never modified or duplicated):
+ *  - [liveLanguagesState] / [movieLanguagesState] / [seriesLanguagesState] hold the distinct,
+ *    non-null [Category.languageTag] values currently present among that tab's loaded categories.
+ *    They are recomputed, as a side effect, every time [buildRowsFlow]'s `combine` re-runs with a
+ *    fresh [Resource.Success] categories emission — see [buildRowsFlow] KDoc — so the list grows
+ *    reactively as categories load progressively, without any dedicated extra collector on the
+ *    categories Flow (see that KDoc for why this matters).
+ *  - [selectedLiveLanguageState] / [selectedMovieLanguageState] / [selectedSeriesLanguageState] hold
+ *    the tab's current selection (`null` = "Toutes" / no filter), set by [onLanguageSelected].
+ *  - The filter itself is applied inside [toRows] (shared, generic across the three content types —
+ *    see that function's KDoc): a `null` selection keeps every row; a non-null selection keeps only
+ *    categories whose [Category.languageTag] exactly matches it, dropping (not just hiding) any
+ *    category with no detectable tag — per the brief ("une catégorie sans tag détectable est
+ *    masquée dès qu'un filtre précis est actif").
+ *  - Purely in-memory post-processing: changing a tab's selection only makes [buildRowsFlow]'s
+ *    `combine` re-run (in-process filtering) — it never touches [requestedContentTypes],
+ *    [loadCatalogTab], or [loadCategoryScopedItems], so no new network fetch is ever triggered by
+ *    [onLanguageSelected].
+ *  - Six dedicated `init`-time collectors forward [liveLanguagesState] /.../ [selectedSeriesLanguageState]
+ *    into [HomeUiState] via `_uiState.update { ... }` — deliberately independent of the five-Resource
+ *    `combine` that drives [reduceUiState], since these six plain values never carry a
+ *    [Resource.Loading]/[Resource.Error] state to reconcile and are simplest left as their own
+ *    reactive projections.
  *
  * @param catalogRepository Read access to categories and content lists for all three content types.
  * @param favoritesRepository Read access to the active profile's favorites list.
@@ -255,7 +334,6 @@ data class HomeUiState(
  * @param credentialsProvider Resolves the Xtream credentials used to build Continue Watching
  *                            cards' direct-play stream URLs.
  */
-@OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class HomeViewModel @Inject constructor(
     private val catalogRepository: CatalogRepository,
@@ -274,14 +352,58 @@ class HomeViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
-    /** Replay = 1 so the initial load happens without requiring an explicit external trigger. */
-    private val retryTrigger = MutableSharedFlow<Unit>(replay = 1).apply { tryEmit(Unit) }
-
     /** Cached active profile ID (fetched once at init, remains constant for this ViewModel's lifetime). */
     private var activeProfileId: String? = null
 
     /** Cached Xtream credentials (fetched once at init) — see class KDoc "Credentials caching". */
     private var activeCredentials: XtreamCredentials? = null
+
+    // ── On-demand catalog loading state (OOM fix) — see class KDoc "On-demand catalog loading" ──
+
+    /**
+     * Shared, category-scoped item states — one [MutableStateFlow] per content type, created once
+     * and reused for this ViewModel's lifetime. Default to an empty [Resource.Success] (not
+     * [Resource.Loading]) so an unrequested content type reads as "nothing to show yet" rather
+     * than "loading forever" — see class KDoc.
+     */
+    private val channelsState = MutableStateFlow<Resource<List<Channel>>>(Resource.Success(emptyList()))
+    private val moviesState = MutableStateFlow<Resource<List<Movie>>>(Resource.Success(emptyList()))
+    private val seriesState = MutableStateFlow<Resource<List<Series>>>(Resource.Success(emptyList()))
+
+    /** Grouped-by-category rows per catalog tab, exposed via [HomeUiState] — see class KDoc. */
+    private val liveRowsState = MutableStateFlow<Resource<List<HomeRow>>>(Resource.Success(emptyList()))
+    private val movieRowsState = MutableStateFlow<Resource<List<HomeRow>>>(Resource.Success(emptyList()))
+    private val seriesRowsState = MutableStateFlow<Resource<List<HomeRow>>>(Resource.Success(emptyList()))
+
+    // ── Per-tab language filter state — see class KDoc "Per-tab language filter" ─────────────────
+
+    /**
+     * Distinct language tags currently present among each catalog tab's loaded categories —
+     * recomputed as a side effect inside [buildRowsFlow] every time a fresh [Resource.Success]
+     * categories emission arrives, so this list grows reactively as categories load progressively.
+     */
+    private val liveLanguagesState = MutableStateFlow<List<String>>(emptyList())
+    private val movieLanguagesState = MutableStateFlow<List<String>>(emptyList())
+    private val seriesLanguagesState = MutableStateFlow<List<String>>(emptyList())
+
+    /** Each catalog tab's current language selection — `null` means "Toutes" (no filter). */
+    private val selectedLiveLanguageState = MutableStateFlow<String?>(null)
+    private val selectedMovieLanguageState = MutableStateFlow<String?>(null)
+    private val selectedSeriesLanguageState = MutableStateFlow<String?>(null)
+
+    /**
+     * Content types for which [onCatalogTabSelected] has already triggered a load, for this
+     * ViewModel instance — the idempotency guard described in class KDoc "On-demand catalog
+     * loading". Only ever mutated from the main thread (both [onCatalogTabSelected] and Compose's
+     * `LaunchedEffect` run there), so a plain `MutableSet` is safe without extra synchronization.
+     */
+    private val requestedContentTypes = mutableSetOf<ContentType>()
+
+    /**
+     * The currently active loading [Job] per content type, so [onRetry] can cancel a still-running
+     * load before starting a fresh one instead of letting two loads for the same type race.
+     */
+    private val catalogTabJobs = mutableMapOf<ContentType, Job>()
 
     init {
         viewModelScope.launch {
@@ -289,120 +411,164 @@ class HomeViewModel @Inject constructor(
             activeProfileId = appPreferencesStore.getActiveProfileId()
             activeCredentials = credentialsProvider.getCredentials()
 
-            retryTrigger
-                .flatMapLatest { buildAllSectionsFlow() }
-                .collect { (continueWatching, myList, live, movies, series) ->
-                    _uiState.update { current -> reduceUiState(current, continueWatching, myList, live, movies, series) }
-                }
+            val continueWatchingFlow = activeProfileId?.let { buildContinueWatchingFlow(it, moviesState) }
+                ?: flowOf(Resource.Success(emptyList()))
+
+            val myListFlow = activeProfileId?.let { buildMyListFlow(it, channelsState, moviesState, seriesState) }
+                ?: flowOf(Resource.Success(emptyList()))
+
+            combine(
+                continueWatchingFlow,
+                myListFlow,
+                liveRowsState,
+                movieRowsState,
+                seriesRowsState,
+            ) { continueWatching, myList, live, movies, series ->
+                HomeSectionResources(continueWatching, myList, live, movies, series)
+            }.collect { (continueWatching, myList, live, movies, series) ->
+                _uiState.update { current -> reduceUiState(current, continueWatching, myList, live, movies, series) }
+            }
+        }
+
+        // ── Per-tab language filter — see class KDoc "Per-tab language filter" ────────────────────
+        // Six independent collectors, deliberately kept out of the five-Resource combine above: none
+        // of these six plain values ever carries a Loading/Error state to reconcile, so each is
+        // simplest projected into HomeUiState on its own.
+        viewModelScope.launch { liveLanguagesState.collect { languages -> _uiState.update { it.copy(liveLanguages = languages) } } }
+        viewModelScope.launch { movieLanguagesState.collect { languages -> _uiState.update { it.copy(movieLanguages = languages) } } }
+        viewModelScope.launch { seriesLanguagesState.collect { languages -> _uiState.update { it.copy(seriesLanguages = languages) } } }
+        viewModelScope.launch { selectedLiveLanguageState.collect { language -> _uiState.update { it.copy(selectedLiveLanguage = language) } } }
+        viewModelScope.launch { selectedMovieLanguageState.collect { language -> _uiState.update { it.copy(selectedMovieLanguage = language) } } }
+        viewModelScope.launch { selectedSeriesLanguageState.collect { language -> _uiState.update { it.copy(selectedSeriesLanguage = language) } } }
+    }
+
+    /**
+     * Updates the language filter selection for [contentType]'s catalog tab (Chaines/Films/Series
+     * are independent — see class KDoc "Per-tab language filter"). `language = null` means "Toutes"
+     * (no filter, every loaded category shown).
+     *
+     * Pure in-memory post-processing: this only updates a plain [MutableStateFlow] consumed by
+     * [buildRowsFlow]'s `combine`, which re-filters already-loaded rows in place. It never touches
+     * [requestedContentTypes], [loadCatalogTab], or [loadCategoryScopedItems] — selecting a language
+     * never triggers a new network fetch.
+     */
+    fun onLanguageSelected(contentType: ContentType, language: String?) {
+        when (contentType) {
+            ContentType.LIVE -> selectedLiveLanguageState.value = language
+            ContentType.MOVIE -> selectedMovieLanguageState.value = language
+            ContentType.SERIES -> selectedSeriesLanguageState.value = language
         }
     }
 
     /**
-     * Clears the repository's session cache and re-triggers every section Flow — see class KDoc
-     * "Retry (Resource contract)". Also eagerly clears any previously shown error message so the
-     * retry banner/full-screen error disappears immediately while the new load is in flight.
+     * Triggers on-demand loading of [contentType]'s catalog (see class KDoc "On-demand catalog
+     * loading"). Called by [HomeScreen] whenever the user switches to the Chaines/Films/Series tab
+     * (never for Accueil).
+     *
+     * Idempotent per [contentType] for this ViewModel instance: the first call starts
+     * [loadCatalogTab] via [startCatalogTabLoad]; every subsequent call for the same [contentType]
+     * is a no-op ([requestedContentTypes] already contains it).
+     */
+    fun onCatalogTabSelected(contentType: ContentType) {
+        if (!requestedContentTypes.add(contentType)) return
+        startCatalogTabLoad(contentType)
+    }
+
+    /**
+     * Clears the repository's session cache and re-triggers loading for every catalog tab already
+     * requested via [onCatalogTabSelected] — see class KDoc "Retry (Resource contract)". A tab
+     * that has never been opened has nothing to retry and is left untouched; opening it later still
+     * goes through the normal [onCatalogTabSelected] path. Also eagerly clears any previously shown
+     * error message so the retry banner/full-screen error disappears immediately while the new load
+     * is in flight.
      */
     fun onRetry() {
         catalogRepository.invalidateCaches()
         _uiState.update { it.copy(errorMessage = null) }
-        retryTrigger.tryEmit(Unit)
+        requestedContentTypes.toList().forEach { startCatalogTabLoad(it) }
     }
 
     /**
-     * Builds the combined Flow of all sections' row [Resource]s, including "Reprendre" (Task 23)
-     * and "Ma liste" (Task 22). Called fresh from inside `flatMapLatest` on every [retryTrigger]
-     * emission so each repository method is re-invoked (necessary for [onRetry] to actually
-     * re-fetch instead of replaying a completed cold Flow).
-     *
-     * See class KDoc "Category-scoped, on-demand loading (OOM fix)" for why this no longer opens
-     * three concurrent unfiltered (`categoryId = null`) item Flows. Instead:
-     *  - `channelsState` / `moviesState` / `seriesState` are private [MutableStateFlow]s, each
-     *    created exactly once here and shared across [buildRowsFlow], [buildMyListFlow], and
-     *    [buildContinueWatchingFlow] (same hoisting goal as the previous design, see class KDoc
-     *    "Sharing the category-scoped item state across consumers").
-     *  - The returned [Flow] is a [channelFlow] that launches a single child coroutine which
-     *    sequentially awaits [loadCategoryScopedItems] for Live, then Movies, then Series — a
-     *    plain sequential `launch { ... }` body (no `async`, no `combine` of the three loaders),
-     *    which is what actually guarantees at most one content type's per-category fetch loop is
-     *    ever running at a time, on top of [loadCategoryScopedItems] itself guaranteeing at most
-     *    one category's fetch is in flight within that content type. Concurrently, the
-     *    `channelFlow` body also collects and forwards `sectionsFlow` (the reactive `combine()` of
-     *    the five section Flows) so the UI keeps receiving updates as the sequential loader
-     *    progresses, and so [FavoritesRepository.observeFavorites] /
-     *    [PlaybackProgressRepository.observeContinueWatching] emissions continue to update "Ma
-     *    liste"/"Reprendre" live after the initial load completes (unchanged behavior).
+     * Starts (or restarts, for [onRetry]) the loading [Job] for [contentType], cancelling any
+     * previous still-running job for the same type first so two loads for one type never race
+     * writes into the same shared state.
      */
-    private fun buildAllSectionsFlow(): Flow<HomeSectionResources> {
-        val liveCategoriesFlow = catalogRepository.observeLiveCategories()
-        val vodCategoriesFlow = catalogRepository.observeVodCategories()
-        val seriesCategoriesFlow = catalogRepository.observeSeriesCategories()
+    private fun startCatalogTabLoad(contentType: ContentType) {
+        catalogTabJobs[contentType]?.cancel()
+        catalogTabJobs[contentType] = viewModelScope.launch {
+            when (contentType) {
+                ContentType.LIVE -> loadCatalogTab(
+                    categoriesFlow = catalogRepository.observeLiveCategories(),
+                    itemsState = channelsState,
+                    rowsState = liveRowsState,
+                    languagesState = liveLanguagesState,
+                    selectedLanguageFlow = selectedLiveLanguageState,
+                    categoryIdOf = Channel::categoryId,
+                    toCard = { channel: Channel -> toCardItem(channel) },
+                    fetchCategoryItems = { categoryId ->
+                        catalogRepository.getLiveChannels(categoryId).first { it !is Resource.Loading }
+                    },
+                )
 
-        val channelsState = MutableStateFlow<Resource<List<Channel>>>(Resource.Loading)
-        val moviesState = MutableStateFlow<Resource<List<Movie>>>(Resource.Loading)
-        val seriesState = MutableStateFlow<Resource<List<Series>>>(Resource.Loading)
+                ContentType.MOVIE -> loadCatalogTab(
+                    categoriesFlow = catalogRepository.observeVodCategories(),
+                    itemsState = moviesState,
+                    rowsState = movieRowsState,
+                    languagesState = movieLanguagesState,
+                    selectedLanguageFlow = selectedMovieLanguageState,
+                    categoryIdOf = Movie::categoryId,
+                    toCard = { movie: Movie -> toCardItem(movie) },
+                    fetchCategoryItems = { categoryId ->
+                        catalogRepository.getMovies(categoryId).first { it !is Resource.Loading }
+                    },
+                )
 
-        val continueWatchingFlow = if (activeProfileId != null) {
-            buildContinueWatchingFlow(activeProfileId!!, moviesState)
-        } else {
-            // No active profile → empty Continue Watching row.
-            flowOf(Resource.Success(emptyList()))
-        }
-
-        val myListFlow = if (activeProfileId != null) {
-            buildMyListFlow(activeProfileId!!, channelsState, moviesState, seriesState)
-        } else {
-            // No active profile → empty My List.
-            flowOf(Resource.Success(emptyList()))
-        }
-
-        val sectionsFlow = combine(
-            continueWatchingFlow,
-            myListFlow,
-            buildRowsFlow(
-                categoriesFlow = liveCategoriesFlow,
-                itemsFlow = channelsState,
-                categoryIdOf = Channel::categoryId,
-                toCard = { channel: Channel -> toCardItem(channel) },
-            ),
-            buildRowsFlow(
-                categoriesFlow = vodCategoriesFlow,
-                itemsFlow = moviesState,
-                categoryIdOf = Movie::categoryId,
-                toCard = { movie: Movie -> toCardItem(movie) },
-            ),
-            buildRowsFlow(
-                categoriesFlow = seriesCategoriesFlow,
-                itemsFlow = seriesState,
-                categoryIdOf = Series::categoryId,
-                toCard = { series: Series -> toCardItem(series) },
-            ),
-        ) { continueWatching, myList, live, movies, series ->
-            HomeSectionResources(continueWatching, myList, live, movies, series)
-        }
-
-        return channelFlow {
-            launch {
-                // Strictly sequential across content types — Movies' per-category loop is not
-                // started until Live's has fully finished, and Series waits for Movies — see
-                // class KDoc "Category-scoped, on-demand loading (OOM fix)".
-                loadCategoryScopedItems(liveCategoriesFlow, channelsState) { categoryId ->
-                    catalogRepository.getLiveChannels(categoryId).first { it !is Resource.Loading }
-                }
-                loadCategoryScopedItems(vodCategoriesFlow, moviesState) { categoryId ->
-                    catalogRepository.getMovies(categoryId).first { it !is Resource.Loading }
-                }
-                loadCategoryScopedItems(seriesCategoriesFlow, seriesState) { categoryId ->
-                    catalogRepository.getSeriesList(categoryId).first { it !is Resource.Loading }
-                }
+                ContentType.SERIES -> loadCatalogTab(
+                    categoriesFlow = catalogRepository.observeSeriesCategories(),
+                    itemsState = seriesState,
+                    rowsState = seriesRowsState,
+                    languagesState = seriesLanguagesState,
+                    selectedLanguageFlow = selectedSeriesLanguageState,
+                    categoryIdOf = Series::categoryId,
+                    toCard = { series: Series -> toCardItem(series) },
+                    fetchCategoryItems = { categoryId ->
+                        catalogRepository.getSeriesList(categoryId).first { it !is Resource.Loading }
+                    },
+                )
             }
-            sectionsFlow.collect { send(it) }
         }
+    }
+
+    /**
+     * Loads one catalog tab's content type: resets [itemsState]/[rowsState] to [Resource.Loading],
+     * launches a child coroutine forwarding [buildRowsFlow]'s grouped rows into [rowsState] for the
+     * rest of this ViewModel's lifetime (or until [startCatalogTabLoad] cancels the enclosing job on
+     * retry), then runs [loadCategoryScopedItems] to actually fetch the categories/items — see class
+     * KDoc "On-demand catalog loading" and "Grouping categories with content, per content type".
+     */
+    private suspend fun <T> CoroutineScope.loadCatalogTab(
+        categoriesFlow: Flow<Resource<List<Category>>>,
+        itemsState: MutableStateFlow<Resource<List<T>>>,
+        rowsState: MutableStateFlow<Resource<List<HomeRow>>>,
+        languagesState: MutableStateFlow<List<String>>,
+        selectedLanguageFlow: Flow<String?>,
+        categoryIdOf: (T) -> String,
+        toCard: (T) -> HomeCardItem,
+        fetchCategoryItems: suspend (categoryId: String) -> Resource<List<T>>,
+    ) {
+        itemsState.value = Resource.Loading
+        rowsState.value = Resource.Loading
+        launch {
+            buildRowsFlow(categoriesFlow, itemsState, selectedLanguageFlow, languagesState, categoryIdOf, toCard)
+                .collect { rowsState.value = it }
+        }
+        loadCategoryScopedItems(categoriesFlow, itemsState, fetchCategoryItems)
     }
 
     /**
      * Fetches one content type's items **one category at a time** instead of a single unfiltered
-     * `categoryId = null` call — see class KDoc "Category-scoped, on-demand loading (OOM fix)"
-     * for the memory-bounding rationale.
+     * `categoryId = null` call — see class KDoc "On-demand catalog loading" for the
+     * memory-bounding rationale.
      *
      * Awaits [categoriesFlow]'s terminal (non-[Resource.Loading]) value first. When that is a
      * [Resource.Error], it is forwarded to [itemsState] as-is and no per-category fetch is
@@ -443,55 +609,90 @@ class HomeViewModel @Inject constructor(
         }
     }
 
-    /** Combines a categories Flow with an items Flow into a Flow of grouped [HomeRow]s. */
+    /**
+     * Combines a categories Flow, an items Flow, and a selected-language Flow into a Flow of
+     * grouped, language-filtered [HomeRow]s (see class KDoc "Per-tab language filter").
+     *
+     * As a side effect, every time a fresh [Resource.Success] categories emission flows through,
+     * [languagesState] is updated with the distinct [Category.languageTag] values now present —
+     * deliberately done here (inside the same `combine` already collecting [categoriesFlow] for row
+     * building) rather than via a dedicated extra collector on [categoriesFlow], so this reactive
+     * "available languages" derivation never adds another concurrent collector to a Flow that may
+     * trigger its own network fetch on each independent collection (see
+     * `CatalogRepositoryImpl.observeLiveCategories` and siblings).
+     */
     private fun <T> buildRowsFlow(
         categoriesFlow: Flow<Resource<List<Category>>>,
         itemsFlow: Flow<Resource<List<T>>>,
+        selectedLanguageFlow: Flow<String?>,
+        languagesState: MutableStateFlow<List<String>>,
         categoryIdOf: (T) -> String,
         toCard: (T) -> HomeCardItem,
     ): Flow<Resource<List<HomeRow>>> =
-        combine(categoriesFlow, itemsFlow) { categoriesResource, itemsResource ->
-            toRows(categoriesResource, itemsResource, categoryIdOf, toCard)
+        combine(categoriesFlow, itemsFlow, selectedLanguageFlow) { categoriesResource, itemsResource, selectedLanguage ->
+            if (categoriesResource is Resource.Success) {
+                languagesState.value = categoriesResource.data.mapNotNull { it.languageTag() }.distinct()
+            }
+            toRows(categoriesResource, itemsResource, selectedLanguage, categoryIdOf, toCard)
         }
 
     /**
      * Resolves a MOVIE-type entry by [movieId] — used by both [buildContinueWatchingFlow] and
-     * [buildMyListFlow] for their MOVIE branch (Task 2 / OOM fix follow-up).
+     * [buildMyListFlow] for their MOVIE branch (OOM fix follow-up / on-demand loading).
      *
-     * Looks up [movieMap] first (the movies loaded so far by [loadCategoryScopedItems]); if not
-     * found there (its category has not, or not yet, been loaded — or it was otherwise excluded),
+     * Looks up [movieMap] first (the movies loaded so far by [loadCategoryScopedItems], if the
+     * Films tab has been opened this session); if not found there (its category has not, or not
+     * yet, been loaded — or the Films tab was never opened at all — or it was otherwise excluded),
      * falls back to a one-shot [CatalogRepository.getMovieDetail] network call
      * (`get_vod_info` — a genuine single-item Xtream endpoint) to resolve it individually instead
      * of silently skipping it.
      *
-     * MOVIE-only by design: [ContentType.SERIES] already has its own cache-based resolution
-     * ([CatalogRepository.getCachedEpisodeWithSeries], untouched) and [ContentType.LIVE] has no
-     * single-item Xtream endpoint to fall back to — an accepted, documented limitation (live
-     * channels whose category has not loaded yet are silently skipped, unchanged).
+     * MOVIE-only by design: [ContentType.SERIES] has its own single-item fallback
+     * ([resolveSeriesOrFallback] for "Ma liste", [CatalogRepository.getCachedEpisodeWithSeries] for
+     * "Reprendre") and [ContentType.LIVE] has no single-item Xtream endpoint to fall back to — an
+     * accepted, documented limitation (live channels whose category has not loaded yet are
+     * silently skipped, unchanged).
      */
     private suspend fun resolveMovieOrFallback(movieId: String, movieMap: Map<String, Movie>): Movie? =
         movieMap[movieId] ?: (catalogRepository.getMovieDetail(movieId) as? Resource.Success)?.data
 
     /**
+     * Resolves a SERIES-type entry by [seriesId] — used by [buildMyListFlow] for its SERIES branch.
+     * Series-side equivalent of [resolveMovieOrFallback]: looks up [seriesMap] first (the series
+     * loaded so far by [loadCategoryScopedItems], if the Series tab has been opened this session);
+     * if not found there, falls back to a one-shot [CatalogRepository.getSeriesDetail] network call
+     * (`get_series_info` — a genuine single-item Xtream endpoint, keyed by series id) instead of
+     * silently skipping it.
+     *
+     * Not used by [buildContinueWatchingFlow]: a Continue Watching SERIES entry stores an *episode*
+     * id, not a series id, and is resolved cache-only via
+     * [CatalogRepository.getCachedEpisodeWithSeries] instead — see that function's call site KDoc.
+     */
+    private suspend fun resolveSeriesOrFallback(seriesId: String, seriesMap: Map<String, Series>): Series? =
+        seriesMap[seriesId] ?: (catalogRepository.getSeriesDetail(seriesId) as? Resource.Success)?.data
+
+    /**
      * Builds the "Reprendre" (Continue Watching) row by combining the active profile's playback
      * progress history ([PlaybackProgressRepository.observeContinueWatching], already ordered
      * most-recently-updated-first) with the shared, category-scoped movies state (see class KDoc
-     * "Category-scoped, on-demand loading (OOM fix)"). Returns a [Resource] containing a 0 or
-     * 1-item list.
+     * "Sharing the category-scoped item state across consumers"). Returns a [Resource] containing
+     * a 0 or 1-item list.
      *
      * ## Scope: MOVIE + SERIES (Task 24-25 — closes the Task 23 "Option A" gap)
      * [com.bobot.iptvapp.domain.model.PlaybackProgress.contentType] can be LIVE, MOVIE, or SERIES:
      *  - **MOVIE** entries are resolved against [moviesFlow]'s current [Movie] list first, falling
      *    back to [resolveMovieOrFallback]'s one-shot [CatalogRepository.getMovieDetail] call when
-     *    not (yet) present there — see [resolveMovieOrFallback] KDoc.
-     *  - **SERIES** entries are now resolved via [CatalogRepository.getCachedEpisodeWithSeries],
-     *    which reads exclusively from the offline-first Room catalog cache populated by
+     *    not (yet, or ever, this session) present there — see [resolveMovieOrFallback] KDoc.
+     *  - **SERIES** entries are resolved via [CatalogRepository.getCachedEpisodeWithSeries], which
+     *    reads exclusively from the offline-first Room catalog cache populated by
      *    `CatalogRepositoryImpl.getSeriesDetail` (see that method's KDoc) — i.e. resolution only
      *    succeeds once the user has opened that series' detail screen at least once, which is what
-     *    fetches and caches its season/episode tree. When the episode or its parent series is not
-     *    (yet, or no longer) in the cache, [CatalogRepository.getCachedEpisodeWithSeries] returns
-     *    `null` and the entry is silently skipped — this is expected graceful degradation
-     *    (documented brief assumption), not an error.
+     *    fetches and caches its season/episode tree. This is inherently independent of whether the
+     *    Series *tab* (as opposed to a specific series' detail screen) has ever been opened. When
+     *    the episode or its parent series is not (yet, or no longer) in the cache,
+     *    [CatalogRepository.getCachedEpisodeWithSeries] returns `null` and the entry is silently
+     *    skipped — this is expected graceful degradation (documented brief assumption), not an
+     *    error.
      *  - **LIVE** remains excluded, unchanged since Task 23 —
      *    [com.bobot.iptvapp.ui.screen.player.PlayerViewModel.saveProgress] no longer persists LIVE
      *    progress at all, so no LIVE record should appear here going forward. A defensive filter is
@@ -500,22 +701,19 @@ class HomeViewModel @Inject constructor(
      * ## Preserving recency ordering across two content types
      * [progressList] is walked in a single `mapNotNull` pass, in its original (already
      * recency-ordered) position, dispatching per-entry on [PlaybackProgress.contentType] to
-     * resolve either a movie (in-memory map lookup) or a series episode (suspend cache lookup).
-     * Entries are **not** partitioned into "all movies" then "all series" and concatenated — doing
-     * so would silently reorder interleaved MOVIE/SERIES updates and break the
-     * most-recently-updated-first contract whenever the two types alternate in recency.
+     * resolve either a movie (in-memory map lookup + fallback) or a series episode (suspend cache
+     * lookup). Entries are **not** partitioned into "all movies" then "all series" and
+     * concatenated — doing so would silently reorder interleaved MOVIE/SERIES updates and break
+     * the most-recently-updated-first contract whenever the two types alternate in recency.
      *
      * ## Suspend calls inside `combine`
-     * Resolving a SERIES entry requires a `suspend` call
-     * ([CatalogRepository.getCachedEpisodeWithSeries]). The `combine(flow, flow2, transform)`
-     * overload used below resolves `transform`'s declared type as `suspend (T1, T2) -> R` (see
-     * `kotlinx.coroutines.flow.Combine.kt`) — the lambda passed here does not need an explicit
-     * `suspend` keyword; Kotlin infers it from the expected parameter type, the same way a
-     * `Flow.collect { ... }` lambda can call suspend functions without being marked `suspend`
-     * itself. This means the suspend cache lookup can be called directly inside the existing
-     * `combine` lambda below, without restructuring this function into `flatMapLatest` — a smaller,
-     * lower-risk diff than the structural rewrite originally anticipated, verified here directly
-     * against the `combine` overload actually imported/used in this file (2-Flow arity).
+     * Resolving a MOVIE or SERIES entry requires a `suspend` call
+     * ([resolveMovieOrFallback] / [CatalogRepository.getCachedEpisodeWithSeries]). The
+     * `combine(flow, flow2, transform)` overload used below resolves `transform`'s declared type
+     * as `suspend (T1, T2) -> R` (see `kotlinx.coroutines.flow.Combine.kt`) — the lambda passed
+     * here does not need an explicit `suspend` keyword; Kotlin infers it from the expected
+     * parameter type, the same way a `Flow.collect { ... }` lambda can call suspend functions
+     * without being marked `suspend` itself.
      *
      * ## Stream URL resolution
      * Each matched [Movie] or resolved episode gets a direct-play `resumeStreamUrl` built the same
@@ -587,13 +785,15 @@ class HomeViewModel @Inject constructor(
      * ## How it works
      * Combines [FavoritesRepository.observeFavorites] with the three shared content states,
      * extracting any available Success data from the Resource wrappers. For each FavoriteItem,
-     * looks up the corresponding Channel/Movie/Series by (contentId, contentType):
-     *  - **LIVE** and **SERIES**: direct lookup only — a favorite whose catalog entry has not
-     *    (yet) loaded is silently skipped (unchanged; explicitly out of scope for the OOM fix's
-     *    MOVIE fallback per the brief — LIVE has no single-item Xtream endpoint, and SERIES'
-     *    resolution path is a distinct, untouched concern from Continue Watching's).
+     * resolves the corresponding Channel/Movie/Series by (contentId, contentType):
+     *  - **LIVE**: direct lookup only — a favorite whose catalog entry has not (yet, or ever) been
+     *    loaded (i.e. the Chaines tab was never opened) is silently skipped. No single-item Xtream
+     *    endpoint exists for a live channel, so there is no fallback to generalize here — an
+     *    accepted, documented limitation (see [resolveMovieOrFallback] KDoc).
      *  - **MOVIE**: falls back to [resolveMovieOrFallback]'s one-shot
      *    [CatalogRepository.getMovieDetail] call when not found in the shared movies state.
+     *  - **SERIES**: falls back to [resolveSeriesOrFallback]'s one-shot
+     *    [CatalogRepository.getSeriesDetail] call when not found in the shared series state.
      * The result is an ordered list (matching [FavoritesRepository]'s "most recently added first"
      * ordering) of [HomeCardItem]s wrapped in a single synthetic [HomeRow], or an empty list.
      */
@@ -619,12 +819,13 @@ class HomeViewModel @Inject constructor(
             val movieMap = movies.associateBy { it.id }
             val seriesMap = series.associateBy { it.id }
 
-            // For each favorite, find the matching catalog item and convert to HomeCardItem.
+            // For each favorite, find the matching catalog item (falling back to a one-shot fetch
+            // for MOVIE/SERIES when not already loaded) and convert to HomeCardItem.
             val items = favorites.mapNotNull { favorite ->
                 when (favorite.contentType) {
                     ContentType.LIVE -> channelMap[favorite.contentId]?.let { toCardItem(it) }
                     ContentType.MOVIE -> resolveMovieOrFallback(favorite.contentId, movieMap)?.let { toCardItem(it) }
-                    ContentType.SERIES -> seriesMap[favorite.contentId]?.let { toCardItem(it) }
+                    ContentType.SERIES -> resolveSeriesOrFallback(favorite.contentId, seriesMap)?.let { toCardItem(it) }
                 }
             }
 
@@ -645,14 +846,22 @@ class HomeViewModel @Inject constructor(
         }
 
     /**
-     * Reduces a pair of [Resource]s (categories + items) to a single [Resource] of grouped
-     * [HomeRow]s. Propagates [Resource.Error] / [Resource.Loading] from either input as-is;
-     * only when both are [Resource.Success] are the items grouped by category (see class KDoc
-     * "Grouping categories with content, per content type").
+     * Reduces a pair of [Resource]s (categories + items) to a single [Resource] of grouped,
+     * language-filtered [HomeRow]s. Propagates [Resource.Error] / [Resource.Loading] from either
+     * input as-is; only when both are [Resource.Success] are the items grouped by category (see
+     * class KDoc "Grouping categories with content, per content type").
+     *
+     * [selectedLanguage] applies the class KDoc "Per-tab language filter": `null` ("Toutes") keeps
+     * every category; a non-null value keeps only categories whose [Category.languageTag] exactly
+     * equals it — a category with no detectable tag (`languageTag()` returns `null`) never matches
+     * a non-null [selectedLanguage] and is therefore excluded, per the brief. Categories are
+     * filtered *before* grouping so a filtered-out category never contributes a row regardless of
+     * whether it has matching items.
      */
     private fun <T> toRows(
         categoriesResource: Resource<List<Category>>,
         itemsResource: Resource<List<T>>,
+        selectedLanguage: String?,
         categoryIdOf: (T) -> String,
         toCard: (T) -> HomeCardItem,
     ): Resource<List<HomeRow>> {
@@ -672,18 +881,20 @@ class HomeViewModel @Inject constructor(
         val categories: List<Category> = categoriesResource.data
         val items: List<T> = itemsResource.data
         val itemsByCategory = items.groupBy(categoryIdOf)
-        val rows = categories.mapNotNull { category ->
-            val categoryItems = itemsByCategory[category.id].orEmpty()
-            if (categoryItems.isEmpty()) {
-                null
-            } else {
-                HomeRow(
-                    categoryId = category.id,
-                    title = category.name,
-                    items = categoryItems.map(toCard),
-                )
+        val rows = categories
+            .filter { category -> selectedLanguage == null || category.languageTag() == selectedLanguage }
+            .mapNotNull { category ->
+                val categoryItems = itemsByCategory[category.id].orEmpty()
+                if (categoryItems.isEmpty()) {
+                    null
+                } else {
+                    HomeRow(
+                        categoryId = category.id,
+                        title = category.name,
+                        items = categoryItems.map(toCard),
+                    )
+                }
             }
-        }
         return Resource.Success(rows)
     }
 
@@ -704,8 +915,8 @@ class HomeViewModel @Inject constructor(
         val resources = listOf(continueWatching, myList, live, movies, series)
         val isLoading = resources.any { it is Resource.Loading }
         // First error wins, in ContinueWatching -> MyList -> Live -> Movies -> Series order — good
-        // enough to surface *a* meaningful message; the retry action re-fetches all sections
-        // regardless of which failed.
+        // enough to surface *a* meaningful message; the retry action re-fetches all requested
+        // catalog tabs regardless of which failed.
         val errorMessage = resources.filterIsInstance<Resource.Error>().firstOrNull()?.message
 
         return current.copy(

@@ -90,6 +90,32 @@ class PlayerViewModel @Inject constructor(
 
         /** Step applied by [seekForward] / [seekBackward] and by D-pad seek nudges. */
         const val SEEK_STEP_MS = 10_000L
+
+        /**
+         * Maximum time the player is allowed to remain continuously in
+         * [ExoCommonPlayer.STATE_BUFFERING] before this ViewModel treats it as an application
+         * stall rather than legitimate buffering, and surfaces the existing error overlay.
+         *
+         * ## Why this exists
+         * The shared `OkHttpClient` (see `NetworkModule`) already has explicit connect/read/write
+         * timeouts, but those only guard *HTTP request* stalls. A real VOD stream can keep
+         * delivering bytes — just too slowly/intermittently to ever satisfy ExoPlayer's minimum
+         * rebuffer threshold — in which case the player never reaches [ExoCommonPlayer.STATE_READY]
+         * and never calls [ExoCommonPlayer.Listener.onPlayerError] either, so neither the OkHttp
+         * timeouts nor the existing `onPlayerError` handler ever fire. Without this timer, the
+         * user is stuck on an infinite loading spinner. 20s is generous enough to absorb normal
+         * VOD start-up buffering and mid-playback rebuffers (e.g. a brief network hiccup or a
+         * seek) while still failing fast enough to be actionable via "Réessayer".
+         *
+         * ## LIVE streams are intentionally included
+         * Unlike [saveProgress]'s LIVE exclusion, this timer applies to every [ContentType],
+         * including LIVE: a live channel that never starts is exactly as broken from the user's
+         * perspective as a movie that never starts, and should surface the same error overlay
+         * rather than spin forever. Live-edge/start-up latency for a healthy stream is expected
+         * to resolve in a few seconds, well under this threshold, so no live-specific grace
+         * period is needed.
+         */
+        const val STALL_DETECTION_TIMEOUT_MS = 20_000L
     }
 
     /** The shared [ExoCommonPlayer] instance to attach to Media3's `PlayerView`. */
@@ -117,6 +143,16 @@ class PlayerViewModel @Inject constructor(
     private var released = false
     private var progressTickerJob: Job? = null
 
+    /**
+     * Cancelable "application stall" watchdog — see [STALL_DETECTION_TIMEOUT_MS] KDoc for why
+     * this exists. Started by [onPlaybackStateChanged] whenever the player enters
+     * [ExoCommonPlayer.STATE_BUFFERING], and cancelled as soon as it leaves that state (in
+     * particular on [ExoCommonPlayer.STATE_READY], so a brief/legitimate rebuffer never trips
+     * it). Mirrors [progressTickerJob]'s cancelable-`Job` pattern rather than introducing a new
+     * timer mechanism (no `Handler`/`java.util.Timer`).
+     */
+    private var stallDetectionJob: Job? = null
+
     private val playerListener = object : ExoCommonPlayer.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             _uiState.update { it.copy(isPlaying = isPlaying) }
@@ -135,6 +171,15 @@ class PlayerViewModel @Inject constructor(
                     durationMs = safeDuration(),
                 )
             }
+
+            // Stall watchdog: (re)start the timer on every entry into STATE_BUFFERING, and
+            // cancel it on any other state (STATE_READY in particular — see
+            // `startStallDetection`/`cancelStallDetection` KDoc for the full contract).
+            if (playbackState == ExoCommonPlayer.STATE_BUFFERING) {
+                startStallDetection()
+            } else {
+                cancelStallDetection()
+            }
         }
 
         /**
@@ -145,6 +190,7 @@ class PlayerViewModel @Inject constructor(
          * le flux.") with Réessayer / Retour actions instead of a silent black screen.
          */
         override fun onPlayerError(error: PlaybackException) {
+            cancelStallDetection()
             _uiState.update { it.copy(hasError = true, isBuffering = false) }
         }
     }
@@ -215,7 +261,24 @@ class PlayerViewModel @Inject constructor(
         if (released) return
         val url = streamUrl ?: return
 
+        // Cancel any stall watchdog left over from the previous attempt so it cannot fire
+        // against the new attempt's playback (e.g. right after this retry succeeds and starts
+        // playing normally) — see `stallDetectionJob` KDoc.
+        cancelStallDetection()
         _uiState.update { it.copy(hasError = false, isBuffering = true) }
+
+        // Explicitly (re)arm the watchdog here rather than relying solely on the next
+        // `onPlaybackStateChanged(STATE_BUFFERING)` callback: Media3 only invokes that listener
+        // when the *integer* playback state actually changes. If the stream was already stuck
+        // in continuous STATE_BUFFERING when the previous watchdog fired `hasError = true` —
+        // exactly the scenario this feature fixes — a fresh `prepare()` call below can leave the
+        // player in STATE_BUFFERING with no detectable value change, so the callback never
+        // refires and a purely callback-driven watchdog would never be armed again, silently
+        // reproducing the original infinite-spinner bug after "Réessayer". The `isActive` guard
+        // in `startStallDetection` (plus `hasError` having just been reset to `false` above)
+        // makes this call safe even if the Media3 callback *does* also fire independently —
+        // no duplicate timer is created.
+        startStallDetection()
         playerManager.prepare(streamUrl = url, startPositionMs = startPositionMs)
     }
 
@@ -272,6 +335,7 @@ class PlayerViewModel @Inject constructor(
 
         saveProgress()
         progressTickerJob?.cancel()
+        cancelStallDetection()
         player.removeListener(playerListener)
         playerManager.release()
     }
@@ -307,6 +371,36 @@ class PlayerViewModel @Inject constructor(
                 }
             }
         }
+    }
+
+    /**
+     * Starts (or leaves running, if already active) the [STALL_DETECTION_TIMEOUT_MS] watchdog
+     * for the current [ExoCommonPlayer.STATE_BUFFERING] episode. Does nothing if the player has
+     * already been [released], or if [PlayerUiState.hasError] is already `true` (avoids a
+     * double-trigger — the error overlay is already showing).
+     *
+     * If the buffering episode is still ongoing once the delay elapses, [PlayerUiState.hasError]
+     * is set to `true` and [PlayerUiState.isBuffering] to `false`, which surfaces the existing
+     * error overlay exactly as [onPlayerError] does. Cancelled by [cancelStallDetection] as soon
+     * as the player leaves [ExoCommonPlayer.STATE_BUFFERING] (in particular on
+     * [ExoCommonPlayer.STATE_READY]), so a legitimate/brief rebuffer never trips it.
+     */
+    private fun startStallDetection() {
+        if (released || _uiState.value.hasError) return
+        if (stallDetectionJob?.isActive == true) return
+
+        stallDetectionJob = viewModelScope.launch {
+            delay(STALL_DETECTION_TIMEOUT_MS)
+            if (!released) {
+                _uiState.update { it.copy(hasError = true, isBuffering = false) }
+            }
+        }
+    }
+
+    /** Cancels the in-flight stall watchdog, if any — see [startStallDetection]. */
+    private fun cancelStallDetection() {
+        stallDetectionJob?.cancel()
+        stallDetectionJob = null
     }
 
     /**

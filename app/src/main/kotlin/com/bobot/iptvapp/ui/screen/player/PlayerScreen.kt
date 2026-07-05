@@ -1,8 +1,12 @@
 package com.bobot.iptvapp.ui.screen.player
 
+import android.app.Activity
+import android.view.WindowManager
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -40,6 +44,8 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -59,7 +65,11 @@ import com.bobot.iptvapp.ui.theme.SemanticError
 import com.bobot.iptvapp.ui.theme.Spacing
 import com.bobot.iptvapp.ui.theme.TextPrimary
 import com.bobot.iptvapp.ui.theme.TextSecondary
+import kotlinx.coroutines.delay
 import java.util.Locale
+
+/** Delay of inactivity after which the playback controls auto-hide during active playback. */
+private const val CONTROLS_AUTO_HIDE_DELAY_MS = 5_000L
 
 /**
  * Fullscreen Media3 player screen (Task 13, reskinned Task 11).
@@ -95,10 +105,44 @@ fun PlayerScreen(
         onDispose { viewModel.releasePlayer() }
     }
 
+    // Keep the screen from dimming/locking while the player is on screen; released on exit.
+    val view = LocalView.current
+    DisposableEffect(Unit) {
+        val window = (view.context as? Activity)?.window
+        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    // Auto-hide controls after inactivity while actively playing; any interaction reveals them
+    // and restarts the timer. `interactionTrigger` is bumped on every user interaction so the
+    // LaunchedEffect below re-launches (cancelling the previous delay) without needing the
+    // interaction's payload as a key.
+    var controlsVisible by remember { mutableStateOf(true) }
+    var interactionTrigger by remember { mutableStateOf(0) }
+    val onUserInteracted: () -> Unit = {
+        controlsVisible = true
+        interactionTrigger++
+    }
+
+    LaunchedEffect(uiState.isPlaying, uiState.isBuffering, uiState.hasError, interactionTrigger) {
+        if (uiState.isPlaying && !uiState.isBuffering && !uiState.hasError) {
+            delay(CONTROLS_AUTO_HIDE_DELAY_MS)
+            controlsVisible = false
+        }
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(BackgroundSunken),
+            .background(BackgroundSunken)
+            // Plain tap-detection (not `clickable`) so this full-screen surface does not become
+            // a focusable stop that would disrupt D-pad/TV focus navigation between the
+            // controls' buttons and slider.
+            .pointerInput(Unit) {
+                detectTapGestures(onTap = { onUserInteracted() })
+            },
     ) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
@@ -123,16 +167,22 @@ fun PlayerScreen(
         }
 
         if (!uiState.hasError) {
-            PlayerControlsOverlay(
-                uiState = uiState,
-                onTogglePlayPause = viewModel::togglePlayPause,
-                onSeekForward = viewModel::seekForward,
-                onSeekBackward = viewModel::seekBackward,
-                onSeekTo = viewModel::seekTo,
+            AnimatedVisibility(
+                visible = controlsVisible,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth(),
-            )
+            ) {
+                PlayerControlsOverlay(
+                    uiState = uiState,
+                    onTogglePlayPause = viewModel::togglePlayPause,
+                    onSeekForward = viewModel::seekForward,
+                    onSeekBackward = viewModel::seekBackward,
+                    onSeekTo = viewModel::seekTo,
+                    onUserInteracted = onUserInteracted,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
         }
 
         if (uiState.hasError) {
@@ -160,6 +210,7 @@ private fun PlayerControlsOverlay(
     onSeekForward: () -> Unit,
     onSeekBackward: () -> Unit,
     onSeekTo: (Long) -> Unit,
+    onUserInteracted: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var dragPositionMs by remember { mutableStateOf<Long?>(null) }
@@ -188,7 +239,10 @@ private fun PlayerControlsOverlay(
                 } else {
                     0f
                 },
-                onValueChange = { dragPositionMs = it.toLong() },
+                onValueChange = {
+                    onUserInteracted()
+                    dragPositionMs = it.toLong()
+                },
                 onValueChangeFinished = {
                     dragPositionMs?.let(onSeekTo)
                     dragPositionMs = null
@@ -208,8 +262,8 @@ private fun PlayerControlsOverlay(
                     .onKeyEvent { event ->
                         if (event.type == KeyEventType.KeyDown) {
                             when (event.key) {
-                                Key.DirectionRight -> { onSeekForward(); true }
-                                Key.DirectionLeft  -> { onSeekBackward(); true }
+                                Key.DirectionRight -> { onUserInteracted(); onSeekForward(); true }
+                                Key.DirectionLeft  -> { onUserInteracted(); onSeekBackward(); true }
                                 else               -> false
                             }
                         } else {
@@ -248,20 +302,20 @@ private fun PlayerControlsOverlay(
                     PlayerSeekButton(
                         label = "↺ 10 s",
                         contentDescription = "Reculer de 10 secondes",
-                        onClick = onSeekBackward,
+                        onClick = { onUserInteracted(); onSeekBackward() },
                     )
 
                     // Play / Pause
                     PlayerPlayPauseButton(
                         isPlaying = uiState.isPlaying,
-                        onClick = onTogglePlayPause,
+                        onClick = { onUserInteracted(); onTogglePlayPause() },
                     )
 
                     // Seek forward 10 s
                     PlayerSeekButton(
                         label = "10 s ↻",
                         contentDescription = "Avancer de 10 secondes",
-                        onClick = onSeekForward,
+                        onClick = { onUserInteracted(); onSeekForward() },
                     )
                 }
 
@@ -449,6 +503,7 @@ private fun PlayerControlsOverlayPlayingPreview() {
             onSeekForward = {},
             onSeekBackward = {},
             onSeekTo = {},
+            onUserInteracted = {},
         )
     }
 }
@@ -468,6 +523,7 @@ private fun PlayerControlsOverlayPausedPreview() {
             onSeekForward = {},
             onSeekBackward = {},
             onSeekTo = {},
+            onUserInteracted = {},
         )
     }
 }

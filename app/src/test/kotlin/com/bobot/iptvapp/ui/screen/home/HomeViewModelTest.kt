@@ -22,7 +22,6 @@ import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
 import io.mockk.verify
-import io.mockk.verifyOrder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
@@ -38,7 +37,8 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * Unit tests for [HomeViewModel] (Task 17 + Task 22 + Task 23 + Task 24-25 + OOM fix).
+ * Unit tests for [HomeViewModel] (Task 17 + Task 22 + Task 23 + Task 24-25 + on-demand catalog
+ * loading OOM fix).
  *
  * Follows the exact `viewModelScope` testing convention established by
  * [com.bobot.iptvapp.ui.screen.profiles.ProfilesViewModelTest] (Task 16):
@@ -54,24 +54,30 @@ import org.junit.Test
  * `every { profileRepository.observeProfiles() } returns profilesFlow` pattern) so tests push new
  * [Resource] values to simulate the repository's reactive updates.
  *
- * ## Category-scoped loading (OOM fix)
- * [HomeViewModel] no longer calls `getLiveChannels(null)` / `getMovies(null)` /
- * `getSeriesList(null)` (the unfiltered, whole-catalog calls that caused the OOM). Instead it
- * fetches items **one category at a time**, sequentially, content type by content type. This
- * test's [stubLiveChannels] / [stubMovies] / [stubSeries] helpers stub the per-category overload
- * (`getLiveChannels(categoryId)` etc.) for a specific category id, mirroring how the production
- * code now calls it. A per-category Flow is stubbed as an already-completed
- * `flowOf(Resource.Success(...))` — [HomeViewModel] only ever awaits its first non-[Resource.Loading]
- * value, so a bare terminal value is sufficient and keeps tests deterministic under
- * [StandardTestDispatcher] without extra `runCurrent()` steps.
+ * ## On-demand catalog loading (OOM fix)
+ * [HomeViewModel] no longer fetches any content type automatically at `init`. Instead,
+ * [HomeViewModel.onCatalogTabSelected] must be called explicitly (as [HomeScreen] does when the
+ * user switches tabs) before that content type's categories/items are fetched at all — see the
+ * "On-demand loading" test group below, which asserts zero repository catalog calls before any
+ * such call. Once triggered, items are still fetched **one category at a time** (never the
+ * unfiltered, whole-catalog `categoryId = null` overload) — this test's [stubLiveChannels] /
+ * [stubMovies] / [stubSeries] helpers stub the per-category overload (`getLiveChannels(categoryId)`
+ * etc.) for a specific category id, mirroring how the production code calls it. A per-category Flow
+ * is stubbed as an already-completed `flowOf(Resource.Success(...))` — [HomeViewModel] only ever
+ * awaits its first non-[Resource.Loading] value, so a bare terminal value is sufficient and keeps
+ * tests deterministic under [StandardTestDispatcher] without extra `runCurrent()` steps.
  *
  * Task 24-25 adds a default `coEvery { catalogRepository.getCachedEpisodeWithSeries(any()) }
  * returns null` stub in [setUp], overridden per-test with a specific episode id where a SERIES
- * cache hit is needed. The OOM fix's MOVIE fallback ([HomeViewModel.resolveMovieOrFallback]) is
- * exercised via `coEvery { catalogRepository.getMovieDetail(...) }` stubs, added per-test only
- * where a MOVIE entry is expected to miss the category-scoped movies state and trigger the
- * fallback — [CatalogRepository] being a strict mock means any unstubbed fallback call would fail
- * the test loudly instead of silently, which is itself a useful correctness check.
+ * cache hit is needed. The on-demand loading fix's MOVIE/SERIES fallbacks
+ * ([HomeViewModel.resolveMovieOrFallback] / a private `resolveSeriesOrFallback`) are exercised via
+ * `coEvery { catalogRepository.getMovieDetail(...) }` / `coEvery { catalogRepository.getSeriesDetail(...) }`
+ * stubs, added per-test only where an entry is expected to miss the shared catalog state (e.g.
+ * because its tab was never selected) and trigger the fallback — [CatalogRepository] being a strict
+ * mock means any unstubbed fallback call would fail the test loudly instead of silently, which is
+ * itself a useful correctness check. Crucially, several tests below deliberately never call
+ * [HomeViewModel.onCatalogTabSelected] at all, to prove "Reprendre"/"Ma liste" populate correctly
+ * even when no catalog tab has ever been opened.
  *
  * Task 22: [FavoritesRepository] and [AppPreferencesStore] are also `mockk()` doubles. The
  * preferences store's [getActiveProfileId] is stubbed to return a test profile ID or null;
@@ -248,16 +254,93 @@ class HomeViewModelTest {
         every { catalogRepository.getSeriesList(categoryId) } returns flowOf(Resource.Success(series))
     }
 
-    // ── Initial loading state ─────────────────────────────────────────────────
+    // ── On-demand catalog loading (OOM fix) ───────────────────────────────────
 
     @Test
-    fun `init with every section still loading shows the loading state and no rows`() {
+    fun `no catalog content is fetched from the repository until a tab is selected`() {
         createViewModel()
 
+        verify(exactly = 0) { catalogRepository.observeLiveCategories() }
+        verify(exactly = 0) { catalogRepository.observeVodCategories() }
+        verify(exactly = 0) { catalogRepository.observeSeriesCategories() }
+        verify(exactly = 0) { catalogRepository.getLiveChannels(any()) }
+        verify(exactly = 0) { catalogRepository.getMovies(any()) }
+        verify(exactly = 0) { catalogRepository.getSeriesList(any()) }
+
         val state = viewModel.uiState.value
-        assertTrue(state.isLoading)
+        assertFalse(state.isLoading)
         assertFalse(state.hasAnyRows)
         assertNull(state.errorMessage)
+        assertTrue(state.liveRows.isEmpty())
+        assertTrue(state.movieRows.isEmpty())
+        assertTrue(state.seriesRows.isEmpty())
+    }
+
+    @Test
+    fun `onCatalogTabSelected triggers loading only for the requested content type`() {
+        createViewModel()
+        stubLiveChannels("1", listOf(chan1))
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        liveCategoriesFlow.value = Resource.Success(listOf(sportCategory))
+        testDispatcher.scheduler.runCurrent()
+
+        verify(exactly = 1) { catalogRepository.observeLiveCategories() }
+        verify(exactly = 1) { catalogRepository.getLiveChannels("1") }
+        // Movies and Series were never requested — must remain untouched.
+        verify(exactly = 0) { catalogRepository.observeVodCategories() }
+        verify(exactly = 0) { catalogRepository.observeSeriesCategories() }
+        verify(exactly = 0) { catalogRepository.getMovies(any()) }
+        verify(exactly = 0) { catalogRepository.getSeriesList(any()) }
+
+        val state = viewModel.uiState.value
+        assertEquals(1, state.liveRows.size)
+        assertTrue(state.movieRows.isEmpty())
+        assertTrue(state.seriesRows.isEmpty())
+    }
+
+    @Test
+    fun `onCatalogTabSelected is idempotent — a second call for the same content type does not re-fetch`() {
+        createViewModel()
+        stubLiveChannels("1", listOf(chan1))
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        viewModel.onCatalogTabSelected(ContentType.LIVE) // queued before the first load resolves
+        liveCategoriesFlow.value = Resource.Success(listOf(sportCategory))
+        testDispatcher.scheduler.runCurrent()
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE) // called again after the load fully resolved
+        testDispatcher.scheduler.runCurrent()
+
+        verify(exactly = 1) { catalogRepository.observeLiveCategories() }
+        verify(exactly = 1) { catalogRepository.getLiveChannels("1") }
+    }
+
+    @Test
+    fun `every category is fetched individually via getXxx(categoryId), never the unfiltered categoryId = null call`() {
+        createViewModel()
+        stubLiveChannels("1", listOf(chan1))
+        stubLiveChannels("2", emptyList())
+        stubMovies("10", listOf(movie1))
+        stubSeries("20", listOf(series1))
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        viewModel.onCatalogTabSelected(ContentType.SERIES)
+        liveCategoriesFlow.value = Resource.Success(listOf(sportCategory, newsCategory))
+        vodCategoriesFlow.value = Resource.Success(listOf(actionCategory))
+        seriesCategoriesFlow.value = Resource.Success(listOf(dramaCategory))
+        testDispatcher.scheduler.runCurrent()
+
+        // Every category fetched individually...
+        verify(exactly = 1) { catalogRepository.getLiveChannels("1") }
+        verify(exactly = 1) { catalogRepository.getLiveChannels("2") }
+        verify(exactly = 1) { catalogRepository.getMovies("10") }
+        verify(exactly = 1) { catalogRepository.getSeriesList("20") }
+        // ...and the unfiltered, whole-catalog overload is never invoked from this loading path.
+        verify(exactly = 0) { catalogRepository.getLiveChannels(null) }
+        verify(exactly = 0) { catalogRepository.getMovies(null) }
+        verify(exactly = 0) { catalogRepository.getSeriesList(null) }
     }
 
     // ── Grouping categories with content ──────────────────────────────────────
@@ -265,6 +348,9 @@ class HomeViewModelTest {
     @Test
     fun `sections group items by category and drop categories with no matching items`() {
         createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        viewModel.onCatalogTabSelected(ContentType.SERIES)
 
         stubLiveChannels("1", listOf(chan1))
         stubLiveChannels("2", emptyList())
@@ -322,8 +408,11 @@ class HomeViewModelTest {
     // ── Partial failure ────────────────────────────────────────────────────────
 
     @Test
-    fun `an error in one section is surfaced without wiping rows already loaded by another section`() {
+    fun `an error in one requested tab is surfaced without wiping rows already loaded by another tab`() {
         createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        viewModel.onCatalogTabSelected(ContentType.SERIES)
 
         stubLiveChannels("1", listOf(chan1))
         stubMovies("10", listOf(movie1))
@@ -346,6 +435,7 @@ class HomeViewModelTest {
     @Test
     fun `onRetry clears the error immediately and invalidates the repository cache`() {
         createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
         liveCategoriesFlow.value = Resource.Error(message = "Hors ligne")
         testDispatcher.scheduler.runCurrent()
         assertEquals("Hors ligne", viewModel.uiState.value.errorMessage)
@@ -357,12 +447,15 @@ class HomeViewModelTest {
     }
 
     @Test
-    fun `onRetry re-subscribes to every repository Flow and re-fetches every category`() {
+    fun `onRetry re-fetches every category for a tab already selected`() {
         stubLiveChannels("1", listOf(chan1))
         stubMovies("10", listOf(movie1))
         stubSeries("20", listOf(series1))
 
         createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        viewModel.onCatalogTabSelected(ContentType.SERIES)
         liveCategoriesFlow.value = Resource.Success(listOf(sportCategory))
         vodCategoriesFlow.value = Resource.Success(listOf(actionCategory))
         seriesCategoriesFlow.value = Resource.Success(listOf(dramaCategory))
@@ -386,52 +479,23 @@ class HomeViewModelTest {
         verify(exactly = 2) { catalogRepository.getSeriesList("20") }
     }
 
-    // ── OOM fix: category-scoped, sequential loading ──────────────────────────
-
     @Test
-    fun `every category is fetched individually via getXxx(categoryId), never the unfiltered categoryId = null call`() {
+    fun `onRetry never fetches a content type whose tab was never selected`() {
         stubLiveChannels("1", listOf(chan1))
-        stubLiveChannels("2", emptyList())
-        stubMovies("10", listOf(movie1))
-        stubSeries("20", listOf(series1))
 
         createViewModel()
-        liveCategoriesFlow.value = Resource.Success(listOf(sportCategory, newsCategory))
-        vodCategoriesFlow.value = Resource.Success(listOf(actionCategory))
-        seriesCategoriesFlow.value = Resource.Success(listOf(dramaCategory))
-        testDispatcher.scheduler.runCurrent()
-
-        // Every category fetched individually...
-        verify(exactly = 1) { catalogRepository.getLiveChannels("1") }
-        verify(exactly = 1) { catalogRepository.getLiveChannels("2") }
-        verify(exactly = 1) { catalogRepository.getMovies("10") }
-        verify(exactly = 1) { catalogRepository.getSeriesList("20") }
-        // ...and the unfiltered, whole-catalog overload is never invoked from this loading path.
-        verify(exactly = 0) { catalogRepository.getLiveChannels(null) }
-        verify(exactly = 0) { catalogRepository.getMovies(null) }
-        verify(exactly = 0) { catalogRepository.getSeriesList(null) }
-    }
-
-    @Test
-    fun `content types are loaded strictly sequentially, one after another, never fanned out concurrently`() {
-        stubLiveChannels("1", listOf(chan1))
-        stubMovies("10", listOf(movie1))
-        stubSeries("20", listOf(series1))
-
-        createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
         liveCategoriesFlow.value = Resource.Success(listOf(sportCategory))
-        vodCategoriesFlow.value = Resource.Success(listOf(actionCategory))
-        seriesCategoriesFlow.value = Resource.Success(listOf(dramaCategory))
         testDispatcher.scheduler.runCurrent()
 
-        // The sequential loader awaits Live's entire per-category loop before starting Movies,
-        // and Movies' before starting Series — this ordering is the actual mechanism that bounds
-        // memory to ~1 category at a time across all three content types (see class KDoc).
-        verifyOrder {
-            catalogRepository.getLiveChannels("1")
-            catalogRepository.getMovies("10")
-            catalogRepository.getSeriesList("20")
-        }
+        viewModel.onRetry()
+        testDispatcher.scheduler.runCurrent()
+
+        // Movies/Series tabs were never opened — onRetry must not start loading them.
+        verify(exactly = 0) { catalogRepository.observeVodCategories() }
+        verify(exactly = 0) { catalogRepository.observeSeriesCategories() }
+        verify(exactly = 0) { catalogRepository.getMovies(any()) }
+        verify(exactly = 0) { catalogRepository.getSeriesList(any()) }
     }
 
     // ── Task 22: Favorites ("Ma liste") ───────────────────────────────────────
@@ -439,6 +503,9 @@ class HomeViewModelTest {
     @Test
     fun `empty favorites list results in an empty myListRows section`() {
         createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        viewModel.onCatalogTabSelected(ContentType.SERIES)
 
         stubLiveChannels("1", listOf(chan1))
         stubMovies("10", listOf(movie1))
@@ -457,6 +524,9 @@ class HomeViewModelTest {
     @Test
     fun `favorites row is populated when favorites exist and matching catalog items are loaded`() {
         createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        viewModel.onCatalogTabSelected(ContentType.SERIES)
 
         stubLiveChannels("1", listOf(chan1))
         stubMovies("10", listOf(movie1))
@@ -483,11 +553,18 @@ class HomeViewModelTest {
         assertEquals("s1", myListRow.items[0].id)
         assertEquals("c1", myListRow.items[1].id)
         assertEquals("m1", myListRow.items[2].id)
+
+        // All three types were already resolved from the loaded catalog tabs — no fallback needed.
+        coVerify(exactly = 0) { catalogRepository.getMovieDetail(any()) }
+        coVerify(exactly = 0) { catalogRepository.getSeriesDetail(any()) }
     }
 
     @Test
     fun `unmatched favorites are silently skipped instead of crashing`() {
         createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        viewModel.onCatalogTabSelected(ContentType.SERIES)
 
         stubLiveChannels("1", listOf(chan1))
         stubMovies("10", listOf(movie1))
@@ -495,8 +572,8 @@ class HomeViewModelTest {
         liveCategoriesFlow.value = Resource.Success(listOf(sportCategory))
         vodCategoriesFlow.value = Resource.Success(listOf(actionCategory))
         seriesCategoriesFlow.value = Resource.Success(listOf(dramaCategory))
-        // The unmatched MOVIE favorite below now triggers the getMovieDetail fallback (OOM fix) —
-        // stub it to also miss, so the entry is still silently skipped end-to-end.
+        // The unmatched MOVIE favorite below now triggers the getMovieDetail fallback (on-demand
+        // loading fix) — stub it to also miss, so the entry is still silently skipped end-to-end.
         coEvery { catalogRepository.getMovieDetail("nonexistent") } returns Resource.Error(message = "not found")
         // Include an unmatched favorite; it should be silently skipped.
         favoritesFlow.value = listOf(
@@ -517,10 +594,13 @@ class HomeViewModelTest {
     }
 
     @Test
-    fun `no active profile results in an empty myListRows section`() {
+    fun `no active profile results in an empty myListRows section and no favorites repository call`() {
         // Stub the preferences store to return null (no active profile).
         coEvery { appPreferencesStore.getActiveProfileId() } returns null
         createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        viewModel.onCatalogTabSelected(ContentType.SERIES)
 
         stubLiveChannels("1", listOf(chan1))
         stubMovies("10", listOf(movie1))
@@ -532,11 +612,15 @@ class HomeViewModelTest {
 
         val state = viewModel.uiState.value
         assertTrue(state.myListRows.isEmpty())
+        verify(exactly = 0) { favoritesRepository.observeFavorites(any()) }
     }
 
     @Test
     fun `favorites row reacts live to observeFavorites emitting a new list`() {
         createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        viewModel.onCatalogTabSelected(ContentType.SERIES)
 
         stubLiveChannels("1", listOf(chan1))
         stubMovies("10", listOf(movie1))
@@ -568,6 +652,9 @@ class HomeViewModelTest {
     @Test
     fun `myListRows are preserved during partial reload when other sections start loading`() {
         createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        viewModel.onCatalogTabSelected(ContentType.SERIES)
 
         stubLiveChannels("1", listOf(chan1))
         stubMovies("10", listOf(movie1))
@@ -593,17 +680,11 @@ class HomeViewModelTest {
         assertEquals(state1.myListRows, state2.myListRows)
     }
 
-    // ── OOM fix: MOVIE fallback for "Ma liste" ─────────────────────────────────
+    // ── "Ma liste" without any catalog tab selected (on-demand loading fix) ───
 
     @Test
-    fun `MOVIE favorite not found in any loaded category falls back to getMovieDetail instead of being skipped`() {
+    fun `MOVIE favorite falls back to getMovieDetail when the Films tab was never selected`() {
         createViewModel()
-
-        // Live must resolve too — the sequential loader processes Live before Movies (see class
-        // KDoc "Category-scoped loading"), so Movies never progresses past Loading otherwise.
-        liveCategoriesFlow.value = Resource.Success(emptyList())
-        // No movie categories loaded at all for "m1" — the category-scoped state never resolves it.
-        vodCategoriesFlow.value = Resource.Success(emptyList())
         coEvery { catalogRepository.getMovieDetail("m1") } returns Resource.Success(movie1)
 
         favoritesFlow.value = listOf(
@@ -615,15 +696,14 @@ class HomeViewModelTest {
         assertEquals(listOf("m1"), myListRow.items.map { it.id })
         assertEquals("Explosion Totale", myListRow.items.first().title)
         coVerify(exactly = 1) { catalogRepository.getMovieDetail("m1") }
+        // Confirms the fix: no catalog tab was ever selected for this scenario.
+        verify(exactly = 0) { catalogRepository.observeVodCategories() }
     }
 
     @Test
     fun `MOVIE favorite already present in a loaded category does not trigger the getMovieDetail fallback`() {
         createViewModel()
-
-        // Live must resolve too — the sequential loader processes Live before Movies, so Movies
-        // never progresses past Loading (and movie1 would never be found) otherwise.
-        liveCategoriesFlow.value = Resource.Success(emptyList())
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
         stubMovies("10", listOf(movie1))
         vodCategoriesFlow.value = Resource.Success(listOf(actionCategory))
 
@@ -636,15 +716,71 @@ class HomeViewModelTest {
         coVerify(exactly = 0) { catalogRepository.getMovieDetail(any()) }
     }
 
+    @Test
+    fun `SERIES favorite falls back to getSeriesDetail when the Series tab was never selected`() {
+        createViewModel()
+        coEvery { catalogRepository.getSeriesDetail("s1") } returns Resource.Success(series1)
+
+        favoritesFlow.value = listOf(
+            FavoriteItem(profileId = "profile-1", contentId = "s1", contentType = ContentType.SERIES, addedAt = 1000),
+        )
+        testDispatcher.scheduler.runCurrent()
+
+        val myListRow = viewModel.uiState.value.myListRows.first()
+        assertEquals(listOf("s1"), myListRow.items.map { it.id })
+        assertEquals("La Casa de Papel", myListRow.items.first().title)
+        coVerify(exactly = 1) { catalogRepository.getSeriesDetail("s1") }
+        verify(exactly = 0) { catalogRepository.observeSeriesCategories() }
+    }
+
+    @Test
+    fun `SERIES favorite already present in a loaded category does not trigger the getSeriesDetail fallback`() {
+        createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.SERIES)
+        stubSeries("20", listOf(series1))
+        seriesCategoriesFlow.value = Resource.Success(listOf(dramaCategory))
+
+        favoritesFlow.value = listOf(
+            FavoriteItem(profileId = "profile-1", contentId = "s1", contentType = ContentType.SERIES, addedAt = 1000),
+        )
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(1, viewModel.uiState.value.myListRows.first().items.size)
+        coVerify(exactly = 0) { catalogRepository.getSeriesDetail(any()) }
+    }
+
+    @Test
+    fun `SERIES favorite is silently skipped when the getSeriesDetail fallback also misses`() {
+        createViewModel()
+        coEvery { catalogRepository.getSeriesDetail("missing") } returns Resource.Error(message = "not found")
+
+        favoritesFlow.value = listOf(
+            FavoriteItem(profileId = "profile-1", contentId = "missing", contentType = ContentType.SERIES, addedAt = 1000),
+        )
+        testDispatcher.scheduler.runCurrent()
+
+        assertTrue(viewModel.uiState.value.myListRows.isEmpty())
+    }
+
+    @Test
+    fun `LIVE favorite is silently skipped when the Chaines tab was never selected (no fallback endpoint)`() {
+        createViewModel()
+
+        favoritesFlow.value = listOf(
+            FavoriteItem(profileId = "profile-1", contentId = "c1", contentType = ContentType.LIVE, addedAt = 1000),
+        )
+        testDispatcher.scheduler.runCurrent()
+
+        // Documented, accepted limitation: no single-item Xtream endpoint exists for a live channel.
+        assertTrue(viewModel.uiState.value.myListRows.isEmpty())
+    }
+
     // ── Task 23: Continue Watching ("Reprendre") ──────────────────────────────
 
     @Test
     fun `empty continue watching history results in an empty continueWatchingRows section`() {
         createViewModel()
 
-        liveCategoriesFlow.value = Resource.Success(emptyList())
-        stubMovies("10", listOf(movie1))
-        vodCategoriesFlow.value = Resource.Success(listOf(actionCategory))
         continueWatchingFlow.value = emptyList()
         testDispatcher.scheduler.runCurrent()
 
@@ -653,14 +789,10 @@ class HomeViewModelTest {
     }
 
     @Test
-    fun `continue watching row is populated for MOVIE entries with a resolved stream URL`() {
+    fun `continue watching row is populated for a MOVIE entry via fallback even when the Films tab was never selected`() {
         createViewModel()
+        coEvery { catalogRepository.getMovieDetail("m1") } returns Resource.Success(movie1)
 
-        // Live must resolve first — the sequential loader processes Live before Movies (see class
-        // KDoc "Category-scoped loading"), so Movies never progresses past Loading otherwise.
-        liveCategoriesFlow.value = Resource.Success(emptyList())
-        stubMovies("10", listOf(movie1, movie2))
-        vodCategoriesFlow.value = Resource.Success(listOf(actionCategory))
         continueWatchingFlow.value = listOf(
             PlaybackProgress(
                 contentId = "m1",
@@ -686,13 +818,14 @@ class HomeViewModelTest {
         assertEquals(ContentType.MOVIE, card.contentType)
         // movie1.containerExtension is null -> falls back to "mp4" (mirrors MovieDetailViewModel).
         assertEquals("http://example.com:8080/movie/user/pass/m1.mp4", card.resumeStreamUrl)
+        coVerify(exactly = 1) { catalogRepository.getMovieDetail("m1") }
+        verify(exactly = 0) { catalogRepository.observeVodCategories() }
     }
 
     @Test
     fun `continue watching row preserves observeContinueWatching ordering without re-sorting`() {
         createViewModel()
-
-        liveCategoriesFlow.value = Resource.Success(emptyList())
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
         stubMovies("10", listOf(movie1, movie2))
         vodCategoriesFlow.value = Resource.Success(listOf(actionCategory))
         // observeContinueWatching contract: most-recently-updated first. m2 first even though
@@ -721,15 +854,13 @@ class HomeViewModelTest {
         assertEquals(listOf("m2", "m1"), items.map { it.id })
         // movie2.containerExtension = "mkv" -> used as-is (no fallback needed).
         assertEquals("http://example.com:8080/movie/user/pass/m2.mkv", items[0].resumeStreamUrl)
+        coVerify(exactly = 0) { catalogRepository.getMovieDetail(any()) }
     }
 
     @Test
     fun `LIVE progress entries are always skipped from the continue watching row`() {
         createViewModel()
 
-        liveCategoriesFlow.value = Resource.Success(emptyList())
-        stubMovies("10", listOf(movie1))
-        vodCategoriesFlow.value = Resource.Success(listOf(actionCategory))
         continueWatchingFlow.value = listOf(
             // Defensive filter: a stale LIVE record should never surface here (Task 23).
             PlaybackProgress(
@@ -740,22 +871,11 @@ class HomeViewModelTest {
                 lastUpdatedMillis = 5000L,
                 profileId = "profile-1",
             ),
-            PlaybackProgress(
-                contentId = "m1",
-                contentType = ContentType.MOVIE,
-                positionMillis = 30_000L,
-                durationMillis = 100_000L,
-                lastUpdatedMillis = 2000L,
-                profileId = "profile-1",
-            ),
         )
         testDispatcher.scheduler.runCurrent()
 
         val state = viewModel.uiState.value
-        assertEquals(1, state.continueWatchingRows.size)
-        val items = state.continueWatchingRows.first().items
-        assertEquals(1, items.size)
-        assertEquals("m1", items.first().id)
+        assertTrue(state.continueWatchingRows.isEmpty())
     }
 
     // ── Task 24-25: Continue Watching series support ──────────────────────────
@@ -765,7 +885,6 @@ class HomeViewModelTest {
         coEvery { catalogRepository.getCachedEpisodeWithSeries("e1") } returns (seriesForContinueWatching to episode1)
         createViewModel()
 
-        vodCategoriesFlow.value = Resource.Success(emptyList())
         continueWatchingFlow.value = listOf(
             PlaybackProgress(
                 contentId = "e1",
@@ -793,6 +912,8 @@ class HomeViewModelTest {
         assertEquals(ContentType.SERIES, card.contentType)
         // episode1.containerExtension is null -> falls back to "mp4".
         assertEquals("http://example.com:8080/series/user/pass/e1.mp4", card.resumeStreamUrl)
+        // Cache-only resolution — no catalog tab needed.
+        verify(exactly = 0) { catalogRepository.observeSeriesCategories() }
     }
 
     @Test
@@ -800,7 +921,6 @@ class HomeViewModelTest {
         coEvery { catalogRepository.getCachedEpisodeWithSeries("e2") } returns (seriesForContinueWatching to episode2)
         createViewModel()
 
-        vodCategoriesFlow.value = Resource.Success(emptyList())
         continueWatchingFlow.value = listOf(
             PlaybackProgress(
                 contentId = "e2",
@@ -824,7 +944,6 @@ class HomeViewModelTest {
         // Default setUp() stub already returns null for any episode id — simulate a cache miss.
         createViewModel()
 
-        vodCategoriesFlow.value = Resource.Success(emptyList())
         continueWatchingFlow.value = listOf(
             PlaybackProgress(
                 contentId = "e1",
@@ -845,8 +964,7 @@ class HomeViewModelTest {
     fun `continue watching row preserves interleaved recency ordering across movie and series entries`() {
         coEvery { catalogRepository.getCachedEpisodeWithSeries("e1") } returns (seriesForContinueWatching to episode1)
         createViewModel()
-
-        liveCategoriesFlow.value = Resource.Success(emptyList())
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
         stubMovies("10", listOf(movie1, movie2))
         vodCategoriesFlow.value = Resource.Success(listOf(actionCategory))
         // Interleaved recency: movie2 (t=9000) -> series (t=5000) -> movie1 (t=1000). The row must
@@ -886,12 +1004,8 @@ class HomeViewModelTest {
     @Test
     fun `unmatched movie progress is silently skipped instead of crashing`() {
         createViewModel()
-
-        liveCategoriesFlow.value = Resource.Success(emptyList())
-        stubMovies("10", listOf(movie1))
-        vodCategoriesFlow.value = Resource.Success(listOf(actionCategory))
-        // The unmatched entry below now triggers the getMovieDetail fallback (OOM fix) — stub it
-        // to also miss, so the entry is still silently skipped end-to-end.
+        // The unmatched entry below triggers the getMovieDetail fallback (on-demand loading fix) —
+        // stub it to also miss, so the entry is still silently skipped end-to-end.
         coEvery { catalogRepository.getMovieDetail("nonexistent") } returns Resource.Error(message = "not found")
         continueWatchingFlow.value = listOf(
             PlaybackProgress(
@@ -914,7 +1028,6 @@ class HomeViewModelTest {
         coEvery { appPreferencesStore.getActiveProfileId() } returns null
         createViewModel()
 
-        vodCategoriesFlow.value = Resource.Success(emptyList())
         testDispatcher.scheduler.runCurrent()
 
         val state = viewModel.uiState.value
@@ -927,7 +1040,6 @@ class HomeViewModelTest {
         coEvery { credentialsProvider.getCredentials() } returns null
         createViewModel()
 
-        vodCategoriesFlow.value = Resource.Success(emptyList())
         continueWatchingFlow.value = listOf(
             PlaybackProgress(
                 contentId = "m1",
@@ -947,8 +1059,7 @@ class HomeViewModelTest {
     @Test
     fun `continue watching row reacts live to observeContinueWatching emitting a new list`() {
         createViewModel()
-
-        liveCategoriesFlow.value = Resource.Success(emptyList())
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
         stubMovies("10", listOf(movie1, movie2))
         vodCategoriesFlow.value = Resource.Success(listOf(actionCategory))
         continueWatchingFlow.value = listOf(
@@ -993,9 +1104,10 @@ class HomeViewModelTest {
     @Test
     fun `continueWatchingRows is preserved during partial reload when other sections start loading`() {
         createViewModel()
-
-        liveCategoriesFlow.value = Resource.Success(emptyList())
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
         stubMovies("10", listOf(movie1))
+        liveCategoriesFlow.value = Resource.Success(emptyList())
         vodCategoriesFlow.value = Resource.Success(listOf(actionCategory))
         continueWatchingFlow.value = listOf(
             PlaybackProgress(
@@ -1021,45 +1133,12 @@ class HomeViewModelTest {
         assertEquals(state1.continueWatchingRows, state2.continueWatchingRows)
     }
 
-    // ── OOM fix: MOVIE fallback for "Reprendre" ────────────────────────────────
-
-    @Test
-    fun `MOVIE continue watching entry not found in any loaded category falls back to getMovieDetail`() {
-        createViewModel()
-
-        // Live must resolve too — the sequential loader processes Live before Movies (see class
-        // KDoc "Category-scoped loading"), so Movies never progresses past Loading otherwise.
-        liveCategoriesFlow.value = Resource.Success(emptyList())
-        // No movie categories loaded at all for "m2" — the category-scoped state never resolves it.
-        vodCategoriesFlow.value = Resource.Success(emptyList())
-        coEvery { catalogRepository.getMovieDetail("m2") } returns Resource.Success(movie2)
-
-        continueWatchingFlow.value = listOf(
-            PlaybackProgress(
-                contentId = "m2",
-                contentType = ContentType.MOVIE,
-                positionMillis = 5_000L,
-                durationMillis = 50_000L,
-                lastUpdatedMillis = 9000L,
-                profileId = "profile-1",
-            ),
-        )
-        testDispatcher.scheduler.runCurrent()
-
-        val items = viewModel.uiState.value.continueWatchingRows.first().items
-        assertEquals(listOf("m2"), items.map { it.id })
-        // movie2.containerExtension = "mkv" -> resolved via the fallback, still used as-is.
-        assertEquals("http://example.com:8080/movie/user/pass/m2.mkv", items.first().resumeStreamUrl)
-        coVerify(exactly = 1) { catalogRepository.getMovieDetail("m2") }
-    }
+    // ── Continue Watching MOVIE fallback vs. shared state reuse ───────────────
 
     @Test
     fun `MOVIE continue watching entry already present in a loaded category does not trigger the getMovieDetail fallback`() {
         createViewModel()
-
-        // Live must resolve too — the sequential loader processes Live before Movies, so Movies
-        // never progresses past Loading (and movie1 would never be found) otherwise.
-        liveCategoriesFlow.value = Resource.Success(emptyList())
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
         stubMovies("10", listOf(movie1))
         vodCategoriesFlow.value = Resource.Success(listOf(actionCategory))
 
@@ -1082,9 +1161,6 @@ class HomeViewModelTest {
     @Test
     fun `MOVIE continue watching entry is silently skipped when the getMovieDetail fallback also misses`() {
         createViewModel()
-
-        liveCategoriesFlow.value = Resource.Success(emptyList())
-        vodCategoriesFlow.value = Resource.Success(emptyList())
         coEvery { catalogRepository.getMovieDetail("missing") } returns Resource.Error(message = "not found")
 
         continueWatchingFlow.value = listOf(
@@ -1100,5 +1176,168 @@ class HomeViewModelTest {
         testDispatcher.scheduler.runCurrent()
 
         assertTrue(viewModel.uiState.value.continueWatchingRows.isEmpty())
+    }
+
+    // ── Home tab populates without any catalog tab ever selected ─────────────
+
+    @Test
+    fun `Reprendre and Ma liste both populate correctly when no catalog tab has ever been selected`() {
+        coEvery { catalogRepository.getMovieDetail("m1") } returns Resource.Success(movie1)
+        coEvery { catalogRepository.getSeriesDetail("s1") } returns Resource.Success(series1)
+        coEvery { catalogRepository.getCachedEpisodeWithSeries("e1") } returns (seriesForContinueWatching to episode1)
+        createViewModel()
+
+        continueWatchingFlow.value = listOf(
+            PlaybackProgress(
+                contentId = "e1",
+                contentType = ContentType.SERIES,
+                positionMillis = 10_000L,
+                durationMillis = 40_000L,
+                lastUpdatedMillis = 5000L,
+                profileId = "profile-1",
+            ),
+        )
+        favoritesFlow.value = listOf(
+            FavoriteItem(profileId = "profile-1", contentId = "m1", contentType = ContentType.MOVIE, addedAt = 2000),
+            FavoriteItem(profileId = "profile-1", contentId = "s1", contentType = ContentType.SERIES, addedAt = 1000),
+        )
+        testDispatcher.scheduler.runCurrent()
+
+        val state = viewModel.uiState.value
+        assertEquals(1, state.continueWatchingRows.size)
+        assertEquals("e1", state.continueWatchingRows.first().items.first().id)
+
+        assertEquals(1, state.myListRows.size)
+        assertEquals(listOf("m1", "s1"), state.myListRows.first().items.map { it.id })
+
+        // No catalog tab was ever requested for this scenario.
+        verify(exactly = 0) { catalogRepository.observeLiveCategories() }
+        verify(exactly = 0) { catalogRepository.observeVodCategories() }
+        verify(exactly = 0) { catalogRepository.observeSeriesCategories() }
+        assertTrue(state.liveRows.isEmpty())
+        assertTrue(state.movieRows.isEmpty())
+        assertTrue(state.seriesRows.isEmpty())
+    }
+
+    // ── Per-tab language filter ────────────────────────────────────────────────
+
+    @Test
+    fun `available languages for a tab are derived from distinct tags detected in loaded categories, growing as more categories load`() {
+        createViewModel()
+        val frSport = Category(id = "30", name = "FR | Sport", type = ContentType.LIVE)
+        val enNews = Category(id = "31", name = "EN | News", type = ContentType.LIVE)
+        val untaggedKids = Category(id = "32", name = "Kids", type = ContentType.LIVE)
+
+        stubLiveChannels("30", listOf(Channel(id = "c30", name = "FRChan", logoUrl = null, categoryId = "30", epgChannelId = null)))
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        liveCategoriesFlow.value = Resource.Success(listOf(frSport))
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(listOf("FR"), viewModel.uiState.value.liveLanguages)
+        // No filter selected by default -> "Toutes".
+        assertNull(viewModel.uiState.value.selectedLiveLanguage)
+
+        // Two more categories load progressively — one more tagged (EN), one untagged (Kids).
+        liveCategoriesFlow.value = Resource.Success(listOf(frSport, enNews, untaggedKids))
+        testDispatcher.scheduler.runCurrent()
+
+        // The untagged "Kids" category never contributes a tag to the available-languages list.
+        assertEquals(listOf("FR", "EN"), viewModel.uiState.value.liveLanguages)
+    }
+
+    @Test
+    fun `selecting a language filters live rows to only the matching categories, excluding categories with no detectable tag`() {
+        createViewModel()
+        val frSport = Category(id = "30", name = "FR | Sport", type = ContentType.LIVE)
+        val enNews = Category(id = "31", name = "EN | News", type = ContentType.LIVE)
+        val untaggedKids = Category(id = "32", name = "Kids", type = ContentType.LIVE)
+
+        stubLiveChannels("30", listOf(Channel(id = "c30", name = "FRChan", logoUrl = null, categoryId = "30", epgChannelId = null)))
+        stubLiveChannels("31", listOf(Channel(id = "c31", name = "ENChan", logoUrl = null, categoryId = "31", epgChannelId = null)))
+        stubLiveChannels("32", listOf(Channel(id = "c32", name = "KidsChan", logoUrl = null, categoryId = "32", epgChannelId = null)))
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        liveCategoriesFlow.value = Resource.Success(listOf(frSport, enNews, untaggedKids))
+        testDispatcher.scheduler.runCurrent()
+
+        // Sanity: under "Toutes" (no filter, default), every category with items is shown.
+        assertEquals(setOf("30", "31", "32"), viewModel.uiState.value.liveRows.map { it.categoryId }.toSet())
+
+        viewModel.onLanguageSelected(ContentType.LIVE, "FR")
+        testDispatcher.scheduler.runCurrent()
+
+        // Only the FR-tagged category remains — the untagged "Kids" category is excluded, not just
+        // the non-matching EN one, per the brief ("une catégorie sans tag détectable est masquée
+        // dès qu'un filtre précis est actif").
+        assertEquals(listOf("30"), viewModel.uiState.value.liveRows.map { it.categoryId })
+        assertEquals("FR", viewModel.uiState.value.selectedLiveLanguage)
+    }
+
+    @Test
+    fun `selecting Toutes (null) restores every previously filtered row`() {
+        createViewModel()
+        val frSport = Category(id = "30", name = "FR | Sport", type = ContentType.LIVE)
+        val untaggedKids = Category(id = "32", name = "Kids", type = ContentType.LIVE)
+
+        stubLiveChannels("30", listOf(Channel(id = "c30", name = "FRChan", logoUrl = null, categoryId = "30", epgChannelId = null)))
+        stubLiveChannels("32", listOf(Channel(id = "c32", name = "KidsChan", logoUrl = null, categoryId = "32", epgChannelId = null)))
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        liveCategoriesFlow.value = Resource.Success(listOf(frSport, untaggedKids))
+        testDispatcher.scheduler.runCurrent()
+
+        viewModel.onLanguageSelected(ContentType.LIVE, "FR")
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(listOf("30"), viewModel.uiState.value.liveRows.map { it.categoryId })
+
+        viewModel.onLanguageSelected(ContentType.LIVE, null)
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(setOf("30", "32"), viewModel.uiState.value.liveRows.map { it.categoryId }.toSet())
+        assertNull(viewModel.uiState.value.selectedLiveLanguage)
+    }
+
+    @Test
+    fun `language selection is independent per content type`() {
+        createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        stubLiveChannels("1", listOf(chan1))
+        stubMovies("10", listOf(movie1))
+        liveCategoriesFlow.value = Resource.Success(listOf(sportCategory))
+        vodCategoriesFlow.value = Resource.Success(listOf(actionCategory))
+        testDispatcher.scheduler.runCurrent()
+
+        viewModel.onLanguageSelected(ContentType.LIVE, "FR")
+        testDispatcher.scheduler.runCurrent()
+
+        // Selecting a LIVE-tab filter must not affect the MOVIE tab's own selection or rows.
+        assertEquals("FR", viewModel.uiState.value.selectedLiveLanguage)
+        assertNull(viewModel.uiState.value.selectedMovieLanguage)
+        assertEquals(1, viewModel.uiState.value.movieRows.size)
+    }
+
+    @Test
+    fun `onLanguageSelected does not trigger any additional repository fetch`() {
+        createViewModel()
+        stubLiveChannels("1", listOf(chan1))
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        liveCategoriesFlow.value = Resource.Success(listOf(sportCategory))
+        testDispatcher.scheduler.runCurrent()
+
+        viewModel.onLanguageSelected(ContentType.LIVE, "FR")
+        testDispatcher.scheduler.runCurrent()
+        viewModel.onLanguageSelected(ContentType.LIVE, null)
+        testDispatcher.scheduler.runCurrent()
+
+        // Purely in-memory post-processing — no new fetch of any kind is triggered.
+        verify(exactly = 1) { catalogRepository.observeLiveCategories() }
+        verify(exactly = 1) { catalogRepository.getLiveChannels("1") }
+        verify(exactly = 0) { catalogRepository.observeVodCategories() }
+        verify(exactly = 0) { catalogRepository.observeSeriesCategories() }
+        verify(exactly = 0) { catalogRepository.getMovies(any()) }
+        verify(exactly = 0) { catalogRepository.getSeriesList(any()) }
+        verify(exactly = 0) { catalogRepository.invalidateCaches() }
     }
 }

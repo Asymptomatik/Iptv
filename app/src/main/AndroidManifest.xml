@@ -52,6 +52,16 @@
           to the user's Google account, exposing the plaintext password
           outside the device. Disabling backup keeps credentials confined to
           the device's private app data directory.
+
+        android:largeHeap="true" (OOM mitigation — production crash fix):
+          A production OutOfMemoryError was observed on a large Xtream account
+          (see HomeViewModel KDoc "On-demand catalog loading" for the primary
+          fix: catalog content is no longer fetched until its tab is opened).
+          largeHeap requests a bigger Dalvik/ART heap from the system as a
+          defense-in-depth safety margin on top of that fix — it does not
+          replace it, since the OS is still free to deny/limit the request on
+          low-memory devices, and a larger heap only delays an OOM caused by an
+          actually-unbounded allocation rather than preventing it.
     -->
     <application
         android:name=".IptvApplication"
@@ -62,6 +72,7 @@
         android:hardwareAccelerated="true"
         android:usesCleartextTraffic="true"
         android:allowBackup="false"
+        android:largeHeap="true"
         android:theme="@style/Theme.IptvApp">
 
         <!--

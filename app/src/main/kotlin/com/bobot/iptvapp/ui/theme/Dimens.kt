@@ -100,6 +100,13 @@ object LayoutDimens {
      */
     val TopBarHeight = 56.dp
 
+    /**
+     * Height reserved for the [androidx.compose.material3.TabRow] docked under the home
+     * top bar (Task 1 — home tab navigation). Matches the default M3 Tab height so the
+     * hero content and the "no hero" spacer clear the floating header precisely.
+     */
+    val TabRowHeight = 48.dp
+
     /** Gap between adjacent poster cards in a horizontal row. */
     val CardRowSpacing = 12.dp
 
