@@ -86,7 +86,9 @@ fun SettingsScreen(
         onPasswordChange = viewModel::onPasswordChange,
         onTogglePasswordVisibility = viewModel::onTogglePasswordVisibility,
         onSaveCredentials = viewModel::onSaveCredentials,
-        onReloadCatalog = viewModel::onReloadCatalog,
+        onReloadMovies = viewModel::onReloadMovies,
+        onReloadSeries = viewModel::onReloadSeries,
+        onReloadChannels = viewModel::onReloadChannels,
         onLogout = viewModel::onLogout,
         onNavigateToProfiles = onNavigateToProfiles,
         modifier = modifier,
@@ -105,7 +107,9 @@ private fun SettingsContent(
     onPasswordChange: (String) -> Unit,
     onTogglePasswordVisibility: () -> Unit,
     onSaveCredentials: () -> Unit,
-    onReloadCatalog: () -> Unit,
+    onReloadMovies: () -> Unit,
+    onReloadSeries: () -> Unit,
+    onReloadChannels: () -> Unit,
     onLogout: () -> Unit,
     onNavigateToProfiles: () -> Unit,
     modifier: Modifier = Modifier,
@@ -296,11 +300,29 @@ private fun SettingsContent(
 
                     Spacer(modifier = Modifier.height(Spacing.md))
 
-                    // GhostButton for reload
+                    // GhostButton for reload — one per catalog type
                     GhostButton(
-                        label = "Recharger le catalogue",
+                        label = "Recharger les films",
                         enabled = !uiState.isLoading,
-                        onClick = onReloadCatalog,
+                        onClick = onReloadMovies,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    Spacer(modifier = Modifier.height(Spacing.md))
+
+                    GhostButton(
+                        label = "Recharger les séries",
+                        enabled = !uiState.isLoading,
+                        onClick = onReloadSeries,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    Spacer(modifier = Modifier.height(Spacing.md))
+
+                    GhostButton(
+                        label = "Recharger les chaînes",
+                        enabled = !uiState.isLoading,
+                        onClick = onReloadChannels,
                         modifier = Modifier.fillMaxWidth(),
                     )
 
@@ -360,7 +382,9 @@ private fun SettingsContentPreFilledPreview() {
             onPasswordChange = {},
             onTogglePasswordVisibility = {},
             onSaveCredentials = {},
-            onReloadCatalog = {},
+            onReloadMovies = {},
+            onReloadSeries = {},
+            onReloadChannels = {},
             onLogout = {},
             onNavigateToProfiles = {},
         )
@@ -383,7 +407,9 @@ private fun SettingsContentErrorPreview() {
             onPasswordChange = {},
             onTogglePasswordVisibility = {},
             onSaveCredentials = {},
-            onReloadCatalog = {},
+            onReloadMovies = {},
+            onReloadSeries = {},
+            onReloadChannels = {},
             onLogout = {},
             onNavigateToProfiles = {},
         )
@@ -405,7 +431,9 @@ private fun SettingsContentInfoPreview() {
             onPasswordChange = {},
             onTogglePasswordVisibility = {},
             onSaveCredentials = {},
-            onReloadCatalog = {},
+            onReloadMovies = {},
+            onReloadSeries = {},
+            onReloadChannels = {},
             onLogout = {},
             onNavigateToProfiles = {},
         )

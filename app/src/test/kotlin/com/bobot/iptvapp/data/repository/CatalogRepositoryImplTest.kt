@@ -388,6 +388,150 @@ class CatalogRepositoryImplTest {
         coVerify(exactly = 2) { dataSource.getLiveCategories() }
     }
 
+    // ── invalidateCache(type) — targeted invalidation ────────────────────────
+
+    /**
+     * Populates the categories + list session cache for all three [ContentType]s, then
+     * re-collects every one of them and returns the fresh [Resource.Success] payload for each —
+     * used both to seed the caches under test and, after invalidation, to prove which caches
+     * were actually cleared via `coVerify` call counts on [dataSource].
+     */
+    private suspend fun setUpAllThreeContentTypeCaches() {
+        val liveCategories = listOf(Category("1", "News", ContentType.LIVE))
+        val vodCategories = listOf(Category("1001", "Action", ContentType.MOVIE))
+        val seriesCategories = listOf(Category("2001", "Drama", ContentType.SERIES))
+        val channels = listOf(Channel("101", "BBC", null, "cat1", "bbc.world"))
+        val movies = listOf(buildMovie("m1"))
+        val series = listOf(buildSeries("s1"))
+
+        coEvery { dataSource.getLiveCategories() } returns liveCategories
+        coEvery { dataSource.getVodCategories() } returns vodCategories
+        coEvery { dataSource.getSeriesCategories() } returns seriesCategories
+        coEvery { dataSource.getLiveChannels(null) } returns channels
+        coEvery { dataSource.getMovies(null) } returns movies
+        coEvery { dataSource.getSeriesList(null) } returns series
+
+        repository.observeLiveCategories().test { awaitItem(); awaitItem(); awaitComplete() }
+        repository.observeVodCategories().test { awaitItem(); awaitItem(); awaitComplete() }
+        repository.observeSeriesCategories().test { awaitItem(); awaitItem(); awaitComplete() }
+        repository.getLiveChannels(null).test { awaitItem(); awaitItem(); awaitComplete() }
+        repository.getMovies(null).test { awaitItem(); awaitItem(); awaitComplete() }
+        repository.getSeriesList(null).test { awaitItem(); awaitItem(); awaitComplete() }
+    }
+
+    @Test
+    fun `invalidateCache LIVE clears only the LIVE list and categories cache`() =
+        runTest(testDispatcher) {
+            setUpAllThreeContentTypeCaches()
+
+            repository.invalidateCache(ContentType.LIVE)
+
+            // Re-collecting the invalidated type must hit the data source again.
+            repository.observeLiveCategories().test { awaitItem(); awaitItem(); awaitComplete() }
+            repository.getLiveChannels(null).test { awaitItem(); awaitItem(); awaitComplete() }
+            // Re-collecting the two untouched types must still be served from cache.
+            repository.observeVodCategories().test { awaitItem(); awaitItem(); awaitComplete() }
+            repository.getMovies(null).test { awaitItem(); awaitItem(); awaitComplete() }
+            repository.observeSeriesCategories().test { awaitItem(); awaitItem(); awaitComplete() }
+            repository.getSeriesList(null).test { awaitItem(); awaitItem(); awaitComplete() }
+
+            coVerify(exactly = 2) { dataSource.getLiveCategories() }
+            coVerify(exactly = 2) { dataSource.getLiveChannels(null) }
+            coVerify(exactly = 1) { dataSource.getVodCategories() }
+            coVerify(exactly = 1) { dataSource.getMovies(null) }
+            coVerify(exactly = 1) { dataSource.getSeriesCategories() }
+            coVerify(exactly = 1) { dataSource.getSeriesList(null) }
+        }
+
+    @Test
+    fun `invalidateCache MOVIE clears only the MOVIE list and categories cache`() =
+        runTest(testDispatcher) {
+            setUpAllThreeContentTypeCaches()
+
+            repository.invalidateCache(ContentType.MOVIE)
+
+            repository.observeVodCategories().test { awaitItem(); awaitItem(); awaitComplete() }
+            repository.getMovies(null).test { awaitItem(); awaitItem(); awaitComplete() }
+            repository.observeLiveCategories().test { awaitItem(); awaitItem(); awaitComplete() }
+            repository.getLiveChannels(null).test { awaitItem(); awaitItem(); awaitComplete() }
+            repository.observeSeriesCategories().test { awaitItem(); awaitItem(); awaitComplete() }
+            repository.getSeriesList(null).test { awaitItem(); awaitItem(); awaitComplete() }
+
+            coVerify(exactly = 2) { dataSource.getVodCategories() }
+            coVerify(exactly = 2) { dataSource.getMovies(null) }
+            coVerify(exactly = 1) { dataSource.getLiveCategories() }
+            coVerify(exactly = 1) { dataSource.getLiveChannels(null) }
+            coVerify(exactly = 1) { dataSource.getSeriesCategories() }
+            coVerify(exactly = 1) { dataSource.getSeriesList(null) }
+        }
+
+    @Test
+    fun `invalidateCache SERIES clears only the SERIES list and categories cache`() =
+        runTest(testDispatcher) {
+            setUpAllThreeContentTypeCaches()
+
+            repository.invalidateCache(ContentType.SERIES)
+
+            repository.observeSeriesCategories().test { awaitItem(); awaitItem(); awaitComplete() }
+            repository.getSeriesList(null).test { awaitItem(); awaitItem(); awaitComplete() }
+            repository.observeLiveCategories().test { awaitItem(); awaitItem(); awaitComplete() }
+            repository.getLiveChannels(null).test { awaitItem(); awaitItem(); awaitComplete() }
+            repository.observeVodCategories().test { awaitItem(); awaitItem(); awaitComplete() }
+            repository.getMovies(null).test { awaitItem(); awaitItem(); awaitComplete() }
+
+            coVerify(exactly = 2) { dataSource.getSeriesCategories() }
+            coVerify(exactly = 2) { dataSource.getSeriesList(null) }
+            coVerify(exactly = 1) { dataSource.getLiveCategories() }
+            coVerify(exactly = 1) { dataSource.getLiveChannels(null) }
+            coVerify(exactly = 1) { dataSource.getVodCategories() }
+            coVerify(exactly = 1) { dataSource.getMovies(null) }
+        }
+
+    @Test
+    fun `invalidateCache called twice in a row on an already-empty cache does not throw`() =
+        runTest(testDispatcher) {
+            // Cache was never populated for this repository instance — invalidating it is a
+            // safe no-op, and calling it again immediately after must not crash either.
+            repository.invalidateCache(ContentType.LIVE)
+            repository.invalidateCache(ContentType.LIVE)
+
+            val categories = listOf(Category("1", "News", ContentType.LIVE))
+            coEvery { dataSource.getLiveCategories() } returns categories
+
+            // The cache still behaves normally afterwards — a single data source call.
+            repository.observeLiveCategories().test {
+                awaitItem() // Loading
+                assertEquals(Resource.Success(categories), awaitItem())
+                awaitComplete()
+            }
+
+            coVerify(exactly = 1) { dataSource.getLiveCategories() }
+        }
+
+    @Test
+    fun `invalidateCache called twice in a row on a populated cache clears it exactly once`() =
+        runTest(testDispatcher) {
+            val categories = listOf(Category("1001", "Action", ContentType.MOVIE))
+            coEvery { dataSource.getVodCategories() } returns categories
+
+            // Populate the cache.
+            repository.observeVodCategories().test { awaitItem(); awaitItem(); awaitComplete() }
+
+            // Two consecutive invalidations must not crash and must not double-fetch afterwards.
+            repository.invalidateCache(ContentType.MOVIE)
+            repository.invalidateCache(ContentType.MOVIE)
+
+            repository.observeVodCategories().test {
+                awaitItem() // Loading
+                assertEquals(Resource.Success(categories), awaitItem())
+                awaitComplete()
+            }
+
+            // Called once before invalidation, once after — the second invalidateCache() call
+            // was a no-op on an already-cleared cache.
+            coVerify(exactly = 2) { dataSource.getVodCategories() }
+        }
+
     // ── getMovieDetail ────────────────────────────────────────────────────────
 
     @Test

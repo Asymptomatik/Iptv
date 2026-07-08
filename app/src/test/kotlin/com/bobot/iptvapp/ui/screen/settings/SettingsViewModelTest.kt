@@ -2,6 +2,7 @@ package com.bobot.iptvapp.ui.screen.settings
 
 import com.bobot.iptvapp.data.source.CatalogException
 import com.bobot.iptvapp.data.source.InMemoryCredentialsProvider
+import com.bobot.iptvapp.domain.model.ContentType
 import com.bobot.iptvapp.domain.model.XtreamCredentials
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.util.Resource
@@ -119,8 +120,8 @@ class SettingsViewModelTest {
     fun `field changes update state and clear prior messages`() {
         runTest(testDispatcher) { seedCredentials(existingCredentials) }
         createViewModel()
-        every { catalogRepository.invalidateCaches() } just Runs
-        viewModel.onReloadCatalog() // sets an infoMessage to verify it gets cleared below
+        every { catalogRepository.invalidateCache(ContentType.MOVIE) } just Runs
+        viewModel.onReloadMovies() // sets an infoMessage to verify it gets cleared below
 
         viewModel.onServerUrlChange("http://a.com")
         viewModel.onUsernameChange("u")
@@ -298,19 +299,53 @@ class SettingsViewModelTest {
         coVerify(exactly = 1) { catalogRepository.authenticate() }
     }
 
-    // ── onReloadCatalog ───────────────────────────────────────────────────────
+    // ── onReloadMovies / onReloadSeries / onReloadChannels ──────────────────────
 
     @Test
-    fun `onReloadCatalog invalidates caches and shows a confirmation message`() {
+    fun `onReloadMovies invalidates only the MOVIE cache and shows the movies confirmation message`() {
         runTest(testDispatcher) { seedCredentials(existingCredentials) }
         createViewModel()
-        every { catalogRepository.invalidateCaches() } just Runs
+        every { catalogRepository.invalidateCache(any()) } just Runs
 
-        viewModel.onReloadCatalog()
+        viewModel.onReloadMovies()
 
-        verify(exactly = 1) { catalogRepository.invalidateCaches() }
+        verify(exactly = 1) { catalogRepository.invalidateCache(ContentType.MOVIE) }
+        verify(exactly = 0) { catalogRepository.invalidateCache(ContentType.SERIES) }
+        verify(exactly = 0) { catalogRepository.invalidateCache(ContentType.LIVE) }
         val state = viewModel.uiState.value
-        assertTrue(state.infoMessage!!.isNotBlank())
+        assertEquals("Films rechargés.", state.infoMessage)
+        assertNull(state.errorMessage)
+    }
+
+    @Test
+    fun `onReloadSeries invalidates only the SERIES cache and shows the series confirmation message`() {
+        runTest(testDispatcher) { seedCredentials(existingCredentials) }
+        createViewModel()
+        every { catalogRepository.invalidateCache(any()) } just Runs
+
+        viewModel.onReloadSeries()
+
+        verify(exactly = 1) { catalogRepository.invalidateCache(ContentType.SERIES) }
+        verify(exactly = 0) { catalogRepository.invalidateCache(ContentType.MOVIE) }
+        verify(exactly = 0) { catalogRepository.invalidateCache(ContentType.LIVE) }
+        val state = viewModel.uiState.value
+        assertEquals("Séries rechargées.", state.infoMessage)
+        assertNull(state.errorMessage)
+    }
+
+    @Test
+    fun `onReloadChannels invalidates only the LIVE cache and shows the channels confirmation message`() {
+        runTest(testDispatcher) { seedCredentials(existingCredentials) }
+        createViewModel()
+        every { catalogRepository.invalidateCache(any()) } just Runs
+
+        viewModel.onReloadChannels()
+
+        verify(exactly = 1) { catalogRepository.invalidateCache(ContentType.LIVE) }
+        verify(exactly = 0) { catalogRepository.invalidateCache(ContentType.MOVIE) }
+        verify(exactly = 0) { catalogRepository.invalidateCache(ContentType.SERIES) }
+        val state = viewModel.uiState.value
+        assertEquals("Chaînes rechargées.", state.infoMessage)
         assertNull(state.errorMessage)
     }
 
