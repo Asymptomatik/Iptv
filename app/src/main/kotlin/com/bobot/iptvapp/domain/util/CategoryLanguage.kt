@@ -35,7 +35,8 @@ object CategoryLanguage {
      * non-delimiter, non-whitespace character right after any 2- or 3-letter prefix, so the
      * whole match fails rather than truncating to `"SPO"`.
      */
-    private val LANGUAGE_TAG_PATTERN = Regex("^([A-Za-z]{2,3})\\s*[|:-]\\s*\\S")
+    private val DIRECT_LANGUAGE_TAG_PATTERN = Regex("^([A-Za-z]{2,3})\\s*[|:-]\\s*(.+)$")
+    private val NESTED_LANGUAGE_TAG_PATTERN = Regex("^([A-Za-z]{2,10})\\s*[|:-]\\s*([A-Za-z]{2,3})\\s*[|:-]\\s*(.+)$")
 
     /**
      * Extracts the language tag from [name], or `null` when no recognised pattern is found.
@@ -47,8 +48,38 @@ object CategoryLanguage {
         val trimmed = name.trim()
         if (trimmed.isBlank()) return null
 
-        val match = LANGUAGE_TAG_PATTERN.find(trimmed) ?: return null
-        return match.groupValues[1].uppercase()
+        NESTED_LANGUAGE_TAG_PATTERN.matchEntire(trimmed)?.let { match ->
+            return match.groupValues[2].uppercase()
+        }
+
+        DIRECT_LANGUAGE_TAG_PATTERN.matchEntire(trimmed)?.let { match ->
+            return match.groupValues[1].uppercase()
+        }
+
+        return null
+    }
+
+    /**
+     * Returns a user-facing category label with provider/language prefixes removed when recognised.
+     *
+     * Examples:
+     *  - `"SRS | FR - LATEST SERIES"` -> `"LATEST SERIES"`
+     *  - `"FR | Sport"` -> `"Sport"`
+     *  - unrecognised names are returned trimmed as-is.
+     */
+    fun extractDisplayName(name: String): String {
+        val trimmed = name.trim()
+        if (trimmed.isBlank()) return trimmed
+
+        NESTED_LANGUAGE_TAG_PATTERN.matchEntire(trimmed)?.let { match ->
+            return match.groupValues[3].trim()
+        }
+
+        DIRECT_LANGUAGE_TAG_PATTERN.matchEntire(trimmed)?.let { match ->
+            return match.groupValues[2].trim()
+        }
+
+        return trimmed
     }
 }
 
@@ -57,3 +88,6 @@ object CategoryLanguage {
  * [Category.name].
  */
 fun Category.languageTag(): String? = CategoryLanguage.extractLanguageTag(name)
+
+/** User-facing category label with known provider/language prefixes stripped. */
+fun Category.displayName(): String = CategoryLanguage.extractDisplayName(name)

@@ -1321,6 +1321,35 @@ class HomeViewModelTest {
     }
 
     @Test
+    fun `series categories group every FR-prefixed provider category into a single FR row`() {
+        createViewModel()
+        val frLatestA = Category(id = "40", name = "SRS | FR - LATEST SERIES", type = ContentType.SERIES)
+        val frLatestB = Category(id = "41", name = "ALT | FR - LATEST SERIES", type = ContentType.SERIES)
+        val enLatest = Category(id = "42", name = "SRS | EN - LATEST SERIES", type = ContentType.SERIES)
+        val seriesA = series1.copy(id = "sf1", categoryId = "40", title = "Serie FR 1")
+        val seriesB = series1.copy(id = "sf2", categoryId = "41", title = "Serie FR 2")
+        val seriesEn = series1.copy(id = "se1", categoryId = "42", title = "Serie EN")
+
+        stubSeries("40", listOf(seriesA))
+        stubSeries("41", listOf(seriesB))
+        stubSeries("42", listOf(seriesEn))
+
+        viewModel.onCatalogTabSelected(ContentType.SERIES)
+        seriesCategoriesFlow.value = Resource.Success(listOf(frLatestA, frLatestB, enLatest))
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(listOf("FR", "EN"), viewModel.uiState.value.seriesLanguages)
+
+        viewModel.onLanguageSelected(ContentType.SERIES, "FR")
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals("FR", viewModel.uiState.value.selectedSeriesLanguage)
+        assertEquals(1, viewModel.uiState.value.seriesRows.size)
+        assertEquals("FR", viewModel.uiState.value.seriesRows.single().title)
+        assertEquals(listOf("sf1", "sf2"), viewModel.uiState.value.seriesRows.single().items.map { it.id })
+    }
+
+    @Test
     fun `onLanguageSelected does not trigger any additional repository fetch`() {
         createViewModel()
         stubLiveChannels("1", listOf(chan1))

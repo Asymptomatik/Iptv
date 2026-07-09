@@ -17,6 +17,8 @@ import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.repository.FavoritesRepository
 import com.bobot.iptvapp.domain.repository.PlaybackProgressRepository
 import com.bobot.iptvapp.domain.usecase.FilterCatalogByLanguageUseCase
+import com.bobot.iptvapp.domain.util.displayName
+import com.bobot.iptvapp.domain.util.languageTag
 import com.bobot.iptvapp.domain.util.Resource
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineScope
@@ -528,6 +530,7 @@ class HomeViewModel @Inject constructor(
         catalogTabJobs[contentType] = viewModelScope.launch {
             when (contentType) {
                 ContentType.LIVE -> loadCatalogTab(
+                    contentType = ContentType.LIVE,
                     categoriesFlow = catalogRepository.observeLiveCategories(),
                     itemsState = channelsState,
                     rowsState = liveRowsState,
@@ -540,6 +543,7 @@ class HomeViewModel @Inject constructor(
                 )
 
                 ContentType.MOVIE -> loadCatalogTab(
+                    contentType = ContentType.MOVIE,
                     categoriesFlow = catalogRepository.observeVodCategories(),
                     itemsState = moviesState,
                     rowsState = movieRowsState,
@@ -552,6 +556,7 @@ class HomeViewModel @Inject constructor(
                 )
 
                 ContentType.SERIES -> loadCatalogTab(
+                    contentType = ContentType.SERIES,
                     categoriesFlow = catalogRepository.observeSeriesCategories(),
                     itemsState = seriesState,
                     rowsState = seriesRowsState,
@@ -574,6 +579,7 @@ class HomeViewModel @Inject constructor(
      * KDoc "On-demand catalog loading" and "Grouping categories with content, per content type".
      */
     private suspend fun <T> CoroutineScope.loadCatalogTab(
+        contentType: ContentType,
         categoriesFlow: Flow<Resource<List<Category>>>,
         itemsState: MutableStateFlow<Resource<List<T>>>,
         rowsState: MutableStateFlow<Resource<List<HomeRow>>>,
@@ -585,7 +591,7 @@ class HomeViewModel @Inject constructor(
         itemsState.value = Resource.Loading
         rowsState.value = Resource.Loading
         launch {
-            buildRowsFlow(categoriesFlow, itemsState, languageFilterState, categoryIdOf, toCard)
+            buildRowsFlow(contentType, categoriesFlow, itemsState, languageFilterState, categoryIdOf, toCard)
                 .collect { rowsState.value = it }
         }
         loadCategoryScopedItems(categoriesFlow, itemsState, fetchCategoryItems)
@@ -655,6 +661,7 @@ class HomeViewModel @Inject constructor(
      * `distinctUntilChanged` filters those out.
      */
     private fun <T> buildRowsFlow(
+        contentType: ContentType,
         categoriesFlow: Flow<Resource<List<Category>>>,
         itemsFlow: Flow<Resource<List<T>>>,
         languageFilterState: MutableStateFlow<LanguageFilterState>,
@@ -666,7 +673,7 @@ class HomeViewModel @Inject constructor(
             if (categoriesResource is Resource.Success) {
                 languageFilterState.update { filterCatalogByLanguageUseCase.deriveAvailableLanguages(categoriesResource.data, it) }
             }
-            toRows(categoriesResource, itemsResource, selectedLanguage, categoryIdOf, toCard)
+            toRows(contentType, categoriesResource, itemsResource, selectedLanguage, categoryIdOf, toCard)
         }
     }
 
@@ -894,6 +901,7 @@ class HomeViewModel @Inject constructor(
      * matching items.
      */
     private fun <T> toRows(
+        contentType: ContentType,
         categoriesResource: Resource<List<Category>>,
         itemsResource: Resource<List<T>>,
         selectedLanguage: String?,
@@ -917,20 +925,32 @@ class HomeViewModel @Inject constructor(
         val items: List<T> = itemsResource.data
         val itemsByCategory = items.groupBy(categoryIdOf)
         val rows = filterCatalogByLanguageUseCase.filterCategories(categories, selectedLanguage)
-            .mapNotNull { category ->
-                val categoryItems = itemsByCategory[category.id].orEmpty()
-                if (categoryItems.isEmpty()) {
+            .groupBy(
+                keySelector = { category -> rowGroupingKey(category, contentType) },
+                valueTransform = { category -> category to itemsByCategory[category.id].orEmpty() },
+            )
+            .mapNotNull { (displayName, groupedCategories) ->
+                val mergedItems = groupedCategories
+                    .flatMap { (_, categoryItems) -> categoryItems }
+                    .map(toCard)
+                if (mergedItems.isEmpty()) {
                     null
                 } else {
                     HomeRow(
-                        categoryId = category.id,
-                        title = category.name,
-                        items = categoryItems.map(toCard),
+                        categoryId = groupedCategories.first().first.id,
+                        title = displayName,
+                        items = mergedItems,
                     )
                 }
             }
         return Resource.Success(rows)
     }
+
+    private fun rowGroupingKey(category: Category, contentType: ContentType): String =
+        when (contentType) {
+            ContentType.LIVE -> category.displayName()
+            ContentType.MOVIE, ContentType.SERIES -> category.languageTag() ?: category.displayName()
+        }
 
     /**
      * Folds the five freshly-combined section [Resource]s into the next [HomeUiState].
