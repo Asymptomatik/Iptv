@@ -1,6 +1,7 @@
 package com.bobot.iptvapp.ui.screen.player
 
 import android.app.Activity
+import android.content.pm.PackageManager
 import android.view.WindowManager
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
@@ -25,6 +26,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -45,6 +47,8 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -115,6 +119,42 @@ fun PlayerScreen(
         }
     }
 
+    // Auto-landscape on open, binary landscape<->portrait-locked toggle (see
+    // PlayerOrientationController for the framework-free decision logic). Neutralized on
+    // Android TV and on tablets (smallestScreenWidthDp >= 600) — `manageOrientation` stays
+    // false there, so the effects below never touch `requestedOrientation`. Form-factor
+    // detection mirrors the exact pattern used in MainActivity.
+    val context = LocalContext.current
+    val isTv = remember(context) {
+        context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+    }
+    val smallestScreenWidthDp = LocalConfiguration.current.smallestScreenWidthDp
+    val manageOrientation = remember(isTv, smallestScreenWidthDp) {
+        shouldManageOrientation(isTv = isTv, smallestScreenWidthDp = smallestScreenWidthDp)
+    }
+    val activity = view.context as? Activity
+
+    // Not persisted (MVP): resets to auto-landscape (`false`) every time the screen is opened.
+    var portraitLocked by remember { mutableStateOf(false) }
+
+    // Applies the requested orientation reactively: first composition (portraitLocked = false)
+    // produces the auto-landscape-on-open behaviour; each toggle re-applies it.
+    LaunchedEffect(portraitLocked) {
+        if (manageOrientation && activity != null) {
+            activity.requestedOrientation = toOrientationMode(portraitLocked).toActivityOrientation()
+        }
+    }
+
+    // Restores the system/manifest-default orientation on exit so leaving the player never
+    // strands the rest of the app locked to landscape or portrait.
+    DisposableEffect(Unit) {
+        onDispose {
+            if (manageOrientation && activity != null) {
+                activity.requestedOrientation = OrientationMode.SYSTEM.toActivityOrientation()
+            }
+        }
+    }
+
     // Auto-hide controls after inactivity while actively playing; any interaction reveals them
     // and restarts the timer. `interactionTrigger` is bumped on every user interaction so the
     // LaunchedEffect below re-launches (cancelling the previous delay) without needing the
@@ -167,6 +207,21 @@ fun PlayerScreen(
         }
 
         if (!uiState.hasError) {
+            // Floating, transparent seek/play/seek cluster. Visible only while not buffering so
+            // it never overlaps the centered buffering spinner above (mutually exclusive).
+            AnimatedVisibility(
+                visible = controlsVisible && !uiState.isBuffering,
+                modifier = Modifier.align(Alignment.Center),
+            ) {
+                PlayerCenterControls(
+                    isPlaying = uiState.isPlaying,
+                    onSeekBackward = viewModel::seekBackward,
+                    onSeekForward = viewModel::seekForward,
+                    onTogglePlayPause = viewModel::togglePlayPause,
+                    onUserInteracted = onUserInteracted,
+                )
+            }
+
             AnimatedVisibility(
                 visible = controlsVisible,
                 modifier = Modifier
@@ -175,11 +230,16 @@ fun PlayerScreen(
             ) {
                 PlayerControlsOverlay(
                     uiState = uiState,
-                    onTogglePlayPause = viewModel::togglePlayPause,
                     onSeekForward = viewModel::seekForward,
                     onSeekBackward = viewModel::seekBackward,
                     onSeekTo = viewModel::seekTo,
                     onUserInteracted = onUserInteracted,
+                    showOrientationButton = manageOrientation,
+                    portraitLocked = portraitLocked,
+                    onToggleOrientation = {
+                        onUserInteracted()
+                        portraitLocked = nextPortraitLocked(portraitLocked)
+                    },
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
@@ -198,19 +258,31 @@ fun PlayerScreen(
 /**
  * "Cinematic Glass" bottom control overlay:
  *  - Scrub bar: rgba-white track, AccentSolid active track, round knob. Time labels TextSecondary.
- *  - Controls: current time pinned left, play cluster centered via equal-width Spacers (so the
- *    cluster is truly centered), CC/settings zone pinned right (equal width to left zone).
- *  - Seek buttons clearly labeled "10 s" with direction indicator.
+ *  - Controls: current time (and, on phone, the orientation toggle) pinned left, CC/settings zone
+ *    reserved on the right. The seek/play/seek cluster is NOT part of this bar anymore — it is
+ *    floated separately, centered and transparent over the video (see [PlayerCenterControls] and
+ *    its call site in [PlayerScreen]), so this bar's left zone gets its full natural width instead
+ *    of being starved by a non-weighted center cluster in narrow (portrait) layouts.
+ *  - Seek buttons clearly labeled "10 s" with direction indicator (in [PlayerCenterControls]).
  *  - No episode navigation (PlayerViewModel does not expose it).
+ *
+ * @param showOrientationButton Whether the orientation toggle button should render in the left
+ * zone. Driven by [shouldManageOrientation] upstream — `false` on Android TV and on tablets
+ * (`smallestScreenWidthDp >= 600`), so the button never appears there.
+ * @param portraitLocked Current orientation toggle state, used to pick the button's label and
+ * content description (see [PlayerOrientationToggleButton]).
+ * @param onToggleOrientation Invoked when the orientation button is pressed.
  */
 @Composable
 private fun PlayerControlsOverlay(
     uiState: PlayerUiState,
-    onTogglePlayPause: () -> Unit,
     onSeekForward: () -> Unit,
     onSeekBackward: () -> Unit,
     onSeekTo: (Long) -> Unit,
     onUserInteracted: () -> Unit,
+    showOrientationButton: Boolean,
+    portraitLocked: Boolean,
+    onToggleOrientation: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var dragPositionMs by remember { mutableStateOf<Long?>(null) }
@@ -274,54 +346,39 @@ private fun PlayerControlsOverlay(
 
             Spacer(modifier = Modifier.height(Spacing.xs))
 
-            // ── Controls row: [time | spacer | cluster | spacer | side-zone] ──
-            // Left zone and right zone are given equal fixed weight so the cluster
-            // in the middle is geometrically centered.
+            // ── Controls row: [time (+ orientation) | reserved right zone] ──
+            // The seek/play/seek cluster used to live here as a non-weighted center Row between
+            // two Modifier.weight(1f) side zones; in narrow (portrait) layouts it was measured
+            // first and greedily took its intrinsic width, starving the left zone down to near
+            // zero and hiding the orientation button. The cluster now floats separately over the
+            // video (see PlayerCenterControls), so this row only has to place the left group and
+            // reserve the right zone — SpaceBetween keeps them pinned to their edges.
             Row(
                 modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // Left zone — current time
-                Box(
-                    modifier = Modifier.weight(1f),
-                    contentAlignment = Alignment.CenterStart,
+                // Left zone — current time, plus the orientation toggle on phone only
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.md),
                 ) {
                     Text(
                         text = formatTimeMs(displayedPositionMs),
                         color = TextSecondary,
                         style = MaterialTheme.typography.labelMedium,
                     )
+
+                    if (showOrientationButton) {
+                        PlayerOrientationToggleButton(
+                            portraitLocked = portraitLocked,
+                            onClick = onToggleOrientation,
+                        )
+                    }
                 }
 
-                // Center cluster — seek back | play/pause | seek forward
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(Spacing.lg),
-                ) {
-                    // Seek back 10 s
-                    PlayerSeekButton(
-                        label = "↺ 10 s",
-                        contentDescription = "Reculer de 10 secondes",
-                        onClick = { onUserInteracted(); onSeekBackward() },
-                    )
-
-                    // Play / Pause
-                    PlayerPlayPauseButton(
-                        isPlaying = uiState.isPlaying,
-                        onClick = { onUserInteracted(); onTogglePlayPause() },
-                    )
-
-                    // Seek forward 10 s
-                    PlayerSeekButton(
-                        label = "10 s ↻",
-                        contentDescription = "Avancer de 10 secondes",
-                        onClick = { onUserInteracted(); onSeekForward() },
-                    )
-                }
-
-                // Right zone — equal weight to left zone (keeps cluster truly centered)
-                // Reserved for CC/settings; currently empty but spatially balanced.
-                Box(modifier = Modifier.weight(1f))
+                // Right zone — reserved for a future CC/pistes button (chantier #2); empty for now.
+                Box(modifier = Modifier)
             }
 
             // Duration label below the controls row
@@ -338,6 +395,54 @@ private fun PlayerControlsOverlay(
                 }
             }
         }
+    }
+}
+
+/**
+ * Floating seek/play/seek cluster — seek back | play/pause | seek forward.
+ *
+ * Rendered directly over the video (not inside [PlayerControlsOverlay]'s opaque bottom bar) so it
+ * always has the full screen width to center itself in, regardless of how narrow the bottom bar's
+ * own layout gets in portrait. The container [Row] is intentionally transparent and has no
+ * `clickable`/`background` modifier: only the three buttons themselves consume taps, so taps in
+ * the gaps between them (and everywhere else over the video) still fall through to the root
+ * [Box]'s `detectTapGestures` tap-to-toggle-controls handler in [PlayerScreen].
+ *
+ * Uniform across form factors (phone and TV) — no form-factor branching here.
+ */
+@Composable
+private fun PlayerCenterControls(
+    isPlaying: Boolean,
+    onSeekBackward: () -> Unit,
+    onSeekForward: () -> Unit,
+    onTogglePlayPause: () -> Unit,
+    onUserInteracted: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Spacing.lg),
+    ) {
+        // Seek back 10 s
+        PlayerSeekButton(
+            label = "↺ 10 s",
+            contentDescription = "Reculer de 10 secondes",
+            onClick = { onUserInteracted(); onSeekBackward() },
+        )
+
+        // Play / Pause
+        PlayerPlayPauseButton(
+            isPlaying = isPlaying,
+            onClick = { onUserInteracted(); onTogglePlayPause() },
+        )
+
+        // Seek forward 10 s
+        PlayerSeekButton(
+            label = "10 s ↻",
+            contentDescription = "Avancer de 10 secondes",
+            onClick = { onUserInteracted(); onSeekForward() },
+        )
     }
 }
 
@@ -372,6 +477,63 @@ private fun PlayerSeekButton(
             color = TextPrimary,
             style = MaterialTheme.typography.labelLarge,
         )
+    }
+}
+
+/**
+ * Glass circular orientation toggle button — phone only (see
+ * [PlayerControlsOverlay.showOrientationButton]). Same "glass circular button" visual pattern as
+ * [PlayerSeekButton] (focus border, glass background), but built directly on [Box] here so its
+ * content can flip based on [portraitLocked] without introducing a second reusable component for
+ * a single call site.
+ *
+ * Icon/label reflects the *action* the button performs, not the current state: while open in
+ * auto-landscape it offers to lock portrait ([Icons.Default.Lock]); while locked in portrait it
+ * offers to go back to auto-landscape. `material-icons-core` has no vector counterpart to `Lock`
+ * for that second state (`LockOpen` only exists in `material-icons-extended`, which this project
+ * does not depend on), so it reuses the plain Unicode arrow glyph language already established by
+ * [PlayerSeekButton] (↻) instead of introducing that dependency.
+ */
+@Composable
+private fun PlayerOrientationToggleButton(
+    portraitLocked: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var isFocused by remember { mutableStateOf(false) }
+
+    val contentDescription =
+        if (portraitLocked) "Revenir en paysage" else "Verrouiller en portrait"
+
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = modifier
+            .size(40.dp)
+            .clip(CircleShape)
+            .background(Color.White.copy(alpha = if (isFocused) 0.18f else 0.10f))
+            .border(
+                width = if (isFocused) CardDimens.FocusBorderWidth else 0.dp,
+                color = if (isFocused) AccentSolid else Color.Transparent,
+                shape = CircleShape,
+            )
+            .onFocusChanged { focusState -> isFocused = focusState.isFocused }
+            .clickable(onClickLabel = contentDescription, onClick = onClick)
+            .padding(Spacing.sm),
+    ) {
+        if (portraitLocked) {
+            Text(
+                text = "↻",
+                color = TextPrimary,
+                style = MaterialTheme.typography.labelLarge,
+            )
+        } else {
+            Icon(
+                imageVector = Icons.Default.Lock,
+                contentDescription = contentDescription,
+                tint = TextPrimary,
+                modifier = Modifier.size(20.dp),
+            )
+        }
     }
 }
 
@@ -499,11 +661,13 @@ private fun PlayerControlsOverlayPlayingPreview() {
                 currentPositionMs = 65_000L,
                 durationMs = 5_400_000L,
             ),
-            onTogglePlayPause = {},
             onSeekForward = {},
             onSeekBackward = {},
             onSeekTo = {},
             onUserInteracted = {},
+            showOrientationButton = false,
+            portraitLocked = false,
+            onToggleOrientation = {},
         )
     }
 }
@@ -519,12 +683,59 @@ private fun PlayerControlsOverlayPausedPreview() {
                 currentPositionMs = 0L,
                 durationMs = 0L,
             ),
-            onTogglePlayPause = {},
             onSeekForward = {},
             onSeekBackward = {},
             onSeekTo = {},
             onUserInteracted = {},
+            showOrientationButton = false,
+            portraitLocked = false,
+            onToggleOrientation = {},
         )
+    }
+}
+
+@Preview(
+    name = "PlayerControlsOverlay — orientation button (phone)",
+    showBackground = true,
+    backgroundColor = 0xFF0A0A0F,
+)
+@Composable
+private fun PlayerControlsOverlayOrientationButtonPreview() {
+    IptvAppTheme {
+        PlayerControlsOverlay(
+            uiState = PlayerUiState(
+                isPlaying = true,
+                isBuffering = false,
+                currentPositionMs = 65_000L,
+                durationMs = 5_400_000L,
+            ),
+            onSeekForward = {},
+            onSeekBackward = {},
+            onSeekTo = {},
+            onUserInteracted = {},
+            showOrientationButton = true,
+            portraitLocked = false,
+            onToggleOrientation = {},
+        )
+    }
+}
+
+@Preview(name = "PlayerCenterControls — floating cluster", showBackground = true, backgroundColor = 0xFF0A0A0F)
+@Composable
+private fun PlayerCenterControlsPreview() {
+    IptvAppTheme {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center,
+        ) {
+            PlayerCenterControls(
+                isPlaying = true,
+                onSeekBackward = {},
+                onSeekForward = {},
+                onTogglePlayPause = {},
+                onUserInteracted = {},
+            )
+        }
     }
 }
 
