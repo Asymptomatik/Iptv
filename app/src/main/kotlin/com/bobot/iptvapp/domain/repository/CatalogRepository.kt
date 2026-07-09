@@ -2,6 +2,7 @@ package com.bobot.iptvapp.domain.repository
 
 import com.bobot.iptvapp.domain.model.Category
 import com.bobot.iptvapp.domain.model.Channel
+import com.bobot.iptvapp.domain.model.ContentType
 import com.bobot.iptvapp.domain.model.EpgProgram
 import com.bobot.iptvapp.domain.model.Episode
 import com.bobot.iptvapp.domain.model.Movie
@@ -168,6 +169,30 @@ interface CatalogRepository {
      * ensuring that the next request fetches fresh content from the new server.
      *
      * Can also be called explicitly in tests or debug scenarios to force a clean fetch.
+     *
+     * For a narrower invalidation scoped to a single content type (e.g. after a
+     * per-type filter change such as language), prefer [invalidateCache] instead —
+     * it avoids discarding session caches for content types that are unaffected.
      */
     fun invalidateCaches()
+
+    /**
+     * Invalidates the in-memory session cache for a single [ContentType] only.
+     *
+     * Unlike [invalidateCaches] (which clears every cached list and category across
+     * all content types — used for global events such as a credentials/server change),
+     * this method clears only the cache(s) associated with [type]:
+     *  - [ContentType.LIVE] → cached live categories + cached channel list.
+     *  - [ContentType.MOVIE] → cached VOD categories + cached movie list.
+     *  - [ContentType.SERIES] → cached series categories + cached series list.
+     *
+     * Intended for targeted reloads (e.g. a per-type content filter change) where
+     * invalidating the other, unrelated content types' caches would cause needless
+     * re-fetches. The underlying Room offline-first cache is not affected by this
+     * call — only the in-memory session cache described in [CatalogRepository]'s
+     * class-level documentation.
+     *
+     * @param type the content type whose in-memory cache should be cleared.
+     */
+    fun invalidateCache(type: ContentType)
 }

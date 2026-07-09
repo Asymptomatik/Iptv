@@ -9,14 +9,15 @@ import com.bobot.iptvapp.domain.model.Category
 import com.bobot.iptvapp.domain.model.Channel
 import com.bobot.iptvapp.domain.model.ContentType
 import com.bobot.iptvapp.domain.model.Episode
+import com.bobot.iptvapp.domain.model.LanguageFilterState
 import com.bobot.iptvapp.domain.model.Movie
 import com.bobot.iptvapp.domain.model.Series
 import com.bobot.iptvapp.domain.model.XtreamCredentials
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.repository.FavoritesRepository
 import com.bobot.iptvapp.domain.repository.PlaybackProgressRepository
+import com.bobot.iptvapp.domain.usecase.FilterCatalogByLanguageUseCase
 import com.bobot.iptvapp.domain.util.Resource
-import com.bobot.iptvapp.domain.util.languageTag
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -25,8 +26,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -301,31 +304,46 @@ data class HomeUiState(
  * genuinely re-fetch rather than replay a stale in-memory value on their next recomposition.
  *
  * ## Per-tab language filter
- * Each catalog tab (LIVE/MOVIE/SERIES) has its own independent language filter, derived from
- * [com.bobot.iptvapp.domain.util.CategoryLanguage] (already reviewed/approved utility — consumed
- * as-is here, never modified or duplicated):
- *  - [liveLanguagesState] / [movieLanguagesState] / [seriesLanguagesState] hold the distinct,
- *    non-null [Category.languageTag] values currently present among that tab's loaded categories.
- *    They are recomputed, as a side effect, every time [buildRowsFlow]'s `combine` re-runs with a
- *    fresh [Resource.Success] categories emission — see [buildRowsFlow] KDoc — so the list grows
- *    reactively as categories load progressively, without any dedicated extra collector on the
- *    categories Flow (see that KDoc for why this matters).
- *  - [selectedLiveLanguageState] / [selectedMovieLanguageState] / [selectedSeriesLanguageState] hold
- *    the tab's current selection (`null` = "Toutes" / no filter), set by [onLanguageSelected].
+ * Each catalog tab (LIVE/MOVIE/SERIES) has its own independent language filter, derived via the
+ * shared [FilterCatalogByLanguageUseCase] (Task 1/3 — extracted from what used to be logic
+ * duplicated inline in this ViewModel and in
+ * [com.bobot.iptvapp.ui.screen.search.SearchViewModel]) on top of
+ * [com.bobot.iptvapp.domain.util.CategoryLanguage] / [com.bobot.iptvapp.domain.util.languageTag].
+ * Each tab's available-languages/selected-language pair is carried by a single
+ * [LanguageFilterState] instance (Task 2/3):
+ *  - [liveLanguageFilterState] / [movieLanguageFilterState] / [seriesLanguageFilterState] each hold
+ *    that tab's [LanguageFilterState.available] (the distinct, non-null [com.bobot.iptvapp.domain.util.Category.languageTag]
+ *    values currently present among that tab's loaded categories) and
+ *    [LanguageFilterState.selected] (the tab's current selection, `null` = "Toutes" / no filter).
+ *  - [LanguageFilterState.available] is recomputed, as a side effect, via
+ *    [FilterCatalogByLanguageUseCase.deriveAvailableLanguages] every time [buildRowsFlow]'s
+ *    `combine` re-runs with a fresh [Resource.Success] categories emission — see [buildRowsFlow]
+ *    KDoc — so it grows reactively as categories load progressively, without any dedicated extra
+ *    collector on the categories Flow (see that KDoc for why this matters). Because this write
+ *    targets the same [MutableStateFlow] that [buildRowsFlow] also reads the selection from,
+ *    [buildRowsFlow] derives its selection input via `.map { it.selected }.distinctUntilChanged()`
+ *    so an available-only update (selection unchanged) never spuriously re-triggers the `combine`.
+ *  - [LanguageFilterState.selected] is updated by [onLanguageSelected] via [LanguageFilterState.withSelection].
  *  - The filter itself is applied inside [toRows] (shared, generic across the three content types —
- *    see that function's KDoc): a `null` selection keeps every row; a non-null selection keeps only
- *    categories whose [Category.languageTag] exactly matches it, dropping (not just hiding) any
- *    category with no detectable tag — per the brief ("une catégorie sans tag détectable est
- *    masquée dès qu'un filtre précis est actif").
+ *    see that function's KDoc) via [FilterCatalogByLanguageUseCase.filterCategories]: a `null`
+ *    selection keeps every row; a non-null selection keeps only categories whose
+ *    [com.bobot.iptvapp.domain.util.Category.languageTag] exactly matches it, dropping (not just hiding) any category with no
+ *    detectable tag — per the brief ("une catégorie sans tag détectable est masquée dès qu'un
+ *    filtre précis est actif").
  *  - Purely in-memory post-processing: changing a tab's selection only makes [buildRowsFlow]'s
  *    `combine` re-run (in-process filtering) — it never touches [requestedContentTypes],
  *    [loadCatalogTab], or [loadCategoryScopedItems], so no new network fetch is ever triggered by
  *    [onLanguageSelected].
- *  - Six dedicated `init`-time collectors forward [liveLanguagesState] /.../ [selectedSeriesLanguageState]
- *    into [HomeUiState] via `_uiState.update { ... }` — deliberately independent of the five-Resource
- *    `combine` that drives [reduceUiState], since these six plain values never carry a
+ *  - Three dedicated `init`-time collectors forward [liveLanguageFilterState] /
+ *    [movieLanguageFilterState] / [seriesLanguageFilterState] into [HomeUiState] via
+ *    `_uiState.update { ... }` — deliberately independent of the five-Resource `combine` that
+ *    drives [reduceUiState], since these three values never carry a
  *    [Resource.Loading]/[Resource.Error] state to reconcile and are simplest left as their own
- *    reactive projections.
+ *    reactive projections. Each collector maps [LanguageFilterState.available] /
+ *    [LanguageFilterState.selected] onto [HomeUiState]'s pre-existing, unchanged
+ *    `*Languages`/`selected*Language` properties — [HomeUiState]'s public shape is deliberately
+ *    left untouched by this internal refactor (see that class's KDoc), since
+ *    [com.bobot.iptvapp.ui.screen.home.HomeScreen] consumes it directly.
  *
  * @param catalogRepository Read access to categories and content lists for all three content types.
  * @param favoritesRepository Read access to the active profile's favorites list.
@@ -333,6 +351,9 @@ data class HomeUiState(
  * @param appPreferencesStore Resolves the active profile ID that scopes favorites/progress.
  * @param credentialsProvider Resolves the Xtream credentials used to build Continue Watching
  *                            cards' direct-play stream URLs.
+ * @param filterCatalogByLanguageUseCase Shared domain logic for deriving available language tags
+ *                            and filtering categories by language — see class KDoc "Per-tab
+ *                            language filter".
  */
 @HiltViewModel
 class HomeViewModel @Inject constructor(
@@ -341,6 +362,7 @@ class HomeViewModel @Inject constructor(
     private val playbackProgressRepository: PlaybackProgressRepository,
     private val appPreferencesStore: AppPreferencesStore,
     private val credentialsProvider: CredentialsProvider,
+    private val filterCatalogByLanguageUseCase: FilterCatalogByLanguageUseCase,
 ) : ViewModel() {
 
     private companion object {
@@ -378,18 +400,15 @@ class HomeViewModel @Inject constructor(
     // ── Per-tab language filter state — see class KDoc "Per-tab language filter" ─────────────────
 
     /**
-     * Distinct language tags currently present among each catalog tab's loaded categories —
-     * recomputed as a side effect inside [buildRowsFlow] every time a fresh [Resource.Success]
-     * categories emission arrives, so this list grows reactively as categories load progressively.
+     * One [LanguageFilterState] per catalog tab — each tab's available language tags (recomputed
+     * as a side effect inside [buildRowsFlow] every time a fresh [Resource.Success] categories
+     * emission arrives, so [LanguageFilterState.available] grows reactively as categories load
+     * progressively) plus that tab's current selection (`null` means "Toutes" / no filter), set by
+     * [onLanguageSelected].
      */
-    private val liveLanguagesState = MutableStateFlow<List<String>>(emptyList())
-    private val movieLanguagesState = MutableStateFlow<List<String>>(emptyList())
-    private val seriesLanguagesState = MutableStateFlow<List<String>>(emptyList())
-
-    /** Each catalog tab's current language selection — `null` means "Toutes" (no filter). */
-    private val selectedLiveLanguageState = MutableStateFlow<String?>(null)
-    private val selectedMovieLanguageState = MutableStateFlow<String?>(null)
-    private val selectedSeriesLanguageState = MutableStateFlow<String?>(null)
+    private val liveLanguageFilterState = MutableStateFlow(LanguageFilterState())
+    private val movieLanguageFilterState = MutableStateFlow(LanguageFilterState())
+    private val seriesLanguageFilterState = MutableStateFlow(LanguageFilterState())
 
     /**
      * Content types for which [onCatalogTabSelected] has already triggered a load, for this
@@ -431,15 +450,26 @@ class HomeViewModel @Inject constructor(
         }
 
         // ── Per-tab language filter — see class KDoc "Per-tab language filter" ────────────────────
-        // Six independent collectors, deliberately kept out of the five-Resource combine above: none
-        // of these six plain values ever carries a Loading/Error state to reconcile, so each is
-        // simplest projected into HomeUiState on its own.
-        viewModelScope.launch { liveLanguagesState.collect { languages -> _uiState.update { it.copy(liveLanguages = languages) } } }
-        viewModelScope.launch { movieLanguagesState.collect { languages -> _uiState.update { it.copy(movieLanguages = languages) } } }
-        viewModelScope.launch { seriesLanguagesState.collect { languages -> _uiState.update { it.copy(seriesLanguages = languages) } } }
-        viewModelScope.launch { selectedLiveLanguageState.collect { language -> _uiState.update { it.copy(selectedLiveLanguage = language) } } }
-        viewModelScope.launch { selectedMovieLanguageState.collect { language -> _uiState.update { it.copy(selectedMovieLanguage = language) } } }
-        viewModelScope.launch { selectedSeriesLanguageState.collect { language -> _uiState.update { it.copy(selectedSeriesLanguage = language) } } }
+        // Three independent collectors, deliberately kept out of the five-Resource combine above:
+        // none of these three LanguageFilterState values ever carries a Loading/Error state to
+        // reconcile, so each is simplest projected into HomeUiState on its own. HomeUiState's public
+        // shape is unchanged — each LanguageFilterState is unpacked into its pre-existing pair of
+        // `*Languages`/`selected*Language` properties.
+        viewModelScope.launch {
+            liveLanguageFilterState.collect { state ->
+                _uiState.update { it.copy(liveLanguages = state.available, selectedLiveLanguage = state.selected) }
+            }
+        }
+        viewModelScope.launch {
+            movieLanguageFilterState.collect { state ->
+                _uiState.update { it.copy(movieLanguages = state.available, selectedMovieLanguage = state.selected) }
+            }
+        }
+        viewModelScope.launch {
+            seriesLanguageFilterState.collect { state ->
+                _uiState.update { it.copy(seriesLanguages = state.available, selectedSeriesLanguage = state.selected) }
+            }
+        }
     }
 
     /**
@@ -454,9 +484,9 @@ class HomeViewModel @Inject constructor(
      */
     fun onLanguageSelected(contentType: ContentType, language: String?) {
         when (contentType) {
-            ContentType.LIVE -> selectedLiveLanguageState.value = language
-            ContentType.MOVIE -> selectedMovieLanguageState.value = language
-            ContentType.SERIES -> selectedSeriesLanguageState.value = language
+            ContentType.LIVE -> liveLanguageFilterState.update { it.withSelection(language) }
+            ContentType.MOVIE -> movieLanguageFilterState.update { it.withSelection(language) }
+            ContentType.SERIES -> seriesLanguageFilterState.update { it.withSelection(language) }
         }
     }
 
@@ -501,8 +531,7 @@ class HomeViewModel @Inject constructor(
                     categoriesFlow = catalogRepository.observeLiveCategories(),
                     itemsState = channelsState,
                     rowsState = liveRowsState,
-                    languagesState = liveLanguagesState,
-                    selectedLanguageFlow = selectedLiveLanguageState,
+                    languageFilterState = liveLanguageFilterState,
                     categoryIdOf = Channel::categoryId,
                     toCard = { channel: Channel -> toCardItem(channel) },
                     fetchCategoryItems = { categoryId ->
@@ -514,8 +543,7 @@ class HomeViewModel @Inject constructor(
                     categoriesFlow = catalogRepository.observeVodCategories(),
                     itemsState = moviesState,
                     rowsState = movieRowsState,
-                    languagesState = movieLanguagesState,
-                    selectedLanguageFlow = selectedMovieLanguageState,
+                    languageFilterState = movieLanguageFilterState,
                     categoryIdOf = Movie::categoryId,
                     toCard = { movie: Movie -> toCardItem(movie) },
                     fetchCategoryItems = { categoryId ->
@@ -527,8 +555,7 @@ class HomeViewModel @Inject constructor(
                     categoriesFlow = catalogRepository.observeSeriesCategories(),
                     itemsState = seriesState,
                     rowsState = seriesRowsState,
-                    languagesState = seriesLanguagesState,
-                    selectedLanguageFlow = selectedSeriesLanguageState,
+                    languageFilterState = seriesLanguageFilterState,
                     categoryIdOf = Series::categoryId,
                     toCard = { series: Series -> toCardItem(series) },
                     fetchCategoryItems = { categoryId ->
@@ -550,8 +577,7 @@ class HomeViewModel @Inject constructor(
         categoriesFlow: Flow<Resource<List<Category>>>,
         itemsState: MutableStateFlow<Resource<List<T>>>,
         rowsState: MutableStateFlow<Resource<List<HomeRow>>>,
-        languagesState: MutableStateFlow<List<String>>,
-        selectedLanguageFlow: Flow<String?>,
+        languageFilterState: MutableStateFlow<LanguageFilterState>,
         categoryIdOf: (T) -> String,
         toCard: (T) -> HomeCardItem,
         fetchCategoryItems: suspend (categoryId: String) -> Resource<List<T>>,
@@ -559,7 +585,7 @@ class HomeViewModel @Inject constructor(
         itemsState.value = Resource.Loading
         rowsState.value = Resource.Loading
         launch {
-            buildRowsFlow(categoriesFlow, itemsState, selectedLanguageFlow, languagesState, categoryIdOf, toCard)
+            buildRowsFlow(categoriesFlow, itemsState, languageFilterState, categoryIdOf, toCard)
                 .collect { rowsState.value = it }
         }
         loadCategoryScopedItems(categoriesFlow, itemsState, fetchCategoryItems)
@@ -610,31 +636,39 @@ class HomeViewModel @Inject constructor(
     }
 
     /**
-     * Combines a categories Flow, an items Flow, and a selected-language Flow into a Flow of
-     * grouped, language-filtered [HomeRow]s (see class KDoc "Per-tab language filter").
+     * Combines a categories Flow, an items Flow, and [languageFilterState]'s selection into a Flow
+     * of grouped, language-filtered [HomeRow]s (see class KDoc "Per-tab language filter").
      *
      * As a side effect, every time a fresh [Resource.Success] categories emission flows through,
-     * [languagesState] is updated with the distinct [Category.languageTag] values now present —
-     * deliberately done here (inside the same `combine` already collecting [categoriesFlow] for row
-     * building) rather than via a dedicated extra collector on [categoriesFlow], so this reactive
-     * "available languages" derivation never adds another concurrent collector to a Flow that may
-     * trigger its own network fetch on each independent collection (see
-     * `CatalogRepositoryImpl.observeLiveCategories` and siblings).
+     * [languageFilterState]'s [LanguageFilterState.available] is recomputed via
+     * [FilterCatalogByLanguageUseCase.deriveAvailableLanguages] — deliberately done here (inside the
+     * same `combine` already collecting [categoriesFlow] for row building) rather than via a
+     * dedicated extra collector on [categoriesFlow], so this reactive "available languages"
+     * derivation never adds another concurrent collector to a Flow that may trigger its own network
+     * fetch on each independent collection (see `CatalogRepositoryImpl.observeLiveCategories` and
+     * siblings).
+     *
+     * The `combine` reads the current selection via `languageFilterState.map { it.selected }
+     * .distinctUntilChanged()` rather than [languageFilterState] directly — since the side effect
+     * above writes back into that same [MutableStateFlow], reading its raw emissions would make an
+     * available-only update (selection unchanged) spuriously re-run this `combine`;
+     * `distinctUntilChanged` filters those out.
      */
     private fun <T> buildRowsFlow(
         categoriesFlow: Flow<Resource<List<Category>>>,
         itemsFlow: Flow<Resource<List<T>>>,
-        selectedLanguageFlow: Flow<String?>,
-        languagesState: MutableStateFlow<List<String>>,
+        languageFilterState: MutableStateFlow<LanguageFilterState>,
         categoryIdOf: (T) -> String,
         toCard: (T) -> HomeCardItem,
-    ): Flow<Resource<List<HomeRow>>> =
-        combine(categoriesFlow, itemsFlow, selectedLanguageFlow) { categoriesResource, itemsResource, selectedLanguage ->
+    ): Flow<Resource<List<HomeRow>>> {
+        val selectedLanguageFlow = languageFilterState.map { it.selected }.distinctUntilChanged()
+        return combine(categoriesFlow, itemsFlow, selectedLanguageFlow) { categoriesResource, itemsResource, selectedLanguage ->
             if (categoriesResource is Resource.Success) {
-                languagesState.value = categoriesResource.data.mapNotNull { it.languageTag() }.distinct()
+                languageFilterState.update { filterCatalogByLanguageUseCase.deriveAvailableLanguages(categoriesResource.data, it) }
             }
             toRows(categoriesResource, itemsResource, selectedLanguage, categoryIdOf, toCard)
         }
+    }
 
     /**
      * Resolves a MOVIE-type entry by [movieId] — used by both [buildContinueWatchingFlow] and
@@ -851,12 +885,13 @@ class HomeViewModel @Inject constructor(
      * input as-is; only when both are [Resource.Success] are the items grouped by category (see
      * class KDoc "Grouping categories with content, per content type").
      *
-     * [selectedLanguage] applies the class KDoc "Per-tab language filter": `null` ("Toutes") keeps
-     * every category; a non-null value keeps only categories whose [Category.languageTag] exactly
-     * equals it — a category with no detectable tag (`languageTag()` returns `null`) never matches
-     * a non-null [selectedLanguage] and is therefore excluded, per the brief. Categories are
-     * filtered *before* grouping so a filtered-out category never contributes a row regardless of
-     * whether it has matching items.
+     * [selectedLanguage] applies the class KDoc "Per-tab language filter" via
+     * [FilterCatalogByLanguageUseCase.filterCategories]: `null` ("Toutes") keeps every category; a
+     * non-null value keeps only categories whose [com.bobot.iptvapp.domain.util.Category.languageTag] exactly equals it — a
+     * category with no detectable tag (`languageTag()` returns `null`) never matches a non-null
+     * [selectedLanguage] and is therefore excluded, per the brief. Categories are filtered *before*
+     * grouping so a filtered-out category never contributes a row regardless of whether it has
+     * matching items.
      */
     private fun <T> toRows(
         categoriesResource: Resource<List<Category>>,
@@ -881,8 +916,7 @@ class HomeViewModel @Inject constructor(
         val categories: List<Category> = categoriesResource.data
         val items: List<T> = itemsResource.data
         val itemsByCategory = items.groupBy(categoryIdOf)
-        val rows = categories
-            .filter { category -> selectedLanguage == null || category.languageTag() == selectedLanguage }
+        val rows = filterCatalogByLanguageUseCase.filterCategories(categories, selectedLanguage)
             .mapNotNull { category ->
                 val categoryItems = itemsByCategory[category.id].orEmpty()
                 if (categoryItems.isEmpty()) {

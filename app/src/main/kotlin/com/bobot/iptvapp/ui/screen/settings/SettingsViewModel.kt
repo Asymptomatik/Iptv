@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.bobot.iptvapp.data.source.CatalogException
 import com.bobot.iptvapp.data.source.CredentialsProvider
+import com.bobot.iptvapp.domain.model.ContentType
 import com.bobot.iptvapp.domain.model.XtreamCredentials
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.util.Resource
@@ -222,15 +223,37 @@ class SettingsViewModel @Inject constructor(
     }
 
     /**
-     * Invalidates every in-memory catalog cache via [CatalogRepository.invalidateCaches] (a
-     * synchronous, non-suspend call — no [viewModelScope] launch needed) and shows a simple
-     * confirmation message. The next Home/Detail/Search collection re-fetches fresh content from
-     * the server.
+     * Invalidates only the movies in-memory catalog cache via
+     * [CatalogRepository.invalidateCache] and shows a movies-specific confirmation message. The
+     * next Home/Detail/Search collection for [ContentType.MOVIE] re-fetches fresh content from
+     * the server; live channels and series caches are left untouched. See [reloadCatalog] for the
+     * shared mechanics.
      */
-    fun onReloadCatalog() {
-        catalogRepository.invalidateCaches()
+    fun onReloadMovies() = reloadCatalog(ContentType.MOVIE, "Films rechargés.")
+
+    /**
+     * Invalidates only the series in-memory catalog cache — same mechanics as [onReloadMovies],
+     * scoped to [ContentType.SERIES].
+     */
+    fun onReloadSeries() = reloadCatalog(ContentType.SERIES, "Séries rechargées.")
+
+    /**
+     * Invalidates only the live channels in-memory catalog cache — same mechanics as
+     * [onReloadMovies], scoped to [ContentType.LIVE].
+     */
+    fun onReloadChannels() = reloadCatalog(ContentType.LIVE, "Chaînes rechargées.")
+
+    /**
+     * Shared implementation behind [onReloadMovies], [onReloadSeries] and [onReloadChannels]:
+     * invalidates the single-[type] in-memory cache via [CatalogRepository.invalidateCache] (a
+     * synchronous, non-suspend call — no [viewModelScope] launch needed) and shows a
+     * type-specific confirmation message, replacing the previous single global
+     * "Catalogue rechargé." message with one distinct per content type.
+     */
+    private fun reloadCatalog(type: ContentType, confirmationMessage: String) {
+        catalogRepository.invalidateCache(type)
         _uiState.update {
-            it.copy(errorMessage = null, infoMessage = "Catalogue rechargé.")
+            it.copy(errorMessage = null, infoMessage = confirmationMessage)
         }
     }
 

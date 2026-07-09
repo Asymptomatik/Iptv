@@ -438,11 +438,23 @@ class CatalogRepositoryImpl @Inject constructor(
     // ── Cache management ──────────────────────────────────────────────────────
 
     override fun invalidateCaches() {
-        cachedLiveCategories = null
-        cachedVodCategories = null
-        cachedSeriesCategories = null
-        cachedAllChannels = null
-        cachedAllMovies = null
-        cachedAllSeries = null
+        ContentType.entries.forEach { invalidateCache(it) }
+    }
+
+    override fun invalidateCache(type: ContentType) {
+        when (type) {
+            ContentType.LIVE -> {
+                cachedLiveCategories = null
+                cachedAllChannels = null
+            }
+            ContentType.MOVIE -> {
+                cachedVodCategories = null
+                cachedAllMovies = null
+            }
+            ContentType.SERIES -> {
+                cachedSeriesCategories = null
+                cachedAllSeries = null
+            }
+        }
     }
 }

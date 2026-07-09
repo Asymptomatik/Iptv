@@ -14,6 +14,7 @@ import com.bobot.iptvapp.domain.model.XtreamCredentials
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.repository.FavoritesRepository
 import com.bobot.iptvapp.domain.repository.PlaybackProgressRepository
+import com.bobot.iptvapp.domain.usecase.FilterCatalogByLanguageUseCase
 import com.bobot.iptvapp.domain.util.Resource
 import io.mockk.Runs
 import io.mockk.coEvery
@@ -233,6 +234,7 @@ class HomeViewModelTest {
             playbackProgressRepository,
             appPreferencesStore,
             credentialsProvider,
+            FilterCatalogByLanguageUseCase(),
         )
         testDispatcher.scheduler.runCurrent()
     }
