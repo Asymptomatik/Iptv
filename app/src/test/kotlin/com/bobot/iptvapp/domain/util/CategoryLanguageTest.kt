@@ -45,6 +45,13 @@ class CategoryLanguageTest {
         assertEquals("FRA", result)
     }
 
+    @Test
+    fun `extractLanguageTag returns nested language tag when provider prefix comes first`() {
+        val result = CategoryLanguage.extractLanguageTag("SRS | FR - LATEST SERIES")
+
+        assertEquals("FR", result)
+    }
+
     // ── Case normalization ───────────────────────────────────────────────────
 
     @Test
@@ -123,5 +130,19 @@ class CategoryLanguageTest {
         val category = Category(id = "1", name = "Documentaires", type = ContentType.LIVE)
 
         assertNull(category.languageTag())
+    }
+
+    @Test
+    fun `displayName extension removes nested provider and language prefixes`() {
+        val category = Category(id = "1", name = "SRS | FR - LATEST SERIES", type = ContentType.SERIES)
+
+        assertEquals("LATEST SERIES", category.displayName())
+    }
+
+    @Test
+    fun `displayName extension removes direct language prefix`() {
+        val category = Category(id = "1", name = "FR | Sport", type = ContentType.LIVE)
+
+        assertEquals("Sport", category.displayName())
     }
 }

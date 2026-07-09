@@ -46,6 +46,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.painter.ColorPainter
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
@@ -139,7 +140,7 @@ private fun ContentType.toDetailContentType(): String = when (this) {
  *  - [MOVIES] — only [HomeUiState.movieRows].
  *  - [SERIES] — only [HomeUiState.seriesRows].
  */
-private enum class HomeTab(val label: String) {
+internal enum class HomeTab(val label: String) {
     HOME("Accueil"),
     LIVE("Chaines"),
     MOVIES("Films"),
@@ -185,6 +186,43 @@ private fun HomeUiState.firstRowItemFor(tab: HomeTab): HomeCardItem? = when (tab
     HomeTab.HOME -> continueWatchingRows.firstOrNull()?.items?.firstOrNull()
         ?: myListRows.firstOrNull()?.items?.firstOrNull()
     else -> rowsFor(tab).firstOrNull()?.items?.firstOrNull()
+}
+
+/**
+ * Selected category row for a catalog [tab], or the first available row when the current
+ * selection is null/stale. [HomeTab.HOME] never uses category selection.
+ */
+private fun HomeUiState.selectedCategoryRowFor(
+    tab: HomeTab,
+    selectedCategoryId: String?,
+): HomeRow? {
+    if (tab == HomeTab.HOME) return null
+    val rows = rowsFor(tab)
+    return rows.firstOrNull { it.categoryId == selectedCategoryId } ?: rows.firstOrNull()
+}
+
+/** Selected category id for a catalog [tab], normalized to the first available row when stale/null. */
+internal fun HomeUiState.normalizedCategorySelectionFor(
+    tab: HomeTab,
+    selectedCategoryId: String?,
+): String? = selectedCategoryRowFor(tab, selectedCategoryId)?.categoryId
+
+/**
+ * Initial D-pad focus target for [tab]. Catalog tabs must target the selected category's first
+ * card — not always the first category overall — to preserve the Unit B focus regression fix.
+ */
+internal fun HomeUiState.initialFocusItemFor(
+    tab: HomeTab,
+    selectedCategoryId: String?,
+): HomeCardItem? {
+    val heroItem = heroItemFor(tab)
+    if (heroItem != null) return null
+
+    return if (tab == HomeTab.HOME) {
+        firstRowItemFor(tab)
+    } else {
+        selectedCategoryRowFor(tab, selectedCategoryId)?.items?.firstOrNull() ?: firstRowItemFor(tab)
+    }
 }
 
 /** `true` once [tab] has a hero or at least one row — drives per-tab loading/error/empty selection. */
@@ -482,13 +520,32 @@ private fun HomeRowsContent(
 ) {
     val isTv = rememberIsTvDevice()
     val horizontalPadding = if (isTv) LayoutDimens.ContentPaddingTv else LayoutDimens.ContentPaddingPhone
-    val cardWidth = if (isTv) CardDimens.PosterWidthTv else CardDimens.PosterWidthPhone
+    val configuration = LocalConfiguration.current
+    val cardWidth = if (isTv) {
+        CardDimens.PosterWidthTv
+    } else {
+        ((configuration.screenWidthDp.dp - (horizontalPadding * 2) - LayoutDimens.CardRowSpacing) / 2)
+            .coerceAtLeast(CardDimens.PosterWidthPhone)
+    }
+    val categoryGridColumns = if (isTv) 4 else 2
 
     val heroItem = uiState.heroItemFor(selectedTab)
-    val firstRowItem = uiState.firstRowItemFor(selectedTab)
+
+    var selectedLiveCategoryId by remember { mutableStateOf<String?>(null) }
+    var selectedMovieCategoryId by remember { mutableStateOf<String?>(null) }
+    var selectedSeriesCategoryId by remember { mutableStateOf<String?>(null) }
+
+    val rawSelectedCategoryId = when (selectedTab) {
+        HomeTab.HOME -> null
+        HomeTab.LIVE -> selectedLiveCategoryId
+        HomeTab.MOVIES -> selectedMovieCategoryId
+        HomeTab.SERIES -> selectedSeriesCategoryId
+    }
+    val selectedCategoryId = uiState.normalizedCategorySelectionFor(selectedTab, rawSelectedCategoryId)
+    val selectedCategoryRow = uiState.selectedCategoryRowFor(selectedTab, selectedCategoryId)
 
     val initialFocusRequester = remember(selectedTab) { FocusRequester() }
-    val rowsFocusTarget: HomeCardItem? = if (heroItem == null) firstRowItem else null
+    val rowsFocusTarget = uiState.initialFocusItemFor(selectedTab, selectedCategoryId)
 
     // Scroll-driven header background: transparent scrim while the first item (hero, when
     // present) is at the top, fading to a fully solid bar once the user scrolls past it.
@@ -515,6 +572,42 @@ private fun HomeRowsContent(
         uiState.seriesRows,
     ) {
         runCatching { initialFocusRequester.requestFocus() }
+    }
+
+    LaunchedEffect(uiState.selectedLiveLanguage) {
+        selectedLiveCategoryId = null
+    }
+
+    LaunchedEffect(uiState.selectedMovieLanguage) {
+        selectedMovieCategoryId = null
+    }
+
+    LaunchedEffect(uiState.selectedSeriesLanguage) {
+        selectedSeriesCategoryId = null
+    }
+
+    LaunchedEffect(selectedTab, uiState.liveRows, uiState.movieRows, uiState.seriesRows) {
+        when (selectedTab) {
+            HomeTab.HOME -> Unit
+            HomeTab.LIVE -> {
+                val normalized = uiState.normalizedCategorySelectionFor(HomeTab.LIVE, selectedLiveCategoryId)
+                if (normalized != selectedLiveCategoryId) {
+                    selectedLiveCategoryId = normalized
+                }
+            }
+            HomeTab.MOVIES -> {
+                val normalized = uiState.normalizedCategorySelectionFor(HomeTab.MOVIES, selectedMovieCategoryId)
+                if (normalized != selectedMovieCategoryId) {
+                    selectedMovieCategoryId = normalized
+                }
+            }
+            HomeTab.SERIES -> {
+                val normalized = uiState.normalizedCategorySelectionFor(HomeTab.SERIES, selectedSeriesCategoryId)
+                if (normalized != selectedSeriesCategoryId) {
+                    selectedSeriesCategoryId = normalized
+                }
+            }
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -590,9 +683,17 @@ private fun HomeRowsContent(
                         horizontalPadding = horizontalPadding,
                         onLanguageSelected = { language -> onLanguageSelected(ContentType.LIVE, language) },
                     )
-                    homeSection(
-                        sectionTitle = "En direct",
+                    homeCategorySelectorRow(
+                        key = "category-selector-live",
                         rows = uiState.liveRows,
+                        selectedCategoryId = selectedCategoryRow?.categoryId,
+                        horizontalPadding = horizontalPadding,
+                        onCategorySelected = { selectedLiveCategoryId = it },
+                    )
+                    homeCategoryGridSection(
+                        sectionTitle = selectedCategoryRow?.title ?: "En direct",
+                        row = selectedCategoryRow,
+                        columns = categoryGridColumns,
                         horizontalPadding = horizontalPadding,
                         cardWidth = cardWidth,
                         onCardClick = onCardClick,
@@ -610,9 +711,17 @@ private fun HomeRowsContent(
                         horizontalPadding = horizontalPadding,
                         onLanguageSelected = { language -> onLanguageSelected(ContentType.MOVIE, language) },
                     )
-                    homeSection(
-                        sectionTitle = "Films",
+                    homeCategorySelectorRow(
+                        key = "category-selector-movies",
                         rows = uiState.movieRows,
+                        selectedCategoryId = selectedCategoryRow?.categoryId,
+                        horizontalPadding = horizontalPadding,
+                        onCategorySelected = { selectedMovieCategoryId = it },
+                    )
+                    homeCategoryGridSection(
+                        sectionTitle = selectedCategoryRow?.title ?: "Films",
+                        row = selectedCategoryRow,
+                        columns = categoryGridColumns,
                         horizontalPadding = horizontalPadding,
                         cardWidth = cardWidth,
                         onCardClick = onCardClick,
@@ -629,9 +738,17 @@ private fun HomeRowsContent(
                         horizontalPadding = horizontalPadding,
                         onLanguageSelected = { language -> onLanguageSelected(ContentType.SERIES, language) },
                     )
-                    homeSection(
-                        sectionTitle = "Series",
+                    homeCategorySelectorRow(
+                        key = "category-selector-series",
                         rows = uiState.seriesRows,
+                        selectedCategoryId = selectedCategoryRow?.categoryId,
+                        horizontalPadding = horizontalPadding,
+                        onCategorySelected = { selectedSeriesCategoryId = it },
+                    )
+                    homeCategoryGridSection(
+                        sectionTitle = selectedCategoryRow?.title ?: "Series",
+                        row = selectedCategoryRow,
+                        columns = categoryGridColumns,
                         horizontalPadding = horizontalPadding,
                         cardWidth = cardWidth,
                         onCardClick = onCardClick,
@@ -780,6 +897,84 @@ private fun LazyListScope.homeLanguageFilterRow(
     }
 }
 
+/**
+ * Adds one category selector chip row to the enclosing [LazyColumn], for a Chaines/Films/Series
+ * tab only. One [CategoryChip] per loaded [HomeRow]; selecting a chip swaps the grid below to
+ * that category's items instead of stacking multiple horizontal rows.
+ */
+private fun LazyListScope.homeCategorySelectorRow(
+    key: String,
+    rows: List<HomeRow>,
+    selectedCategoryId: String?,
+    horizontalPadding: Dp,
+    onCategorySelected: (String) -> Unit,
+) {
+    if (rows.isEmpty()) return
+
+    item(key = key) {
+        LazyRow(
+            contentPadding = PaddingValues(
+                horizontal = horizontalPadding,
+                vertical = LayoutDimens.LazyRowFocusPadding,
+            ),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+        ) {
+            items(rows, key = { row -> "$key-${row.categoryId}" }) { row ->
+                CategoryChip(
+                    label = row.title,
+                    selected = selectedCategoryId == row.categoryId,
+                    onClick = { onCategorySelected(row.categoryId) },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Adds one selected-category section to the enclosing [LazyColumn]: a title followed by a
+ * vertical poster grid built from that category's items.
+ */
+private fun LazyListScope.homeCategoryGridSection(
+    sectionTitle: String,
+    row: HomeRow?,
+    columns: Int,
+    horizontalPadding: Dp,
+    cardWidth: Dp,
+    onCardClick: (HomeCardItem) -> Unit,
+    initialFocusItem: HomeCardItem?,
+    initialFocusRequester: FocusRequester,
+    isLive: Boolean = false,
+) {
+    if (row == null || row.items.isEmpty()) return
+
+    item(key = "grid-section-$sectionTitle-${row.categoryId}") {
+        SectionTitle(
+            title = sectionTitle,
+            modifier = Modifier.padding(
+                start = horizontalPadding,
+                end = horizontalPadding,
+                top = Spacing.md,
+                bottom = Spacing.xs,
+            ),
+        )
+    }
+
+    row.items.chunked(columns).forEachIndexed { index, itemsChunk ->
+        item(key = "grid-$sectionTitle-${row.categoryId}-$index") {
+            HomeCategoryGridRow(
+                items = itemsChunk,
+                columns = columns,
+                horizontalPadding = horizontalPadding,
+                cardWidth = cardWidth,
+                onCardClick = onCardClick,
+                initialFocusItem = initialFocusItem,
+                initialFocusRequester = initialFocusRequester,
+                isLive = isLive,
+            )
+        }
+    }
+}
+
 /** One category row: a lazy horizontal row of [FocusableCard]s. */
 @Composable
 private fun HomeCategoryRow(
@@ -825,6 +1020,55 @@ private fun HomeCategoryRow(
                 // No progress fraction in HomeCardItem — skip rather than invent data.
                 progress = null,
             )
+        }
+    }
+}
+
+/** One row of the selected-category vertical grid. */
+@Composable
+private fun HomeCategoryGridRow(
+    items: List<HomeCardItem>,
+    columns: Int,
+    horizontalPadding: Dp,
+    cardWidth: Dp,
+    onCardClick: (HomeCardItem) -> Unit,
+    initialFocusItem: HomeCardItem?,
+    initialFocusRequester: FocusRequester,
+    isLive: Boolean = false,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = horizontalPadding, vertical = LayoutDimens.LazyRowFocusPadding),
+        horizontalArrangement = Arrangement.spacedBy(LayoutDimens.CardRowSpacing),
+    ) {
+        items.forEach { cardItem ->
+            val cardModifier = if (initialFocusItem != null && cardItem == initialFocusItem) {
+                Modifier
+                    .width(cardWidth)
+                    .focusRequester(initialFocusRequester)
+            } else {
+                Modifier.width(cardWidth)
+            }
+
+            val liveBadge: (@Composable () -> Unit)? = if (isLive) {
+                { LiveBadge() }
+            } else {
+                null
+            }
+
+            FocusableCard(
+                title = cardItem.title,
+                imageUrl = cardItem.imageUrl,
+                onClick = { onCardClick(cardItem) },
+                modifier = cardModifier,
+                badge = liveBadge,
+                progress = null,
+            )
+        }
+
+        repeat((columns - items.size).coerceAtLeast(0)) {
+            Spacer(modifier = Modifier.width(cardWidth))
         }
     }
 }
@@ -1074,6 +1318,16 @@ private val previewMovieRow = HomeRow(
     ),
 )
 
+private val previewMovieRowAlt = HomeRow(
+    categoryId = "4",
+    title = "Comedies",
+    items = listOf(
+        HomeCardItem(id = "m3", title = "Panique au Bureau", imageUrl = null, contentType = ContentType.MOVIE),
+        HomeCardItem(id = "m4", title = "Sprint Final", imageUrl = null, contentType = ContentType.MOVIE),
+        HomeCardItem(id = "m5", title = "Bug & Love", imageUrl = null, contentType = ContentType.MOVIE),
+    ),
+)
+
 private val previewSeriesRow = HomeRow(
     categoryId = "3",
     title = "Drames",
@@ -1138,6 +1392,92 @@ private fun HomeContentErrorPreview() {
             onRetry = {},
             onNavigateToDetail = { _, _ -> },
         )
+    }
+}
+
+@Preview(
+    name = "Home catalog selection (phone)",
+    showBackground = true,
+    backgroundColor = 0xFF0A0A0F,
+    widthDp = 412,
+    heightDp = 900,
+)
+@Composable
+private fun HomeCatalogSelectionPhonePreview() {
+    IptvAppTheme {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(BackgroundBase),
+        ) {
+            homeLanguageFilterRow(
+                key = "preview-language-filter",
+                languages = listOf("FR", "EN", "VOSTFR"),
+                selected = "FR",
+                horizontalPadding = LayoutDimens.ContentPaddingPhone,
+                onLanguageSelected = {},
+            )
+            homeCategorySelectorRow(
+                key = "preview-category-selector",
+                rows = listOf(previewMovieRow, previewMovieRowAlt),
+                selectedCategoryId = previewMovieRowAlt.categoryId,
+                horizontalPadding = LayoutDimens.ContentPaddingPhone,
+                onCategorySelected = {},
+            )
+            homeCategoryGridSection(
+                sectionTitle = previewMovieRowAlt.title,
+                row = previewMovieRowAlt,
+                columns = 2,
+                horizontalPadding = LayoutDimens.ContentPaddingPhone,
+                cardWidth = CardDimens.PosterWidthPhone,
+                onCardClick = {},
+                initialFocusItem = previewMovieRowAlt.items.first(),
+                initialFocusRequester = FocusRequester(),
+            )
+        }
+    }
+}
+
+@Preview(
+    name = "Home catalog selection (TV)",
+    showBackground = true,
+    backgroundColor = 0xFF0A0A0F,
+    widthDp = 1280,
+    heightDp = 720,
+)
+@Composable
+private fun HomeCatalogSelectionTvPreview() {
+    IptvAppTheme {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(BackgroundBase),
+        ) {
+            homeLanguageFilterRow(
+                key = "preview-tv-language-filter",
+                languages = listOf("FR", "EN", "VOSTFR"),
+                selected = "FR",
+                horizontalPadding = LayoutDimens.ContentPaddingTv,
+                onLanguageSelected = {},
+            )
+            homeCategorySelectorRow(
+                key = "preview-tv-category-selector",
+                rows = listOf(previewMovieRow, previewMovieRowAlt),
+                selectedCategoryId = previewMovieRowAlt.categoryId,
+                horizontalPadding = LayoutDimens.ContentPaddingTv,
+                onCategorySelected = {},
+            )
+            homeCategoryGridSection(
+                sectionTitle = previewMovieRowAlt.title,
+                row = previewMovieRowAlt,
+                columns = 4,
+                horizontalPadding = LayoutDimens.ContentPaddingTv,
+                cardWidth = CardDimens.PosterWidthTv,
+                onCardClick = {},
+                initialFocusItem = previewMovieRowAlt.items.first(),
+                initialFocusRequester = FocusRequester(),
+            )
+        }
     }
 }
 
