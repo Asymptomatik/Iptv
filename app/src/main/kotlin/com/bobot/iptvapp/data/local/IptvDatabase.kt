@@ -4,6 +4,7 @@ import androidx.room.Database
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 import com.bobot.iptvapp.data.local.dao.CatalogCacheDao
+import com.bobot.iptvapp.data.local.dao.DownloadDao
 import com.bobot.iptvapp.data.local.dao.EpgDao
 import com.bobot.iptvapp.data.local.dao.FavoriteDao
 import com.bobot.iptvapp.data.local.dao.PlaybackProgressDao
@@ -12,6 +13,7 @@ import com.bobot.iptvapp.data.local.entity.CategoryEntity
 import com.bobot.iptvapp.data.local.entity.ChannelEntity
 import com.bobot.iptvapp.data.local.entity.EpisodeEntity
 import com.bobot.iptvapp.data.local.entity.EpgProgramEntity
+import com.bobot.iptvapp.data.local.entity.DownloadEntity
 import com.bobot.iptvapp.data.local.entity.FavoriteEntity
 import com.bobot.iptvapp.data.local.entity.MovieEntity
 import com.bobot.iptvapp.data.local.entity.PlaybackProgressEntity
@@ -66,8 +68,9 @@ import com.bobot.iptvapp.data.local.entity.SeriesEntity
         SeasonEntity::class,
         EpisodeEntity::class,
         EpgProgramEntity::class,
+        DownloadEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -82,4 +85,6 @@ abstract class IptvDatabase : RoomDatabase() {
     abstract fun catalogCacheDao(): CatalogCacheDao
 
     abstract fun epgDao(): EpgDao
+
+    abstract fun downloadDao(): DownloadDao
 }

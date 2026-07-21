@@ -1,7 +1,9 @@
 package com.bobot.iptvapp
 
 import android.app.Application
+import com.bobot.iptvapp.download.DownloadTracker
 import dagger.hilt.android.HiltAndroidApp
+import javax.inject.Inject
 
 /**
  * Application entry point for Hilt dependency injection.
@@ -18,4 +20,6 @@ import dagger.hilt.android.HiltAndroidApp
  * Tasks 6–12 may add library inits here (e.g. Coil ImageLoader, Timber).
  */
 @HiltAndroidApp
-class IptvApplication : Application()
+class IptvApplication : Application() {
+    @Inject lateinit var downloadTracker: DownloadTracker
+}

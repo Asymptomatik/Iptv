@@ -6,6 +6,8 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.cache.Cache
+import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.MediaSource
@@ -14,6 +16,7 @@ import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.exoplayer.source.SingleSampleMediaSource
 import com.bobot.iptvapp.domain.model.ExternalSubtitle
 import okhttp3.OkHttpClient
+import com.bobot.iptvapp.di.DownloadModule.DownloadCache
 import javax.inject.Inject
 
 /**
@@ -74,9 +77,14 @@ import javax.inject.Inject
  */
 class IptvMediaSourceFactory @Inject constructor(
     okHttpClient: OkHttpClient,
+    @DownloadCache downloadCache: Cache,
 ) {
 
-    private val dataSourceFactory: DataSource.Factory = OkHttpDataSource.Factory(okHttpClient)
+    private val upstreamDataSourceFactory = OkHttpDataSource.Factory(okHttpClient)
+    private val dataSourceFactory: DataSource.Factory = CacheDataSource.Factory()
+        .setCache(downloadCache)
+        .setUpstreamDataSourceFactory(upstreamDataSourceFactory)
+        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
 
     /**
      * Creates a [MediaSource] for [streamUrl], resolving its [StreamMediaType] via

@@ -1,9 +1,11 @@
 package com.bobot.iptvapp.di
 
 import com.bobot.iptvapp.data.repository.FavoritesRepositoryImpl
+import com.bobot.iptvapp.data.repository.DownloadRepositoryImpl
 import com.bobot.iptvapp.data.repository.PlaybackProgressRepositoryImpl
 import com.bobot.iptvapp.data.repository.ProfileRepositoryImpl
 import com.bobot.iptvapp.domain.repository.FavoritesRepository
+import com.bobot.iptvapp.domain.repository.DownloadRepository
 import com.bobot.iptvapp.domain.repository.PlaybackProgressRepository
 import com.bobot.iptvapp.domain.repository.ProfileRepository
 import dagger.Binds
@@ -39,6 +41,10 @@ abstract class LocalRepositoryModule {
     @Binds
     @Singleton
     abstract fun bindFavoritesRepository(impl: FavoritesRepositoryImpl): FavoritesRepository
+
+    @Binds
+    @Singleton
+    abstract fun bindDownloadRepository(impl: DownloadRepositoryImpl): DownloadRepository
 
     @Binds
     @Singleton

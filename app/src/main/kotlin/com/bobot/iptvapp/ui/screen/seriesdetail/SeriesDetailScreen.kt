@@ -20,6 +20,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
@@ -50,10 +51,13 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.bobot.iptvapp.domain.model.Episode
+import com.bobot.iptvapp.domain.model.DownloadState
+import com.bobot.iptvapp.domain.model.OfflineDownload
 import com.bobot.iptvapp.domain.model.Season
 import com.bobot.iptvapp.domain.model.Series
 import com.bobot.iptvapp.ui.components.CategoryChip
 import com.bobot.iptvapp.ui.components.FocusableTextButton
+import com.bobot.iptvapp.ui.components.GhostButton
 import com.bobot.iptvapp.ui.components.GlassIconButton
 import com.bobot.iptvapp.ui.components.SectionTitle
 import com.bobot.iptvapp.ui.components.glassSurface
@@ -109,6 +113,9 @@ fun SeriesDetailScreen(
         onEpisodeClick = { episode ->
             viewModel.buildEpisodeStreamUrl(episode)?.let { url -> onNavigateToPlayer(url, episode.id) }
         },
+        onDownloadEpisode = viewModel::onDownloadEpisode,
+        onPauseEpisodeDownload = viewModel::onPauseEpisodeDownload,
+        onResumeEpisodeDownload = viewModel::onResumeEpisodeDownload,
         onSeasonSelected = viewModel::onSelectSeason,
         onFavoriteClick = viewModel::onToggleFavorite,
         onRetry = viewModel::onRetry,
@@ -120,6 +127,9 @@ fun SeriesDetailScreen(
 private fun SeriesDetailContent(
     uiState: SeriesDetailUiState,
     onEpisodeClick: (Episode) -> Unit,
+    onDownloadEpisode: (Episode) -> Unit = {},
+    onPauseEpisodeDownload: (Episode) -> Unit = {},
+    onResumeEpisodeDownload: (Episode) -> Unit = {},
     onSeasonSelected: (Int) -> Unit,
     onFavoriteClick: () -> Unit,
     onRetry: () -> Unit,
@@ -141,6 +151,9 @@ private fun SeriesDetailContent(
                 series = series,
                 uiState = uiState,
                 onEpisodeClick = onEpisodeClick,
+                onDownloadEpisode = onDownloadEpisode,
+                onPauseEpisodeDownload = onPauseEpisodeDownload,
+                onResumeEpisodeDownload = onResumeEpisodeDownload,
                 onSeasonSelected = onSeasonSelected,
                 onFavoriteClick = onFavoriteClick,
             )
@@ -196,6 +209,9 @@ private fun SeriesDetailBody(
     series: Series,
     uiState: SeriesDetailUiState,
     onEpisodeClick: (Episode) -> Unit,
+    onDownloadEpisode: (Episode) -> Unit,
+    onPauseEpisodeDownload: (Episode) -> Unit,
+    onResumeEpisodeDownload: (Episode) -> Unit,
     onSeasonSelected: (Int) -> Unit,
     onFavoriteClick: () -> Unit,
 ) {
@@ -305,8 +321,12 @@ private fun SeriesDetailBody(
                 episodes.forEach { episode ->
                     SeriesDetailEpisodeRow(
                         episode = episode,
+                        download = uiState.episodeDownloads[episode.id],
                         enabled = uiState.hasCredentials,
                         onClick = { onEpisodeClick(episode) },
+                        onDownloadClick = { onDownloadEpisode(episode) },
+                        onPauseDownloadClick = { onPauseEpisodeDownload(episode) },
+                        onResumeDownloadClick = { onResumeEpisodeDownload(episode) },
                         modifier = Modifier.padding(horizontal = horizontalPadding, vertical = Spacing.xs),
                     )
                 }
@@ -445,8 +465,12 @@ private fun SeriesSeasonSelector(
 @Composable
 private fun SeriesDetailEpisodeRow(
     episode: Episode,
+    download: OfflineDownload?,
     enabled: Boolean,
     onClick: () -> Unit,
+    onDownloadClick: () -> Unit,
+    onPauseDownloadClick: () -> Unit,
+    onResumeDownloadClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var isFocused by remember { mutableStateOf(false) }
@@ -519,13 +543,42 @@ private fun SeriesDetailEpisodeRow(
 
         Spacer(modifier = Modifier.width(Spacing.sm))
 
-        // Play affordance
         GlassIconButton(
             icon = Icons.Default.PlayArrow,
             contentDescription = "Lire",
             onClick = onClick,
             enabled = enabled,
         )
+
+        Spacer(modifier = Modifier.width(Spacing.xs))
+
+        when (download?.state) {
+            DownloadState.QUEUED,
+            DownloadState.DOWNLOADING -> GhostButton(
+                label = "Mettre en pause",
+                onClick = onPauseDownloadClick,
+            )
+
+            DownloadState.PAUSED -> GhostButton(
+                label = "Reprendre",
+                onClick = onResumeDownloadClick,
+            )
+
+            DownloadState.COMPLETED -> GhostButton(
+                label = "Téléchargé",
+                onClick = {},
+                enabled = false,
+            )
+
+            DownloadState.NOT_DOWNLOADED,
+            DownloadState.FAILED,
+            null -> GlassIconButton(
+                icon = Icons.Default.Add,
+                contentDescription = "Télécharger",
+                onClick = onDownloadClick,
+                enabled = enabled,
+            )
+        }
     }
 }
 
