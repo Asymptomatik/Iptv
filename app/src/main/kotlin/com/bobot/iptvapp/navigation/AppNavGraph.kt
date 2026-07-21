@@ -7,6 +7,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import com.bobot.iptvapp.ui.screen.DetailPlaceholderScreen
+import com.bobot.iptvapp.ui.screen.downloads.DownloadsScreen
 import com.bobot.iptvapp.ui.screen.home.HomeScreen
 import com.bobot.iptvapp.ui.screen.livedetail.LiveDetailScreen
 import com.bobot.iptvapp.ui.screen.moviedetail.MovieDetailScreen
@@ -103,6 +104,19 @@ fun AppNavGraph(
                 },
                 onNavigateToSettings = {
                     navController.navigate(Settings)
+                },
+                onNavigateToDownloads = {
+                    navController.navigate(Downloads)
+                },
+            )
+        }
+
+        // ── Downloads ────────────────────────────────────────────────────────
+        composable<Downloads> {
+            DownloadsScreen(
+                onNavigateBack = { navController.popBackStack() },
+                onPlay = { url, id ->
+                    navController.navigate(Player(streamUrl = url, streamId = id))
                 },
             )
         }

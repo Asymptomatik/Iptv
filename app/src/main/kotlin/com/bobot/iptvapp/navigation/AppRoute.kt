@@ -59,6 +59,10 @@ data object Search : AppRoute
 @Serializable
 data object Settings : AppRoute
 
+/** Offline VOD library — queue, transfer progress, and completed files. */
+@Serializable
+data object Downloads : AppRoute
+
 // ─── Destinations with arguments ─────────────────────────────────────────────
 
 /**
