@@ -1,6 +1,7 @@
 package com.bobot.iptvapp.player
 
 import androidx.media3.common.Player
+import com.bobot.iptvapp.domain.model.ExternalSubtitle
 
 /**
  * Owns and configures the app's video player instance.
@@ -46,8 +47,14 @@ interface PlayerManager {
      * @param streamUrl Direct-play or HLS URL resolved by the Xtream Codes client.
      * @param startPositionMs Position to resume from, in milliseconds. `0L` (default)
      *   starts from the beginning.
+     * @param externalSubtitles Best-effort external subtitle tracks (e.g. Xtream `get_vod_info`'s
+     *   `.srt` URL) to side-load alongside [streamUrl], per [IptvMediaSourceFactory.create]'s
+     *   "External subtitle side-loading" contract (Task 3): usable entries become additional,
+     *   user-selectable (never auto-selected) subtitle tracks; a missing/empty list, a
+     *   blank/malformed URL, or a dead URL at playback time never blocks or fails preparation —
+     *   defaults to `emptyList()` so existing callers are unaffected.
      */
-    fun prepare(streamUrl: String, startPositionMs: Long = 0L)
+    fun prepare(streamUrl: String, startPositionMs: Long = 0L, externalSubtitles: List<ExternalSubtitle> = emptyList())
 
     /**
      * Releases the current [Player] instance and its underlying decoder/renderer
@@ -55,4 +62,51 @@ interface PlayerManager {
      * The next [prepare] call (or [player] access) creates a fresh instance.
      */
     fun release()
+
+    /**
+     * The audio tracks embedded in the currently prepared stream, derived from
+     * [Player.getCurrentTracks], with [PlayerTrack.isSelected] reflecting the track Media3
+     * currently applies to playback.
+     *
+     * Returns an empty list when no stream is prepared yet or the stream exposes no
+     * alternative audio track (the common case for most IPTV live channels/VOD) — this never
+     * throws. Callers (Task 4's `PlayerViewModel`) are expected to re-fetch after each
+     * `Player.Listener.onTracksChanged` callback, since the returned list is a snapshot.
+     */
+    fun getAudioTracks(): List<PlayerTrack>
+
+    /**
+     * The subtitle (text) tracks embedded in the currently prepared stream, derived from
+     * [Player.getCurrentTracks], with [PlayerTrack.isSelected] reflecting the track Media3
+     * currently applies to playback (or no track selected when subtitles are disabled/absent).
+     *
+     * Returns an empty list when no stream is prepared yet or the stream exposes no subtitle
+     * track — this never throws. See [getAudioTracks] for the snapshot/refresh contract.
+     */
+    fun getSubtitleTracks(): List<PlayerTrack>
+
+    /**
+     * Selects the audio track identified by [trackId] (as reported by [getAudioTracks]) for
+     * live playback, replacing any previous audio selection.
+     *
+     * A safe no-op when [trackId] does not match any track in the current stream (e.g. it was
+     * derived from a stale snapshot, or the stream has no alternative audio track at all).
+     */
+    fun selectAudioTrack(trackId: String)
+
+    /**
+     * Selects the subtitle track identified by [trackId] (as reported by [getSubtitleTracks])
+     * and enables subtitle rendering, replacing any previous subtitle selection.
+     *
+     * A safe no-op when [trackId] does not match any track in the current stream.
+     */
+    fun selectSubtitleTrack(trackId: String)
+
+    /**
+     * Disables subtitle rendering entirely (no [PlayerTrack] of type
+     * [PlayerTrackType.SUBTITLE] renders), clearing any previously selected subtitle track.
+     * Safe to call when the stream has no subtitle track, or when subtitles are already
+     * disabled.
+     */
+    fun disableSubtitles()
 }
