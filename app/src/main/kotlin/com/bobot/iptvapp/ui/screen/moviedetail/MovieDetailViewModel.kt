@@ -6,8 +6,13 @@ import com.bobot.iptvapp.data.preferences.AppPreferencesStore
 import com.bobot.iptvapp.data.remote.XtreamUrlBuilder
 import com.bobot.iptvapp.data.source.CredentialsProvider
 import com.bobot.iptvapp.domain.model.ContentType
+import com.bobot.iptvapp.domain.model.DownloadContentType
+import com.bobot.iptvapp.domain.model.DownloadRequestData
+import com.bobot.iptvapp.domain.model.DownloadRequestId
 import com.bobot.iptvapp.domain.model.Movie
+import com.bobot.iptvapp.domain.model.OfflineDownload
 import com.bobot.iptvapp.domain.repository.CatalogRepository
+import com.bobot.iptvapp.domain.repository.DownloadRepository
 import com.bobot.iptvapp.domain.repository.FavoritesRepository
 import com.bobot.iptvapp.domain.repository.PlaybackProgressRepository
 import com.bobot.iptvapp.domain.util.Resource
@@ -53,6 +58,7 @@ data class MovieDetailUiState(
     val isFavorite: Boolean = false,
     val canResume: Boolean = false,
     val streamUrl: String? = null,
+    val download: OfflineDownload? = null,
 )
 
 /**
@@ -109,6 +115,7 @@ class MovieDetailViewModel @Inject constructor(
     private val catalogRepository: CatalogRepository,
     private val favoritesRepository: FavoritesRepository,
     private val playbackProgressRepository: PlaybackProgressRepository,
+    private val downloadRepository: DownloadRepository,
     private val appPreferencesStore: AppPreferencesStore,
     private val credentialsProvider: CredentialsProvider,
 ) : ViewModel() {
@@ -131,6 +138,7 @@ class MovieDetailViewModel @Inject constructor(
     private var movieId: String? = null
     private var activeProfileId: String? = null
     private var favoriteObservationJob: Job? = null
+    private var downloadObservationJob: Job? = null
 
     /**
      * Loads the movie identified by [movieId]. Idempotent — only the first call per ViewModel
@@ -166,6 +174,32 @@ class MovieDetailViewModel @Inject constructor(
         }
     }
 
+    fun onDownloadClick() {
+        val movie = _uiState.value.movie ?: return
+        val streamUrl = _uiState.value.streamUrl ?: return
+        viewModelScope.launch {
+            downloadRepository.enqueue(
+                DownloadRequestData(
+                    contentType = DownloadContentType.MOVIE,
+                    contentId = movie.id,
+                    title = movie.title,
+                    artworkUrl = movie.posterUrl,
+                    streamUrl = streamUrl,
+                ),
+            )
+        }
+    }
+
+    fun onPauseDownload() {
+        val downloadId = _uiState.value.download?.downloadId ?: return
+        viewModelScope.launch { downloadRepository.pause(downloadId) }
+    }
+
+    fun onResumeDownload() {
+        val downloadId = _uiState.value.download?.downloadId ?: return
+        viewModelScope.launch { downloadRepository.resume(downloadId) }
+    }
+
     // ─── Internal ────────────────────────────────────────────────────────────────
 
     private fun loadMovie(movieId: String) {
@@ -190,6 +224,8 @@ class MovieDetailViewModel @Inject constructor(
                             canResume = canResume,
                         )
                     }
+
+                    observeDownload(movieId)
 
                     if (profileId != null) {
                         observeFavorite(profileId, movieId)
@@ -218,6 +254,15 @@ class MovieDetailViewModel @Inject constructor(
         favoriteObservationJob = viewModelScope.launch {
             favoritesRepository.isFavorite(profileId, movieId, ContentType.MOVIE)
                 .collect { isFavorite -> _uiState.update { it.copy(isFavorite = isFavorite) } }
+        }
+    }
+
+    private fun observeDownload(movieId: String) {
+        downloadObservationJob?.cancel()
+        val downloadId = DownloadRequestId.create(DownloadContentType.MOVIE, movieId)
+        downloadObservationJob = viewModelScope.launch {
+            downloadRepository.observeDownload(downloadId)
+                .collect { download -> _uiState.update { it.copy(download = download) } }
         }
     }
 

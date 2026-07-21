@@ -3,11 +3,16 @@ package com.bobot.iptvapp.ui.screen.seriesdetail
 import com.bobot.iptvapp.data.preferences.AppPreferencesStore
 import com.bobot.iptvapp.data.source.CredentialsProvider
 import com.bobot.iptvapp.domain.model.ContentType
+import com.bobot.iptvapp.domain.model.DownloadContentType
+import com.bobot.iptvapp.domain.model.DownloadRequestData
+import com.bobot.iptvapp.domain.model.DownloadState
 import com.bobot.iptvapp.domain.model.Episode
+import com.bobot.iptvapp.domain.model.OfflineDownload
 import com.bobot.iptvapp.domain.model.Season
 import com.bobot.iptvapp.domain.model.Series
 import com.bobot.iptvapp.domain.model.XtreamCredentials
 import com.bobot.iptvapp.domain.repository.CatalogRepository
+import com.bobot.iptvapp.domain.repository.DownloadRepository
 import com.bobot.iptvapp.domain.repository.FavoritesRepository
 import com.bobot.iptvapp.domain.util.Resource
 import io.mockk.Runs
@@ -16,6 +21,7 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
+import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -52,11 +58,13 @@ class SeriesDetailViewModelTest {
 
     private lateinit var catalogRepository: CatalogRepository
     private lateinit var favoritesRepository: FavoritesRepository
+    private lateinit var downloadRepository: DownloadRepository
     private lateinit var appPreferencesStore: AppPreferencesStore
     private lateinit var credentialsProvider: CredentialsProvider
     private lateinit var viewModel: SeriesDetailViewModel
 
     private lateinit var isFavoriteFlow: MutableStateFlow<Boolean>
+    private lateinit var downloadFlow: MutableStateFlow<List<OfflineDownload>>
 
     private val profileId = "p1"
     private val seriesId = "s1"
@@ -110,15 +118,21 @@ class SeriesDetailViewModelTest {
 
         catalogRepository = mockk()
         favoritesRepository = mockk()
+        downloadRepository = mockk()
         appPreferencesStore = mockk()
         credentialsProvider = mockk()
 
         isFavoriteFlow = MutableStateFlow(false)
+        downloadFlow = MutableStateFlow(emptyList())
 
         coEvery { appPreferencesStore.getActiveProfileId() } returns profileId
         coEvery { credentialsProvider.getCredentials() } returns credentials
         every { favoritesRepository.isFavorite(any(), any(), any()) } returns isFavoriteFlow
+        every { downloadRepository.observeDownloads() } returns downloadFlow
         coEvery { favoritesRepository.toggleFavorite(any(), any(), any()) } just Runs
+        coEvery { downloadRepository.enqueue(any()) } returns "EPISODE:e1"
+        coEvery { downloadRepository.pause(any()) } just Runs
+        coEvery { downloadRepository.resume(any()) } just Runs
     }
 
     @After
@@ -130,6 +144,7 @@ class SeriesDetailViewModelTest {
         viewModel = SeriesDetailViewModel(
             catalogRepository = catalogRepository,
             favoritesRepository = favoritesRepository,
+            downloadRepository = downloadRepository,
             appPreferencesStore = appPreferencesStore,
             credentialsProvider = credentialsProvider,
         )
@@ -260,6 +275,69 @@ class SeriesDetailViewModelTest {
         assertNull(viewModel.buildEpisodeStreamUrl(season1Episodes[0]))
     }
 
+    // ── Offline download ───────────────────────────────────────────────────────
+
+    @Test
+    fun `onDownloadEpisode enqueues the episode with episode metadata and its stream URL`() {
+        coEvery { catalogRepository.getSeriesDetail(seriesId) } returns Resource.Success(series)
+        initialize()
+
+        viewModel.onDownloadEpisode(season1Episodes[0])
+        testDispatcher.scheduler.runCurrent()
+
+        coVerify(exactly = 1) {
+            downloadRepository.enqueue(
+                DownloadRequestData(
+                    contentType = DownloadContentType.EPISODE,
+                    contentId = "e1",
+                    title = "Pilote",
+                    artworkUrl = "http://example.com/e1.jpg",
+                    streamUrl = "http://example.com:8080/series/alice/secret/e1.mkv",
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `initialize exposes only this series episode download states`() {
+        coEvery { catalogRepository.getSeriesDetail(seriesId) } returns Resource.Success(series)
+        val episodeDownload = downloadOf(state = DownloadState.DOWNLOADING)
+        downloadFlow.value = listOf(
+            episodeDownload,
+            episodeDownload.copy(downloadId = "EPISODE:other", contentId = "other"),
+        )
+
+        initialize()
+
+        assertEquals(episodeDownload, viewModel.uiState.value.episodeDownloads["e1"])
+        assertFalse(viewModel.uiState.value.episodeDownloads.containsKey("other"))
+        verify(exactly = 1) { downloadRepository.observeDownloads() }
+    }
+
+    @Test
+    fun `onPauseEpisodeDownload delegates the episode download ID to the repository`() {
+        coEvery { catalogRepository.getSeriesDetail(seriesId) } returns Resource.Success(series)
+        downloadFlow.value = listOf(downloadOf(state = DownloadState.DOWNLOADING))
+        initialize()
+
+        viewModel.onPauseEpisodeDownload(season1Episodes[0])
+        testDispatcher.scheduler.runCurrent()
+
+        coVerify(exactly = 1) { downloadRepository.pause("EPISODE:e1") }
+    }
+
+    @Test
+    fun `onResumeEpisodeDownload delegates the episode download ID to the repository`() {
+        coEvery { catalogRepository.getSeriesDetail(seriesId) } returns Resource.Success(series)
+        downloadFlow.value = listOf(downloadOf(state = DownloadState.PAUSED))
+        initialize()
+
+        viewModel.onResumeEpisodeDownload(season1Episodes[0])
+        testDispatcher.scheduler.runCurrent()
+
+        coVerify(exactly = 1) { downloadRepository.resume("EPISODE:e1") }
+    }
+
     // ── Favorites ──────────────────────────────────────────────────────────────
 
     @Test
@@ -317,4 +395,17 @@ class SeriesDetailViewModelTest {
         assertNull(state.errorMessage)
         assertEquals(series, state.series)
     }
+
+    private fun downloadOf(state: DownloadState) = OfflineDownload(
+        downloadId = "EPISODE:e1",
+        contentType = DownloadContentType.EPISODE,
+        contentId = "e1",
+        title = "Pilote",
+        artworkUrl = "http://example.com/e1.jpg",
+        streamUrl = "http://example.com:8080/series/alice/secret/e1.mkv",
+        state = state,
+        bytesDownloaded = 50L,
+        contentLength = 100L,
+        updatedAtMillis = 1_000L,
+    )
 }
