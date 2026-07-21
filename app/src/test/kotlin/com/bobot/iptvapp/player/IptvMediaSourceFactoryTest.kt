@@ -1,6 +1,7 @@
 package com.bobot.iptvapp.player
 
 import android.net.Uri
+import androidx.media3.datasource.cache.Cache
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.MergingMediaSource
@@ -75,7 +76,7 @@ class IptvMediaSourceFactoryTest {
             }
         }
 
-        factory = IptvMediaSourceFactory(mockk<OkHttpClient>(relaxed = true))
+        factory = IptvMediaSourceFactory(mockk<OkHttpClient>(relaxed = true), mockk<Cache>(relaxed = true))
     }
 
     @After
