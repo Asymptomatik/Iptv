@@ -3,13 +3,19 @@ package com.bobot.iptvapp.ui.screen.player
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.Tracks
 import androidx.media3.common.Player as ExoCommonPlayer
 import com.bobot.iptvapp.data.preferences.AppPreferencesStore
 import com.bobot.iptvapp.domain.model.ContentType
+import com.bobot.iptvapp.domain.model.ExternalSubtitle
 import com.bobot.iptvapp.domain.model.PlaybackProgress
+import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.repository.PlaybackProgressRepository
+import com.bobot.iptvapp.domain.util.Resource
 import com.bobot.iptvapp.player.PlayerManager
+import com.bobot.iptvapp.player.PlayerTrack
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,6 +24,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
 /**
@@ -36,6 +43,25 @@ import javax.inject.Inject
  * @property currentPositionMs Last polled playback position, in milliseconds.
  * @property durationMs      Last polled content duration, in milliseconds. `0L` while unknown
  *                           (e.g. live streams, or before the player has prepared metadata).
+ * @property audioTracks     Snapshot of the current stream's audio tracks (from
+ *                           [PlayerManager.getAudioTracks]), refreshed on every Media3
+ *                           [ExoCommonPlayer.Listener.onTracksChanged] callback and immediately
+ *                           after [PlayerViewModel.selectAudioTrack] (see [PlayerViewModel]'s
+ *                           `refreshTracks`). Empty before a stream is prepared, or when the
+ *                           stream exposes no alternative audio track. Exactly one entry has
+ *                           [PlayerTrack.isSelected] `true` once a stream is prepared — Media3
+ *                           always applies some audio track when at least one exists.
+ * @property subtitleTracks  Snapshot of the current stream's subtitle tracks — embedded plus any
+ *                           usable best-effort external subtitle (see [PlayerManager.prepare]'s
+ *                           `externalSubtitles` parameter) — from [PlayerManager.getSubtitleTracks],
+ *                           refreshed the same way as [audioTracks]. Unlike audio, this list may
+ *                           have **no** entry with [PlayerTrack.isSelected] `true`: that state
+ *                           *is* "subtitles disabled" — deliberately no separate
+ *                           `subtitlesEnabled` flag is kept here, since [PlayerManager.disableSubtitles]
+ *                           clears every subtitle track's selection, making "disabled" and "no
+ *                           selected entry in this list" the exact same state Media3 itself
+ *                           exposes. Consumers can derive "disabled" as
+ *                           `subtitleTracks.none { it.isSelected }`.
  */
 data class PlayerUiState(
     val isPlaying: Boolean = false,
@@ -43,6 +69,8 @@ data class PlayerUiState(
     val hasError: Boolean = false,
     val currentPositionMs: Long = 0L,
     val durationMs: Long = 0L,
+    val audioTracks: List<PlayerTrack> = emptyList(),
+    val subtitleTracks: List<PlayerTrack> = emptyList(),
 )
 
 /**
@@ -76,6 +104,7 @@ class PlayerViewModel @Inject constructor(
     private val playerManager: PlayerManager,
     private val playbackProgressRepository: PlaybackProgressRepository,
     private val appPreferencesStore: AppPreferencesStore,
+    private val catalogRepository: CatalogRepository,
 ) : ViewModel() {
 
     private companion object {
@@ -116,6 +145,18 @@ class PlayerViewModel @Inject constructor(
          * period is needed.
          */
         const val STALL_DETECTION_TIMEOUT_MS = 20_000L
+
+        /**
+         * Upper bound on the best-effort external-subtitle metadata fetch performed by
+         * [resolveExternalSubtitles] as part of [initialize], via
+         * [CatalogRepository.getMovieDetail]. Chosen well under [STALL_DETECTION_TIMEOUT_MS]
+         * (20s) so that even a worst-case timeout here can never itself be responsible for
+         * tripping the stall watchdog, while still being generous enough to absorb a normal
+         * `get_vod_info` round-trip. On timeout, [resolveExternalSubtitles] falls back to
+         * `emptyList()` and playback proceeds with only the stream's embedded tracks — see its
+         * KDoc for the full best-effort contract.
+         */
+        const val EXTERNAL_SUBTITLES_TIMEOUT_MS = 4_000L
     }
 
     /** The shared [ExoCommonPlayer] instance to attach to Media3's `PlayerView`. */
@@ -138,6 +179,13 @@ class PlayerViewModel @Inject constructor(
      * error rather than restarting from the beginning.
      */
     private var startPositionMs: Long = 0L
+
+    /**
+     * Best-effort external subtitles resolved in [initialize] (see [resolveExternalSubtitles])
+     * and retained so that [retry] re-prepares with the same side-loaded tracks instead of
+     * silently dropping them back to [PlayerManager.prepare]'s `emptyList()` default.
+     */
+    private var resolvedExternalSubtitles: List<ExternalSubtitle> = emptyList()
 
     private var initialized = false
     private var released = false
@@ -193,6 +241,19 @@ class PlayerViewModel @Inject constructor(
             cancelStallDetection()
             _uiState.update { it.copy(hasError = true, isBuffering = false) }
         }
+
+        /**
+         * Media3's push signal that the current [Tracks] snapshot changed — fires once tracks
+         * become known after [PlayerManager.prepare], and again after any track-selection
+         * override is applied (e.g. via [selectAudioTrack] / [selectSubtitleTrack] /
+         * [disableSubtitles], or a mid-stream HLS rendition change). [refreshTracks] re-reads
+         * [PlayerManager.getAudioTracks] / [PlayerManager.getSubtitleTracks] so
+         * [PlayerUiState.audioTracks] / [PlayerUiState.subtitleTracks] stay in sync without this
+         * ViewModel needing to inspect [tracks] itself.
+         */
+        override fun onTracksChanged(tracks: Tracks) {
+            refreshTracks()
+        }
     }
 
     /**
@@ -237,8 +298,19 @@ class PlayerViewModel @Inject constructor(
                 0L
             }
 
+            // Best-effort external-subtitle resolution (Task 4) — must complete (or time out)
+            // before `prepare()` below, since `prepare()` is the only place these can be
+            // side-loaded (Task 3's `PlayerManager.prepare` contract). See
+            // `resolveExternalSubtitles` KDoc for the MOVIE-only gating and timeout rationale.
+            val externalSubtitles = resolveExternalSubtitles(resolvedType, streamId)
+            resolvedExternalSubtitles = externalSubtitles
+
             startPositionMs = resolvedStartPosition
-            playerManager.prepare(streamUrl = streamUrl, startPositionMs = resolvedStartPosition)
+            playerManager.prepare(
+                streamUrl = streamUrl,
+                startPositionMs = resolvedStartPosition,
+                externalSubtitles = externalSubtitles,
+            )
             _uiState.update { it.copy(currentPositionMs = resolvedStartPosition) }
             startProgressTicker()
         }
@@ -279,7 +351,14 @@ class PlayerViewModel @Inject constructor(
         // makes this call safe even if the Media3 callback *does* also fire independently —
         // no duplicate timer is created.
         startStallDetection()
-        playerManager.prepare(streamUrl = url, startPositionMs = startPositionMs)
+        // Re-passes `resolvedExternalSubtitles` (retained from `initialize`'s resolution) rather
+        // than relying on `prepare`'s `emptyList()` default, so a retry does not silently drop
+        // an already-resolved best-effort external subtitle track.
+        playerManager.prepare(
+            streamUrl = url,
+            startPositionMs = startPositionMs,
+            externalSubtitles = resolvedExternalSubtitles,
+        )
     }
 
     /** Toggles play/pause — wired to the Composable's central play/pause control. */
@@ -307,6 +386,46 @@ class PlayerViewModel @Inject constructor(
         val clamped = positionMs.coerceIn(0L, upperBound)
         player.seekTo(clamped)
         _uiState.update { it.copy(currentPositionMs = clamped) }
+    }
+
+    /**
+     * Selects the audio track identified by [trackId] (as reported by
+     * [PlayerUiState.audioTracks]) — delegates to [PlayerManager.selectAudioTrack], which is
+     * itself a safe no-op for a stale/unknown [trackId]. Immediately calls [refreshTracks] so
+     * [PlayerUiState.audioTracks] reflects the new [PlayerTrack.isSelected] without waiting on
+     * Media3's own `onTracksChanged` callback (which also fires for this change — see
+     * [refreshTracks] KDoc for why the double refresh is harmless).
+     *
+     * A safe no-op once the player has been [releasePlayer]d, mirroring [retry]'s `released`
+     * guard.
+     */
+    fun selectAudioTrack(trackId: String) {
+        if (released) return
+        playerManager.selectAudioTrack(trackId)
+        refreshTracks()
+    }
+
+    /**
+     * Selects the subtitle track identified by [trackId] (as reported by
+     * [PlayerUiState.subtitleTracks]) — see [selectAudioTrack] for the refresh/guard contract,
+     * which this mirrors exactly.
+     */
+    fun selectSubtitleTrack(trackId: String) {
+        if (released) return
+        playerManager.selectSubtitleTrack(trackId)
+        refreshTracks()
+    }
+
+    /**
+     * Disables subtitle rendering entirely — see [PlayerManager.disableSubtitles] and
+     * [PlayerUiState.subtitleTracks] KDoc for how "disabled" is represented (no track in that
+     * list has [PlayerTrack.isSelected] `true`). See [selectAudioTrack] for the refresh/guard
+     * contract, which this mirrors exactly.
+     */
+    fun disableSubtitles() {
+        if (released) return
+        playerManager.disableSubtitles()
+        refreshTracks()
     }
 
     /**
@@ -346,6 +465,76 @@ class PlayerViewModel @Inject constructor(
     }
 
     // ─── Internal ────────────────────────────────────────────────────────────────
+
+    /**
+     * Re-reads [PlayerManager.getAudioTracks] / [PlayerManager.getSubtitleTracks] and pushes the
+     * fresh snapshot into [PlayerUiState.audioTracks] / [PlayerUiState.subtitleTracks].
+     *
+     * Called from two places, both safe to combine:
+     *  - [playerListener]'s `onTracksChanged` — Media3's own push signal, the source of truth;
+     *  - immediately after [selectAudioTrack] / [selectSubtitleTrack] / [disableSubtitles] — so
+     *    the UI never shows a stale [PlayerTrack.isSelected] for the brief window before Media3's
+     *    callback also fires. Both call sites converge on the same idempotent read-and-copy, so
+     *    the guaranteed extra `onTracksChanged` firing afterwards is a harmless no-op refresh
+     *    rather than a duplicate source of truth.
+     *
+     * A no-op once the player has been [releasePlayer]d — [PlayerManager] must not be touched
+     * after [PlayerManager.release] (mirrors every other post-release guard in this class).
+     */
+    private fun refreshTracks() {
+        if (released) return
+        _uiState.update {
+            it.copy(
+                audioTracks = playerManager.getAudioTracks(),
+                subtitleTracks = playerManager.getSubtitleTracks(),
+            )
+        }
+    }
+
+    /**
+     * Best-effort resolution of [ExternalSubtitle]s for [initialize] to pass into
+     * [PlayerManager.prepare] (Task 3's side-loading contract).
+     *
+     * ## MOVIE-only gating
+     * External subtitles are only ever advertised by Xtream's `get_vod_info` response (see
+     * [com.bobot.iptvapp.domain.model.Movie.externalSubtitles] KDoc) — there is no equivalent
+     * detail call for LIVE channels or SERIES episodes, so [CatalogRepository.getMovieDetail] is
+     * only invoked when [contentType] is [ContentType.MOVIE]; every other type short-circuits to
+     * `emptyList()` without making a network call.
+     *
+     * ## Best-effort contract (approved brief: "never blocks or crashes playback")
+     *  - [Resource.Error] from [CatalogRepository.getMovieDetail] falls back to `emptyList()`;
+     *  - any other thrown exception is also caught and falls back to `emptyList()` — a second
+     *    line of defence so a detail-call failure can never propagate out of this function and
+     *    abort [initialize]'s coroutine before it reaches [PlayerManager.prepare]. Coroutine
+     *    [CancellationException] is deliberately re-thrown rather than swallowed, so cancelling
+     *    [initialize]'s coroutine (e.g. the screen is left before playback starts) still
+     *    cancels cleanly instead of being misreported as "no external subtitles";
+     *  - [EXTERNAL_SUBTITLES_TIMEOUT_MS] bounds the wait via [withTimeoutOrNull] — see that
+     *    constant's KDoc for the exact rationale — so a slow/hanging `get_vod_info` call can
+     *    never indefinitely delay the start of playback; timing out also falls back to
+     *    `emptyList()`, and the movie plays with only its embedded tracks.
+     */
+    private suspend fun resolveExternalSubtitles(
+        contentType: ContentType,
+        streamId: String,
+    ): List<ExternalSubtitle> {
+        if (contentType != ContentType.MOVIE) return emptyList()
+
+        return try {
+            withTimeoutOrNull(EXTERNAL_SUBTITLES_TIMEOUT_MS) {
+                when (val result = catalogRepository.getMovieDetail(streamId)) {
+                    is Resource.Success -> result.data.externalSubtitles
+                    is Resource.Error -> emptyList()
+                    Resource.Loading -> emptyList()
+                }
+            } ?: emptyList()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
 
     private fun startProgressTicker() {
         progressTickerJob?.cancel()
