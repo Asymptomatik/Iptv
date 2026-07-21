@@ -3,8 +3,10 @@ package com.bobot.iptvapp.di
 import android.content.Context
 import androidx.room.Room
 import com.bobot.iptvapp.data.local.IptvDatabase
+import com.bobot.iptvapp.data.local.DatabaseMigrations
 import com.bobot.iptvapp.data.local.dao.CatalogCacheDao
 import com.bobot.iptvapp.data.local.dao.EpgDao
+import com.bobot.iptvapp.data.local.dao.DownloadDao
 import com.bobot.iptvapp.data.local.dao.FavoriteDao
 import com.bobot.iptvapp.data.local.dao.PlaybackProgressDao
 import com.bobot.iptvapp.data.local.dao.ProfileDao
@@ -49,7 +51,7 @@ object DatabaseModule {
             context,
             IptvDatabase::class.java,
             "iptv.db",
-        ).build()
+        ).addMigrations(DatabaseMigrations.MIGRATION_1_2).build()
 
     @Provides
     fun provideProfileDao(db: IptvDatabase): ProfileDao = db.profileDao()
@@ -66,4 +68,7 @@ object DatabaseModule {
 
     @Provides
     fun provideEpgDao(db: IptvDatabase): EpgDao = db.epgDao()
+
+    @Provides
+    fun provideDownloadDao(db: IptvDatabase): DownloadDao = db.downloadDao()
 }
