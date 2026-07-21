@@ -6,10 +6,14 @@ import com.bobot.iptvapp.data.preferences.AppPreferencesStore
 import com.bobot.iptvapp.data.remote.XtreamUrlBuilder
 import com.bobot.iptvapp.data.source.CredentialsProvider
 import com.bobot.iptvapp.domain.model.ContentType
+import com.bobot.iptvapp.domain.model.DownloadContentType
+import com.bobot.iptvapp.domain.model.DownloadRequestData
 import com.bobot.iptvapp.domain.model.Episode
+import com.bobot.iptvapp.domain.model.OfflineDownload
 import com.bobot.iptvapp.domain.model.Series
 import com.bobot.iptvapp.domain.model.XtreamCredentials
 import com.bobot.iptvapp.domain.repository.CatalogRepository
+import com.bobot.iptvapp.domain.repository.DownloadRepository
 import com.bobot.iptvapp.domain.repository.FavoritesRepository
 import com.bobot.iptvapp.domain.util.Resource
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -54,6 +58,7 @@ data class SeriesDetailUiState(
     val isFavorite: Boolean = false,
     val selectedSeasonNumber: Int? = null,
     val hasCredentials: Boolean = true,
+    val episodeDownloads: Map<String, OfflineDownload> = emptyMap(),
 ) {
     /**
      * Episodes of the season matching [selectedSeasonNumber] within [series], already sorted
@@ -131,6 +136,7 @@ data class SeriesDetailUiState(
 class SeriesDetailViewModel @Inject constructor(
     private val catalogRepository: CatalogRepository,
     private val favoritesRepository: FavoritesRepository,
+    private val downloadRepository: DownloadRepository,
     private val appPreferencesStore: AppPreferencesStore,
     private val credentialsProvider: CredentialsProvider,
 ) : ViewModel() {
@@ -148,6 +154,7 @@ class SeriesDetailViewModel @Inject constructor(
     private var activeProfileId: String? = null
     private var credentials: XtreamCredentials? = null
     private var favoriteObservationJob: Job? = null
+    private var downloadsObservationJob: Job? = null
 
     /**
      * Loads the series identified by [seriesId]. Idempotent — only the first call per ViewModel
@@ -193,6 +200,31 @@ class SeriesDetailViewModel @Inject constructor(
         viewModelScope.launch {
             favoritesRepository.toggleFavorite(profileId, id, ContentType.SERIES)
         }
+    }
+
+    fun onDownloadEpisode(episode: Episode) {
+        val streamUrl = buildEpisodeStreamUrl(episode) ?: return
+        viewModelScope.launch {
+            downloadRepository.enqueue(
+                DownloadRequestData(
+                    contentType = DownloadContentType.EPISODE,
+                    contentId = episode.id,
+                    title = episode.title,
+                    artworkUrl = episode.coverUrl,
+                    streamUrl = streamUrl,
+                ),
+            )
+        }
+    }
+
+    fun onPauseEpisodeDownload(episode: Episode) {
+        val downloadId = _uiState.value.episodeDownloads[episode.id]?.downloadId ?: return
+        viewModelScope.launch { downloadRepository.pause(downloadId) }
+    }
+
+    fun onResumeEpisodeDownload(episode: Episode) {
+        val downloadId = _uiState.value.episodeDownloads[episode.id]?.downloadId ?: return
+        viewModelScope.launch { downloadRepository.resume(downloadId) }
     }
 
     /**
@@ -242,6 +274,8 @@ class SeriesDetailViewModel @Inject constructor(
                         )
                     }
 
+                    observeEpisodeDownloads(series)
+
                     if (profileId != null) {
                         observeFavorite(profileId, seriesId)
                     }
@@ -254,6 +288,20 @@ class SeriesDetailViewModel @Inject constructor(
                 // Resource docs: "Suspend methods do not emit Loading" — kept only for
                 // `when` exhaustiveness over the sealed Resource type.
                 Resource.Loading -> Unit
+            }
+        }
+    }
+
+    private fun observeEpisodeDownloads(series: Series) {
+        val episodeIds = series.seasons.flatMap { it.episodes }.map { it.id }.toSet()
+        downloadsObservationJob?.cancel()
+        downloadsObservationJob = viewModelScope.launch {
+            downloadRepository.observeDownloads().collect { downloads ->
+                val episodeDownloads = downloads
+                    .asSequence()
+                    .filter { it.contentType == DownloadContentType.EPISODE && it.contentId in episodeIds }
+                    .associateBy { it.contentId }
+                _uiState.update { it.copy(episodeDownloads = episodeDownloads) }
             }
         }
     }

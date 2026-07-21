@@ -89,6 +89,7 @@ import com.bobot.iptvapp.ui.util.rememberIsTvDevice
  * @param onNavigateToPlayer   Opens the player directly for a "Reprendre" card.
  * @param onNavigateToSearch   Opens the search screen.
  * @param onNavigateToSettings Opens the settings screen.
+ * @param onNavigateToDownloads Opens the offline downloads library.
  */
 @Composable
 fun HomeScreen(
@@ -96,6 +97,7 @@ fun HomeScreen(
     onNavigateToPlayer: (streamUrl: String, streamId: String) -> Unit,
     onNavigateToSearch: () -> Unit,
     onNavigateToSettings: () -> Unit,
+    onNavigateToDownloads: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: HomeViewModel = hiltViewModel(),
 ) {
@@ -114,6 +116,7 @@ fun HomeScreen(
         onNavigateToDetail = onNavigateToDetail,
         onNavigateToSearch = onNavigateToSearch,
         onNavigateToSettings = onNavigateToSettings,
+        onNavigateToDownloads = onNavigateToDownloads,
         onRetry = viewModel::onRetry,
         onCatalogTabSelected = viewModel::onCatalogTabSelected,
         onLanguageSelected = viewModel::onLanguageSelected,
@@ -256,6 +259,7 @@ private fun HomeContent(
     onNavigateToDetail: (contentType: String, contentId: String) -> Unit,
     onNavigateToSearch: () -> Unit,
     onNavigateToSettings: () -> Unit,
+    onNavigateToDownloads: () -> Unit = {},
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
     onCatalogTabSelected: (ContentType) -> Unit = {},
@@ -291,6 +295,7 @@ private fun HomeContent(
                 onRetry = onRetry,
                 onNavigateToSearch = onNavigateToSearch,
                 onNavigateToSettings = onNavigateToSettings,
+                onNavigateToDownloads = onNavigateToDownloads,
                 onTabSelected = { selectedTab = it },
                 onLanguageSelected = onLanguageSelected,
             )
@@ -305,6 +310,7 @@ private fun HomeContent(
                 onTabSelected = { selectedTab = it },
                 onNavigateToSearch = onNavigateToSearch,
                 onNavigateToSettings = onNavigateToSettings,
+                onNavigateToDownloads = onNavigateToDownloads,
                 collapseFraction = 1f,
             )
         }
@@ -325,12 +331,14 @@ private fun HomeHeader(
     onTabSelected: (HomeTab) -> Unit,
     onNavigateToSearch: () -> Unit,
     onNavigateToSettings: () -> Unit,
+    onNavigateToDownloads: () -> Unit,
     collapseFraction: Float,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         HomeTopBar(
             onNavigateToSearch = onNavigateToSearch,
             onNavigateToSettings = onNavigateToSettings,
+            onNavigateToDownloads = onNavigateToDownloads,
             collapseFraction = collapseFraction,
         )
         HomeTabBar(
@@ -349,6 +357,7 @@ private fun HomeHeader(
 private fun HomeTopBar(
     onNavigateToSearch: () -> Unit,
     onNavigateToSettings: () -> Unit,
+    onNavigateToDownloads: () -> Unit,
     collapseFraction: Float,
 ) {
     val isTv = rememberIsTvDevice()
@@ -383,6 +392,7 @@ private fun HomeTopBar(
 
         Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
             FocusableTextButton(label = "Recherche", onClick = onNavigateToSearch)
+            FocusableTextButton(label = "Téléchargements", onClick = onNavigateToDownloads)
             FocusableTextButton(label = "Reglages", onClick = onNavigateToSettings)
         }
     }
@@ -515,6 +525,7 @@ private fun HomeRowsContent(
     onRetry: () -> Unit,
     onNavigateToSearch: () -> Unit,
     onNavigateToSettings: () -> Unit,
+    onNavigateToDownloads: () -> Unit,
     onTabSelected: (HomeTab) -> Unit,
     onLanguageSelected: (ContentType, String?) -> Unit,
 ) {
@@ -765,6 +776,7 @@ private fun HomeRowsContent(
             onTabSelected = onTabSelected,
             onNavigateToSearch = onNavigateToSearch,
             onNavigateToSettings = onNavigateToSettings,
+            onNavigateToDownloads = onNavigateToDownloads,
             collapseFraction = topBarCollapseFraction,
         )
     }

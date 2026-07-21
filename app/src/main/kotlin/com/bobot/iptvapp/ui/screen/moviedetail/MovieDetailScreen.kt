@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
+import com.bobot.iptvapp.domain.model.DownloadState
 import com.bobot.iptvapp.domain.model.Movie
 import com.bobot.iptvapp.ui.components.CategoryChip
 import com.bobot.iptvapp.ui.components.FocusableTextButton
@@ -85,6 +86,9 @@ fun MovieDetailScreen(
         uiState = uiState,
         onPlayClick = { uiState.streamUrl?.let { url -> onNavigateToPlayer(url, movieId) } },
         onFavoriteClick = viewModel::onToggleFavorite,
+        onDownloadClick = viewModel::onDownloadClick,
+        onPauseDownload = viewModel::onPauseDownload,
+        onResumeDownload = viewModel::onResumeDownload,
         onRetry = viewModel::onRetry,
         modifier = modifier,
     )
@@ -95,6 +99,9 @@ private fun MovieDetailContent(
     uiState: MovieDetailUiState,
     onPlayClick: () -> Unit,
     onFavoriteClick: () -> Unit,
+    onDownloadClick: () -> Unit = {},
+    onPauseDownload: () -> Unit = {},
+    onResumeDownload: () -> Unit = {},
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -115,6 +122,9 @@ private fun MovieDetailContent(
                 uiState = uiState,
                 onPlayClick = onPlayClick,
                 onFavoriteClick = onFavoriteClick,
+                onDownloadClick = onDownloadClick,
+                onPauseDownload = onPauseDownload,
+                onResumeDownload = onResumeDownload,
             )
             else -> MovieDetailErrorState(message = null, onRetry = onRetry)
         }
@@ -169,6 +179,9 @@ private fun MovieDetailBody(
     uiState: MovieDetailUiState,
     onPlayClick: () -> Unit,
     onFavoriteClick: () -> Unit,
+    onDownloadClick: () -> Unit,
+    onPauseDownload: () -> Unit,
+    onResumeDownload: () -> Unit,
 ) {
     val isTv = rememberIsTvDevice()
     val horizontalPadding = if (isTv) LayoutDimens.ContentPaddingTv else LayoutDimens.ContentPaddingPhone
@@ -225,6 +238,33 @@ private fun MovieDetailBody(
                     GhostButton(
                         label = "Recommencer",
                         onClick = onPlayClick,
+                        enabled = uiState.streamUrl != null,
+                    )
+                }
+
+                when (uiState.download?.state) {
+                    DownloadState.QUEUED,
+                    DownloadState.DOWNLOADING -> GhostButton(
+                        label = "Mettre en pause",
+                        onClick = onPauseDownload,
+                    )
+
+                    DownloadState.PAUSED -> GhostButton(
+                        label = "Reprendre",
+                        onClick = onResumeDownload,
+                    )
+
+                    DownloadState.COMPLETED -> GhostButton(
+                        label = "Téléchargé",
+                        onClick = {},
+                        enabled = false,
+                    )
+
+                    DownloadState.NOT_DOWNLOADED,
+                    DownloadState.FAILED,
+                    null -> GhostButton(
+                        label = "Télécharger",
+                        onClick = onDownloadClick,
                         enabled = uiState.streamUrl != null,
                     )
                 }
