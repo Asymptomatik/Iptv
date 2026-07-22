@@ -4,11 +4,27 @@ import com.bobot.iptvapp.data.remote.dto.VodInfoDetailDto
 import com.bobot.iptvapp.data.remote.dto.VodInfoDto
 import com.bobot.iptvapp.data.remote.dto.VodMovieDataDto
 import com.bobot.iptvapp.data.remote.dto.VodStreamDto
+import com.bobot.iptvapp.data.remote.dto.VodSubtitleDto
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MovieMapperTest {
+
+    /**
+     * Mirrors the [Json] configuration provided by
+     * `com.bobot.iptvapp.di.NetworkModule.provideJson` (ignoreUnknownKeys,
+     * isLenient, coerceInputValues) so raw-JSON tolerant-deserialization tests
+     * below exercise the same parsing behavior the app uses in production.
+     */
+    private val json = Json {
+        ignoreUnknownKeys = true
+        isLenient = true
+        coerceInputValues = true
+    }
 
     // ── VodStreamDto → Movie ──────────────────────────────────────────────────
 
@@ -163,5 +179,195 @@ class MovieMapperTest {
         )
 
         assertEquals(7_200L * 1_000L, dto.toDomain("1", "1").durationMillis)
+    }
+
+    // ── VodInfoDto → Movie: external subtitles mapping (DTO objects) ──────────
+
+    @Test
+    fun `VodInfoDto toDomain maps well-formed subtitles to externalSubtitles preserving url and language`() {
+        val dto = VodInfoDto(
+            info = VodInfoDetailDto(
+                title = "Film",
+                subtitles = listOf(
+                    VodSubtitleDto(url = "http://example.com/en.srt", language = "en"),
+                    VodSubtitleDto(url = "http://example.com/fr.srt", language = "fr"),
+                ),
+            ),
+            movieData = VodMovieDataDto(streamId = "1"),
+        )
+
+        val result = dto.toDomain("1", "1").externalSubtitles
+
+        assertEquals(2, result.size)
+        assertEquals("http://example.com/en.srt", result[0].url)
+        assertEquals("en", result[0].language)
+        assertEquals("http://example.com/fr.srt", result[1].url)
+        assertEquals("fr", result[1].language)
+    }
+
+    @Test
+    fun `VodInfoDto toDomain drops subtitle entries with null or blank url`() {
+        val dto = VodInfoDto(
+            info = VodInfoDetailDto(
+                title = "Film",
+                subtitles = listOf(
+                    VodSubtitleDto(url = null, language = "en"),
+                    VodSubtitleDto(url = "   ", language = "fr"),
+                    VodSubtitleDto(url = "http://example.com/de.srt", language = "de"),
+                ),
+            ),
+            movieData = VodMovieDataDto(streamId = "1"),
+        )
+
+        val result = dto.toDomain("1", "1").externalSubtitles
+
+        assertEquals(1, result.size)
+        assertEquals("http://example.com/de.srt", result[0].url)
+        assertEquals("de", result[0].language)
+    }
+
+    @Test
+    fun `VodInfoDto toDomain maps blank subtitle language to null`() {
+        val dto = VodInfoDto(
+            info = VodInfoDetailDto(
+                title = "Film",
+                subtitles = listOf(VodSubtitleDto(url = "http://example.com/en.srt", language = "   ")),
+            ),
+            movieData = VodMovieDataDto(streamId = "1"),
+        )
+
+        val result = dto.toDomain("1", "1").externalSubtitles
+
+        assertEquals(1, result.size)
+        assertNull(result[0].language)
+    }
+
+    @Test
+    fun `VodInfoDto toDomain yields empty externalSubtitles when subtitles field is absent`() {
+        val dto = VodInfoDto(
+            info = VodInfoDetailDto(title = "Film", subtitles = null),
+            movieData = VodMovieDataDto(streamId = "1"),
+        )
+
+        assertTrue(dto.toDomain("1", "1").externalSubtitles.isEmpty())
+    }
+
+    // ── info.subtitles raw JSON: tolerant deserialization (NullableVodSubtitleListSerializer) ──
+    //
+    // These tests decode full VodInfoDto payloads through the same Json configuration as the
+    // app (see `json` above, mirroring NetworkModule.provideJson) to prove end-to-end that a
+    // missing, empty, or malformed `subtitles` field never breaks parsing of the rest of the
+    // response, per the best-effort contract in the approved brief.
+
+    @Test
+    fun `raw JSON without a subtitles field parses fine and maps to empty externalSubtitles`() {
+        val raw = """
+            {
+              "info": { "title": "Film" },
+              "movie_data": { "stream_id": "1" }
+            }
+        """.trimIndent()
+
+        val dto = json.decodeFromString<VodInfoDto>(raw)
+
+        assertNull(dto.info.subtitles)
+        assertTrue(dto.toDomain("1", "1").externalSubtitles.isEmpty())
+    }
+
+    @Test
+    fun `raw JSON with an empty subtitles array parses fine and maps to empty externalSubtitles`() {
+        val raw = """
+            {
+              "info": { "title": "Film", "subtitles": [] },
+              "movie_data": { "stream_id": "1" }
+            }
+        """.trimIndent()
+
+        val dto = json.decodeFromString<VodInfoDto>(raw)
+
+        assertNull(dto.info.subtitles)
+        assertTrue(dto.toDomain("1", "1").externalSubtitles.isEmpty())
+    }
+
+    @Test
+    fun `raw JSON with subtitles as a single object instead of an array degrades to null without breaking the rest of the response`() {
+        val raw = """
+            {
+              "info": { "title": "Film", "subtitles": { "url": "http://example.com/en.srt" } },
+              "movie_data": { "stream_id": "1" }
+            }
+        """.trimIndent()
+
+        val dto = json.decodeFromString<VodInfoDto>(raw)
+
+        assertNull(dto.info.subtitles)
+        assertEquals("Film", dto.info.title)
+        assertEquals("1", dto.movieData?.streamId)
+        assertTrue(dto.toDomain("1", "1").externalSubtitles.isEmpty())
+    }
+
+    @Test
+    fun `raw JSON with subtitles as a string degrades to null without breaking the rest of the response`() {
+        val raw = """
+            {
+              "info": { "title": "Film", "subtitles": "http://example.com/en.srt" },
+              "movie_data": { "stream_id": "1" }
+            }
+        """.trimIndent()
+
+        val dto = json.decodeFromString<VodInfoDto>(raw)
+
+        assertNull(dto.info.subtitles)
+        assertEquals("Film", dto.info.title)
+        assertTrue(dto.toDomain("1", "1").externalSubtitles.isEmpty())
+    }
+
+    @Test
+    fun `raw JSON with a mix of a valid and a malformed subtitle entry drops the malformed one and keeps the valid one`() {
+        val raw = """
+            {
+              "info": {
+                "title": "Film",
+                "subtitles": [
+                  { "url": "http://example.com/en.srt", "language": "en" },
+                  "not-an-object"
+                ]
+              },
+              "movie_data": { "stream_id": "1" }
+            }
+        """.trimIndent()
+
+        val dto = json.decodeFromString<VodInfoDto>(raw)
+
+        assertEquals(1, dto.info.subtitles?.size)
+        val result = dto.toDomain("1", "1").externalSubtitles
+        assertEquals(1, result.size)
+        assertEquals("http://example.com/en.srt", result[0].url)
+        assertEquals("en", result[0].language)
+    }
+
+    @Test
+    fun `raw JSON tolerates alternate key names subtitle-file for url and lang-label for language`() {
+        val raw = """
+            {
+              "info": {
+                "title": "Film",
+                "subtitles": [
+                  { "subtitle": "http://example.com/en.srt", "lang": "en" },
+                  { "file": "http://example.com/fr.srt", "label": "French" }
+                ]
+              },
+              "movie_data": { "stream_id": "1" }
+            }
+        """.trimIndent()
+
+        val dto = json.decodeFromString<VodInfoDto>(raw)
+        val result = dto.toDomain("1", "1").externalSubtitles
+
+        assertEquals(2, result.size)
+        assertEquals("http://example.com/en.srt", result[0].url)
+        assertEquals("en", result[0].language)
+        assertEquals("http://example.com/fr.srt", result[1].url)
+        assertEquals("French", result[1].language)
     }
 }

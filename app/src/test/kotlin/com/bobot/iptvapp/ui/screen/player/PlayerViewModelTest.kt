@@ -2,11 +2,18 @@ package com.bobot.iptvapp.ui.screen.player
 
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Tracks
 import com.bobot.iptvapp.data.preferences.AppPreferencesStore
 import com.bobot.iptvapp.domain.model.ContentType
+import com.bobot.iptvapp.domain.model.ExternalSubtitle
+import com.bobot.iptvapp.domain.model.Movie
 import com.bobot.iptvapp.domain.model.PlaybackProgress
+import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.repository.PlaybackProgressRepository
+import com.bobot.iptvapp.domain.util.Resource
 import com.bobot.iptvapp.player.PlayerManager
+import com.bobot.iptvapp.player.PlayerTrack
+import com.bobot.iptvapp.player.PlayerTrackType
 import io.mockk.Runs
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -16,6 +23,7 @@ import io.mockk.mockk
 import io.mockk.slot
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
@@ -53,6 +61,7 @@ class PlayerViewModelTest {
     private lateinit var playerManager: PlayerManager
     private lateinit var playbackProgressRepository: PlaybackProgressRepository
     private lateinit var appPreferencesStore: AppPreferencesStore
+    private lateinit var catalogRepository: CatalogRepository
     private lateinit var viewModel: PlayerViewModel
 
     @Before
@@ -64,15 +73,27 @@ class PlayerViewModelTest {
         every { playerManager.player } returns player
         every { playerManager.prepare(any(), any()) } just Runs
         every { playerManager.release() } just Runs
+        every { playerManager.getAudioTracks() } returns emptyList()
+        every { playerManager.getSubtitleTracks() } returns emptyList()
+        every { playerManager.selectAudioTrack(any()) } just Runs
+        every { playerManager.selectSubtitleTrack(any()) } just Runs
+        every { playerManager.disableSubtitles() } just Runs
         playbackProgressRepository = mockk()
         appPreferencesStore = mockk()
+        catalogRepository = mockk()
 
         coEvery { playbackProgressRepository.upsertProgress(any()) } just Runs
+        // Default: no external subtitles resolved unless a test overrides this stub — keeps
+        // every pre-existing (MOVIE-content) test's `prepare(...)` call matching the
+        // `externalSubtitles = emptyList()` default it was written against, since
+        // `resolveExternalSubtitles` falls back to `emptyList()` on any `Resource.Error`.
+        coEvery { catalogRepository.getMovieDetail(any()) } returns Resource.Error()
 
         viewModel = PlayerViewModel(
             playerManager = playerManager,
             playbackProgressRepository = playbackProgressRepository,
             appPreferencesStore = appPreferencesStore,
+            catalogRepository = catalogRepository,
         )
     }
 
@@ -362,6 +383,203 @@ class PlayerViewModelTest {
         verify(exactly = 1) { player.seekTo(500_000L) }
     }
 
+    // ── track selection (audio / subtitle) — Task 4 ──────────────────────────
+
+    @Test
+    fun `selectAudioTrack delegates to PlayerManager and refreshes uiState from the current track snapshots`() {
+        val audioTracks = listOf(
+            PlayerTrack(id = "audio-0", label = "Français", languageCode = "fra", isSelected = true, type = PlayerTrackType.AUDIO),
+        )
+        val subtitleTracks = listOf(
+            PlayerTrack(id = "sub-0", label = "English", languageCode = "eng", isSelected = false, type = PlayerTrackType.SUBTITLE),
+        )
+        every { playerManager.getAudioTracks() } returns audioTracks
+        every { playerManager.getSubtitleTracks() } returns subtitleTracks
+
+        viewModel.selectAudioTrack("audio-0")
+
+        verify(exactly = 1) { playerManager.selectAudioTrack("audio-0") }
+        assertEquals(audioTracks, viewModel.uiState.value.audioTracks)
+        assertEquals(subtitleTracks, viewModel.uiState.value.subtitleTracks)
+    }
+
+    @Test
+    fun `selectSubtitleTrack delegates to PlayerManager and refreshes uiState from the current track snapshots`() {
+        val subtitleTracks = listOf(
+            PlayerTrack(id = "sub-0", label = "English", languageCode = "eng", isSelected = true, type = PlayerTrackType.SUBTITLE),
+        )
+        every { playerManager.getAudioTracks() } returns emptyList()
+        every { playerManager.getSubtitleTracks() } returns subtitleTracks
+
+        viewModel.selectSubtitleTrack("sub-0")
+
+        verify(exactly = 1) { playerManager.selectSubtitleTrack("sub-0") }
+        assertEquals(subtitleTracks, viewModel.uiState.value.subtitleTracks)
+    }
+
+    @Test
+    fun `disableSubtitles delegates to PlayerManager and refreshes uiState so no subtitle track is selected`() {
+        val subtitleTracks = listOf(
+            PlayerTrack(id = "sub-0", label = "English", languageCode = "eng", isSelected = false, type = PlayerTrackType.SUBTITLE),
+        )
+        every { playerManager.getAudioTracks() } returns emptyList()
+        every { playerManager.getSubtitleTracks() } returns subtitleTracks
+
+        viewModel.disableSubtitles()
+
+        verify(exactly = 1) { playerManager.disableSubtitles() }
+        assertTrue(
+            "no subtitle track should be selected once subtitles are disabled",
+            viewModel.uiState.value.subtitleTracks.none { it.isSelected },
+        )
+    }
+
+    @Test
+    fun `onTracksChanged refreshes uiState audio and subtitle track lists`() {
+        val listenerSlot = slot<Player.Listener>()
+        every { player.addListener(capture(listenerSlot)) } just Runs
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+
+        viewModel.initialize("http://example.com:8080/movie/u/p/42.mp4", "42")
+        testDispatcher.scheduler.runCurrent()
+
+        val audioTracks = listOf(
+            PlayerTrack(id = "audio-0", label = "Français", languageCode = "fra", isSelected = true, type = PlayerTrackType.AUDIO),
+        )
+        val subtitleTracks = listOf(
+            PlayerTrack(id = "sub-0", label = "English", languageCode = "eng", isSelected = true, type = PlayerTrackType.SUBTITLE),
+        )
+        every { playerManager.getAudioTracks() } returns audioTracks
+        every { playerManager.getSubtitleTracks() } returns subtitleTracks
+
+        listenerSlot.captured.onTracksChanged(mockk<Tracks>(relaxed = true))
+
+        assertEquals(audioTracks, viewModel.uiState.value.audioTracks)
+        assertEquals(subtitleTracks, viewModel.uiState.value.subtitleTracks)
+    }
+
+    @Test
+    fun `selectAudioTrack is a safe no-op after releasePlayer`() {
+        viewModel.releasePlayer()
+
+        viewModel.selectAudioTrack("audio-0")
+
+        verify(exactly = 0) { playerManager.selectAudioTrack(any()) }
+        verify(exactly = 0) { playerManager.getAudioTracks() }
+    }
+
+    @Test
+    fun `selectSubtitleTrack is a safe no-op after releasePlayer`() {
+        viewModel.releasePlayer()
+
+        viewModel.selectSubtitleTrack("sub-0")
+
+        verify(exactly = 0) { playerManager.selectSubtitleTrack(any()) }
+        verify(exactly = 0) { playerManager.getSubtitleTracks() }
+    }
+
+    @Test
+    fun `disableSubtitles is a safe no-op after releasePlayer`() {
+        viewModel.releasePlayer()
+
+        viewModel.disableSubtitles()
+
+        verify(exactly = 0) { playerManager.disableSubtitles() }
+        verify(exactly = 0) { playerManager.getSubtitleTracks() }
+    }
+
+    // ── best-effort external subtitles (Task 4) ──────────────────────────────
+
+    @Test
+    fun `initialize resolves external subtitles from getMovieDetail for MOVIE content and passes them to prepare`() {
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+        val subtitles = listOf(ExternalSubtitle(url = "http://example.com/sub.srt", language = "fr"))
+        coEvery { catalogRepository.getMovieDetail("42") } returns Resource.Success(sampleMovie(externalSubtitles = subtitles))
+
+        viewModel.initialize("http://example.com:8080/movie/u/p/42.mp4", "42")
+        testDispatcher.scheduler.runCurrent()
+
+        verify(exactly = 1) {
+            playerManager.prepare(
+                streamUrl = "http://example.com:8080/movie/u/p/42.mp4",
+                startPositionMs = 0L,
+                externalSubtitles = subtitles,
+            )
+        }
+    }
+
+    @Test
+    fun `initialize falls back to empty external subtitles when getMovieDetail returns an error for MOVIE content`() {
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+        coEvery { catalogRepository.getMovieDetail("42") } returns Resource.Error(message = "boom")
+
+        viewModel.initialize("http://example.com:8080/movie/u/p/42.mp4", "42")
+        testDispatcher.scheduler.runCurrent()
+
+        verify(exactly = 1) {
+            playerManager.prepare(
+                streamUrl = "http://example.com:8080/movie/u/p/42.mp4",
+                startPositionMs = 0L,
+                externalSubtitles = emptyList(),
+            )
+        }
+    }
+
+    @Test
+    fun `initialize falls back to empty external subtitles when getMovieDetail times out for MOVIE content`() {
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+        coEvery { catalogRepository.getMovieDetail("42") } coAnswers {
+            delay(10_000L)
+            Resource.Success(sampleMovie(externalSubtitles = listOf(ExternalSubtitle("http://example.com/late.srt", "en"))))
+        }
+
+        viewModel.initialize("http://example.com:8080/movie/u/p/42.mp4", "42")
+        testDispatcher.scheduler.advanceTimeBy(5_000L)
+        testDispatcher.scheduler.runCurrent()
+
+        verify(exactly = 1) {
+            playerManager.prepare(
+                streamUrl = "http://example.com:8080/movie/u/p/42.mp4",
+                startPositionMs = 0L,
+                externalSubtitles = emptyList(),
+            )
+        }
+    }
+
+    @Test
+    fun `initialize does not call getMovieDetail for LIVE content and prepares with empty external subtitles`() {
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+
+        viewModel.initialize("http://example.com:8080/live/u/p/77.ts", "77")
+        testDispatcher.scheduler.runCurrent()
+
+        coVerify(exactly = 0) { catalogRepository.getMovieDetail(any()) }
+        verify(exactly = 1) {
+            playerManager.prepare(
+                streamUrl = "http://example.com:8080/live/u/p/77.ts",
+                startPositionMs = 0L,
+                externalSubtitles = emptyList(),
+            )
+        }
+    }
+
+    @Test
+    fun `initialize does not call getMovieDetail for SERIES content and prepares with empty external subtitles`() {
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+
+        viewModel.initialize("http://example.com:8080/series/u/p/5.mp4", "5")
+        testDispatcher.scheduler.runCurrent()
+
+        coVerify(exactly = 0) { catalogRepository.getMovieDetail(any()) }
+        verify(exactly = 1) {
+            playerManager.prepare(
+                streamUrl = "http://example.com:8080/series/u/p/5.mp4",
+                startPositionMs = 0L,
+                externalSubtitles = emptyList(),
+            )
+        }
+    }
+
     // ── releasePlayer ─────────────────────────────────────────────────────────
 
     @Test
@@ -441,4 +659,20 @@ class PlayerViewModelTest {
         coVerify(exactly = 1) { playbackProgressRepository.upsertProgress(any()) }
         assertEquals(12_345L, savedProgress.captured.positionMillis)
     }
+
+    /** Minimal [Movie] fixture for [CatalogRepository.getMovieDetail] stubs — only
+     *  [Movie.externalSubtitles] is exercised by the tests using this helper. */
+    private fun sampleMovie(externalSubtitles: List<ExternalSubtitle> = emptyList()): Movie = Movie(
+        id = "42",
+        title = "Test Movie",
+        posterUrl = null,
+        plot = null,
+        categoryId = "1",
+        rating = null,
+        year = null,
+        addedMillis = null,
+        durationMillis = null,
+        containerExtension = "mp4",
+        externalSubtitles = externalSubtitles,
+    )
 }

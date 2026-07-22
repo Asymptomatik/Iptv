@@ -34,6 +34,11 @@ package com.bobot.iptvapp.domain.model
  *                              server does not return duration metadata.
  * @property containerExtension File container or extension (e.g. "mkv", "mp4"). Used
  *                              to construct the direct stream URL. Null when absent.
+ * @property externalSubtitles  Best-effort external subtitle tracks (e.g. `.srt`
+ *                              file links) advertised by some Xtream servers in the
+ *                              `get_vod_info` response. Empty when the server does
+ *                              not expose any (the common case). Transient: not
+ *                              persisted to the Room cache.
  */
 data class Movie(
     val id: String,
@@ -46,4 +51,5 @@ data class Movie(
     val addedMillis: Long?,
     val durationMillis: Long?,
     val containerExtension: String?,
+    val externalSubtitles: List<ExternalSubtitle> = emptyList(),
 )

@@ -106,6 +106,24 @@ android {
         buildConfig = true
     }
 
+    testOptions {
+        unitTests {
+            // Task 2 retry: ExoPlayerManagerTest constructs real `androidx.media3.common`
+            // objects (Format/TrackGroup/Tracks/Tracks.Group) directly on the plain JVM unit
+            // test classpath, per upstream Media3's own testing convention. Empirically
+            // verified (real JDK 21 + the project's actual media3-common-1.4.1 jar) while
+            // implementing this fix: `Format.Builder().setLanguage(nonNullCode)` and
+            // `TrackGroup`'s multi-format consistency check both reach into
+            // `android.text.TextUtils`/`android.util.Log` — framework stubs that throw
+            // `"... not mocked"` by default rather than executing (there is no real Android
+            // runtime backing them here, and this project isn't on Robolectric). Returning
+            // harmless default values instead of throwing is the standard, minimal AGP
+            // mechanism for exactly this class of test and does not affect instrumented
+            // (`androidTest`) behavior at all — only the plain-JVM unit test classpath.
+            isReturnDefaultValues = true
+        }
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"

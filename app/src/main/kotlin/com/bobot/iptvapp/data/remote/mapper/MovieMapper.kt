@@ -2,6 +2,8 @@ package com.bobot.iptvapp.data.remote.mapper
 
 import com.bobot.iptvapp.data.remote.dto.VodInfoDto
 import com.bobot.iptvapp.data.remote.dto.VodStreamDto
+import com.bobot.iptvapp.data.remote.dto.VodSubtitleDto
+import com.bobot.iptvapp.domain.model.ExternalSubtitle
 import com.bobot.iptvapp.domain.model.Movie
 
 /**
@@ -43,6 +45,9 @@ fun VodStreamDto.toDomain(): Movie = Movie(
  * - Year: parsed from `info.year` as Int; returns null when absent or non-numeric.
  * - Duration: `info.duration_secs` × 1000 → millis.
  * - Added: epoch SECONDS string × 1000 → millis.
+ * - External subtitles: `info.subtitles` entries are kept only when they carry a
+ *   non-blank URL (see [toExternalSubtitles]); absent, empty, or fully malformed
+ *   input yields an empty list, never a crash.
  */
 fun VodInfoDto.toDomain(
     fallbackStreamId: String,
@@ -69,8 +74,26 @@ fun VodInfoDto.toDomain(
         durationMillis = info.durationSecs?.let { it.toLong() * 1_000L },
         containerExtension = (movieData?.containerExtension?.takeIf { it.isNotBlank() }
             ?: info.containerExtension?.takeIf { it.isNotBlank() }),
+        externalSubtitles = info.subtitles.toExternalSubtitles(),
     )
 }
+
+/**
+ * Maps parsed [VodSubtitleDto] entries to domain [ExternalSubtitle]s.
+ *
+ * Best-effort: entries without a usable (non-blank) URL are dropped, since a
+ * subtitle without a URL cannot be played. Blank languages are mapped to `null`.
+ * A `null` or empty receiver (no subtitles field, or nothing usable survived DTO
+ * parsing) yields an empty list — never a crash.
+ */
+private fun List<VodSubtitleDto>?.toExternalSubtitles(): List<ExternalSubtitle> =
+    this.orEmpty().mapNotNull { dto ->
+        val url = dto.url?.trim()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+        ExternalSubtitle(
+            url = url,
+            language = dto.language?.takeIf { it.isNotBlank() },
+        )
+    }
 
 /**
  * Convenience extension to map a list of [VodStreamDto]s.
