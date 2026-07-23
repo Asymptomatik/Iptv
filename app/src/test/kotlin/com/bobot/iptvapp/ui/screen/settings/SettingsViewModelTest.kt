@@ -1,5 +1,6 @@
 package com.bobot.iptvapp.ui.screen.settings
 
+import com.bobot.iptvapp.data.preferences.AppPreferencesStore
 import com.bobot.iptvapp.data.source.CatalogException
 import com.bobot.iptvapp.data.source.InMemoryCredentialsProvider
 import com.bobot.iptvapp.domain.model.ContentType
@@ -14,6 +15,7 @@ import io.mockk.just
 import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -55,6 +57,7 @@ class SettingsViewModelTest {
 
     private lateinit var catalogRepository: CatalogRepository
     private lateinit var credentialsProvider: InMemoryCredentialsProvider
+    private lateinit var appPreferencesStore: AppPreferencesStore
     private lateinit var viewModel: SettingsViewModel
 
     private val existingCredentials = XtreamCredentials(
@@ -68,6 +71,9 @@ class SettingsViewModelTest {
         Dispatchers.setMain(testDispatcher)
         catalogRepository = mockk()
         credentialsProvider = InMemoryCredentialsProvider()
+        appPreferencesStore = mockk()
+        every { appPreferencesStore.observeWifiOnlyDownloads() } returns flowOf(false)
+        coEvery { appPreferencesStore.setWifiOnlyDownloads(any()) } just Runs
     }
 
     @After
@@ -87,6 +93,7 @@ class SettingsViewModelTest {
         viewModel = SettingsViewModel(
             catalogRepository = catalogRepository,
             credentialsProvider = credentialsProvider,
+            appPreferencesStore = appPreferencesStore,
         )
         testDispatcher.scheduler.runCurrent()
     }

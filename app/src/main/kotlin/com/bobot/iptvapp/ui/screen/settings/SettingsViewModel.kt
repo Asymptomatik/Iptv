@@ -2,6 +2,7 @@ package com.bobot.iptvapp.ui.screen.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.bobot.iptvapp.data.preferences.AppPreferencesStore
 import com.bobot.iptvapp.data.source.CatalogException
 import com.bobot.iptvapp.data.source.CredentialsProvider
 import com.bobot.iptvapp.domain.model.ContentType
@@ -12,6 +13,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -42,6 +44,12 @@ import javax.inject.Inject
  *                               [SettingsViewModel.onLogout] finishes clearing the persisted
  *                               credentials; [SettingsScreen] observes this to trigger navigation
  *                               back to the Onboarding route with a fully cleared back stack.
+ * @property isWifiOnlyDownloads Whether downloads are restricted to Wi-Fi networks — mirrors
+ *                               [com.bobot.iptvapp.data.preferences.AppPreferencesStore.observeWifiOnlyDownloads],
+ *                               collected in the [SettingsViewModel] init block and toggled via
+ *                               [SettingsViewModel.onToggleWifiOnlyDownloads]. Defaults to `false`
+ *                               (downloads allowed on any network) to match the preference store's
+ *                               own default before the first emission arrives.
  */
 data class SettingsUiState(
     val serverUrl: String = "",
@@ -52,6 +60,7 @@ data class SettingsUiState(
     val errorMessage: String? = null,
     val infoMessage: String? = null,
     val isLoggedOut: Boolean = false,
+    val isWifiOnlyDownloads: Boolean = false,
 )
 
 /**
@@ -85,14 +94,16 @@ data class SettingsUiState(
  * [CredentialsProvider.setCredentials], leaving the app fully usable with the old (working)
  * configuration while the form stays filled in (untouched) so the user can correct and retry.
  *
- * @param catalogRepository   Used to call the real Xtream `authenticate()` endpoint (Task 8) and
+ * @param catalogRepository    Used to call the real Xtream `authenticate()` endpoint (Task 8) and
  *                             to invalidate catalog caches (Task 8/9).
- * @param credentialsProvider Used to read, persist, and clear credentials (Task 9).
+ * @param credentialsProvider  Used to read, persist, and clear credentials (Task 9).
+ * @param appPreferencesStore  Used to read and persist the Wi-Fi-only downloads preference.
  */
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
     private val catalogRepository: CatalogRepository,
     private val credentialsProvider: CredentialsProvider,
+    private val appPreferencesStore: AppPreferencesStore,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SettingsUiState())
@@ -115,6 +126,12 @@ class SettingsViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(serverUrl = credentials.baseUrl, username = credentials.username)
                 }
+            }
+        }
+
+        viewModelScope.launch {
+            appPreferencesStore.observeWifiOnlyDownloads().collect { enabled ->
+                _uiState.update { it.copy(isWifiOnlyDownloads = enabled) }
             }
         }
     }
@@ -254,6 +271,18 @@ class SettingsViewModel @Inject constructor(
         catalogRepository.invalidateCache(type)
         _uiState.update {
             it.copy(errorMessage = null, infoMessage = confirmationMessage)
+        }
+    }
+
+    /**
+     * Persists the Wi-Fi-only downloads preference via [appPreferencesStore]. The
+     * [SettingsUiState.isWifiOnlyDownloads] field is not updated optimistically here — it is
+     * driven solely by the [appPreferencesStore.observeWifiOnlyDownloads] collector started in
+     * [init], so the toggle always reflects the actually-persisted value.
+     */
+    fun onToggleWifiOnlyDownloads(enabled: Boolean) {
+        viewModelScope.launch {
+            appPreferencesStore.setWifiOnlyDownloads(enabled)
         }
     }
 
