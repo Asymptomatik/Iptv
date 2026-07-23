@@ -40,4 +40,16 @@ interface AppPreferencesStore {
      * (e.g. after the active profile is deleted in Task 10/11).
      */
     suspend fun setActiveProfileId(id: String?)
+
+    /**
+     * Emits the Wi-Fi only downloads setting on collection, then on every change.
+     * When `true`, content downloads should only occur on Wi-Fi networks.
+     * Default value is `false` (downloads allowed on any network).
+     */
+    fun observeWifiOnlyDownloads(): Flow<Boolean>
+
+    /**
+     * Sets the Wi-Fi only downloads preference to [enabled].
+     */
+    suspend fun setWifiOnlyDownloads(enabled: Boolean)
 }
