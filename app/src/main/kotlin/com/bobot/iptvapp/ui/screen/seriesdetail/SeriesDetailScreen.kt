@@ -74,6 +74,7 @@ import com.bobot.iptvapp.ui.theme.TextDimmed
 import com.bobot.iptvapp.ui.theme.TextPrimary
 import com.bobot.iptvapp.ui.theme.TextSecondary
 import com.bobot.iptvapp.ui.util.rememberIsTvDevice
+import com.bobot.iptvapp.ui.util.rememberNotificationPermissionRequester
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
@@ -218,6 +219,7 @@ private fun SeriesDetailBody(
     val isTv = rememberIsTvDevice()
     val horizontalPadding = if (isTv) LayoutDimens.ContentPaddingTv else LayoutDimens.ContentPaddingPhone
     val favoriteFocusRequester = remember { FocusRequester() }
+    val requestNotificationPermission = rememberNotificationPermissionRequester()
 
     // TV BUG FIX: the previous implementation wrapped requestFocus() in a bare, silently-swallowing
     // runCatching { ... } with a single attempt. Now that the layout below is an eager Column
@@ -324,7 +326,10 @@ private fun SeriesDetailBody(
                         download = uiState.episodeDownloads[episode.id],
                         enabled = uiState.hasCredentials,
                         onClick = { onEpisodeClick(episode) },
-                        onDownloadClick = { onDownloadEpisode(episode) },
+                        onDownloadClick = {
+                            requestNotificationPermission()
+                            onDownloadEpisode(episode)
+                        },
                         onPauseDownloadClick = { onPauseEpisodeDownload(episode) },
                         onResumeDownloadClick = { onResumeEpisodeDownload(episode) },
                         modifier = Modifier.padding(horizontal = horizontalPadding, vertical = Spacing.xs),
