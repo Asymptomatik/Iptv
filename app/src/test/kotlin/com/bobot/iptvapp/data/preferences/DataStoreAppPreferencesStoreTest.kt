@@ -153,4 +153,68 @@ class DataStoreAppPreferencesStoreTest {
             cancel()
         }
     }
+
+    // observeWifiOnlyDownloads ───────────────────────────────────────────
+
+    @Test
+    fun `observeWifiOnlyDownloads emits false initially when nothing stored`() = testScope.runTest {
+        store.observeWifiOnlyDownloads().test {
+            assertEquals(false, awaitItem())
+            cancel()
+        }
+    }
+
+    @Test
+    fun `observeWifiOnlyDownloads emits stored value immediately on collection`() = testScope.runTest {
+        store.setWifiOnlyDownloads(true)
+
+        store.observeWifiOnlyDownloads().test {
+            assertEquals(true, awaitItem())
+            cancel()
+        }
+    }
+
+    @Test
+    fun `observeWifiOnlyDownloads emits false then true after set`() = testScope.runTest {
+        store.observeWifiOnlyDownloads().test {
+            assertEquals(false, awaitItem()) // initial
+
+            store.setWifiOnlyDownloads(true)
+            assertEquals(true, awaitItem())
+
+            cancel()
+        }
+    }
+
+    @Test
+    fun `observeWifiOnlyDownloads emits true then false after set`() = testScope.runTest {
+        store.setWifiOnlyDownloads(true)
+
+        store.observeWifiOnlyDownloads().test {
+            assertEquals(true, awaitItem()) // initial — already stored
+
+            store.setWifiOnlyDownloads(false)
+            assertEquals(false, awaitItem())
+
+            cancel()
+        }
+    }
+
+    @Test
+    fun `observeWifiOnlyDownloads reacts to multiple sequential changes`() = testScope.runTest {
+        store.observeWifiOnlyDownloads().test {
+            assertEquals(false, awaitItem()) // initial
+
+            store.setWifiOnlyDownloads(true)
+            assertEquals(true, awaitItem())
+
+            store.setWifiOnlyDownloads(false)
+            assertEquals(false, awaitItem())
+
+            store.setWifiOnlyDownloads(true)
+            assertEquals(true, awaitItem())
+
+            cancel()
+        }
+    }
 }
