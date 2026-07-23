@@ -1,6 +1,7 @@
 package com.bobot.iptvapp
 
 import android.app.Application
+import com.bobot.iptvapp.download.DownloadRequirementsController
 import com.bobot.iptvapp.download.DownloadTracker
 import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
@@ -22,4 +23,5 @@ import javax.inject.Inject
 @HiltAndroidApp
 class IptvApplication : Application() {
     @Inject lateinit var downloadTracker: DownloadTracker
+    @Inject lateinit var downloadRequirementsController: DownloadRequirementsController
 }

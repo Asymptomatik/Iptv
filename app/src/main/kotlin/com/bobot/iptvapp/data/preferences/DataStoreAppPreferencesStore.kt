@@ -2,6 +2,7 @@ package com.bobot.iptvapp.data.preferences
 
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.flow.Flow
@@ -27,6 +28,7 @@ class DataStoreAppPreferencesStore @Inject constructor(
 
     companion object {
         private val KEY_ACTIVE_PROFILE_ID = stringPreferencesKey("pref_active_profile_id")
+        private val KEY_WIFI_ONLY_DOWNLOADS = booleanPreferencesKey("pref_wifi_only_downloads")
     }
 
     override fun observeActiveProfileId(): Flow<String?> =
@@ -42,6 +44,15 @@ class DataStoreAppPreferencesStore @Inject constructor(
             } else {
                 prefs.remove(KEY_ACTIVE_PROFILE_ID)
             }
+        }
+    }
+
+    override fun observeWifiOnlyDownloads(): Flow<Boolean> =
+        dataStore.data.map { prefs -> prefs[KEY_WIFI_ONLY_DOWNLOADS] ?: false }
+
+    override suspend fun setWifiOnlyDownloads(enabled: Boolean) {
+        dataStore.edit { prefs ->
+            prefs[KEY_WIFI_ONLY_DOWNLOADS] = enabled
         }
     }
 }

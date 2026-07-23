@@ -58,6 +58,7 @@ import com.bobot.iptvapp.ui.theme.TextDimmed
 import com.bobot.iptvapp.ui.theme.TextPrimary
 import com.bobot.iptvapp.ui.theme.TextSecondary
 import com.bobot.iptvapp.ui.util.rememberIsTvDevice
+import com.bobot.iptvapp.ui.util.rememberNotificationPermissionRequester
 
 /**
  * Movie detail screen reskinned to "Cinematic Glass" V2.
@@ -186,6 +187,7 @@ private fun MovieDetailBody(
     val isTv = rememberIsTvDevice()
     val horizontalPadding = if (isTv) LayoutDimens.ContentPaddingTv else LayoutDimens.ContentPaddingPhone
     val playFocusRequester = remember { FocusRequester() }
+    val requestNotificationPermission = rememberNotificationPermissionRequester()
 
     LaunchedEffect(movie.id) {
         runCatching { playFocusRequester.requestFocus() }
@@ -264,7 +266,10 @@ private fun MovieDetailBody(
                     DownloadState.FAILED,
                     null -> GhostButton(
                         label = "Télécharger",
-                        onClick = onDownloadClick,
+                        onClick = {
+                            requestNotificationPermission()
+                            onDownloadClick()
+                        },
                         enabled = uiState.streamUrl != null,
                     )
                 }

@@ -1,16 +1,21 @@
 package com.bobot.iptvapp.ui.screen.settings
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -19,14 +24,21 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -40,6 +52,7 @@ import com.bobot.iptvapp.ui.components.FocusableTextButton
 import com.bobot.iptvapp.ui.components.GhostButton
 import com.bobot.iptvapp.ui.components.GlassSurface
 import com.bobot.iptvapp.ui.components.PrimaryButton
+import com.bobot.iptvapp.ui.components.focusRingBehind
 import com.bobot.iptvapp.ui.components.glassSurface
 import com.bobot.iptvapp.ui.theme.AccentSolid
 import com.bobot.iptvapp.ui.theme.BackgroundBase
@@ -90,6 +103,7 @@ fun SettingsScreen(
         onReloadSeries = viewModel::onReloadSeries,
         onReloadChannels = viewModel::onReloadChannels,
         onLogout = viewModel::onLogout,
+        onToggleWifiOnlyDownloads = viewModel::onToggleWifiOnlyDownloads,
         onNavigateToProfiles = onNavigateToProfiles,
         modifier = modifier,
     )
@@ -111,6 +125,7 @@ private fun SettingsContent(
     onReloadSeries: () -> Unit,
     onReloadChannels: () -> Unit,
     onLogout: () -> Unit,
+    onToggleWifiOnlyDownloads: (Boolean) -> Unit,
     onNavigateToProfiles: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -339,7 +354,113 @@ private fun SettingsContent(
             }
 
             Spacer(modifier = Modifier.height(Spacing.xl))
+
+            HorizontalDivider(color = GlassBorder)
+
+            Spacer(modifier = Modifier.height(Spacing.lg))
+
+            // ── Glass section: downloads ────────────────────────────────────────
+            GlassSurface(
+                modifier = Modifier.fillMaxWidth(),
+                strong = false,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(Spacing.md),
+                ) {
+                    Text(
+                        text = "Téléchargements",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = TextPrimary,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    Spacer(modifier = Modifier.height(Spacing.md))
+
+                    WifiOnlyDownloadsRow(
+                        checked = uiState.isWifiOnlyDownloads,
+                        onCheckedChange = onToggleWifiOnlyDownloads,
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(Spacing.xl))
         }
+    }
+}
+
+/**
+ * Row for the "Wi-Fi uniquement" downloads toggle inside the "Téléchargements" glass
+ * section.
+ *
+ * The whole row (label + description + [Switch]) is wrapped in a single [Modifier.toggleable]
+ * with `role = Role.Switch` and carries the shared [focusRingBehind] gradient ring so the
+ * row — not just the small [Switch] hit target — responds to D-pad focus, consistent with
+ * [FocusableTextButton] and the other focusable controls on this screen. The [Switch] itself
+ * is purely decorative (`onCheckedChange = null`, no focus node of its own); the row's
+ * `toggleable` modifier owns both the click/Enter handling and the D-pad focus.
+ */
+@Composable
+private fun WifiOnlyDownloadsRow(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var isFocused by remember { mutableStateOf(false) }
+
+    val focusRingAlpha by animateFloatAsState(
+        targetValue = if (isFocused) 1f else 0f,
+        animationSpec = tween(durationMillis = 180),
+        label = "wifiOnlyToggleFocusRing",
+    )
+
+    val rowShape = RoundedCornerShape(RadiusMd)
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .fillMaxWidth()
+            .focusRingBehind(
+                focusRingAlpha = focusRingAlpha,
+                cornerRadiusDp = RadiusMd,
+            )
+            .glassSurface(shape = rowShape, strong = isFocused)
+            .onFocusChanged { state -> isFocused = state.isFocused }
+            .toggleable(
+                value = checked,
+                role = Role.Switch,
+                onValueChange = onCheckedChange,
+            )
+            .padding(Spacing.md),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "Wi-Fi uniquement",
+                style = MaterialTheme.typography.bodyLarge,
+                color = TextPrimary,
+            )
+            Text(
+                text = "Limiter les téléchargements de contenu au réseau Wi-Fi.",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary,
+            )
+        }
+
+        Spacer(modifier = Modifier.width(Spacing.md))
+
+        Switch(
+            checked = checked,
+            onCheckedChange = null,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = TextPrimary,
+                checkedTrackColor = AccentSolid,
+                checkedBorderColor = Color.Transparent,
+                uncheckedThumbColor = TextSecondary,
+                uncheckedTrackColor = DisabledSurface,
+                uncheckedBorderColor = Color.Transparent,
+            ),
+        )
     }
 }
 
@@ -386,6 +507,7 @@ private fun SettingsContentPreFilledPreview() {
             onReloadSeries = {},
             onReloadChannels = {},
             onLogout = {},
+            onToggleWifiOnlyDownloads = {},
             onNavigateToProfiles = {},
         )
     }
@@ -411,6 +533,7 @@ private fun SettingsContentErrorPreview() {
             onReloadSeries = {},
             onReloadChannels = {},
             onLogout = {},
+            onToggleWifiOnlyDownloads = {},
             onNavigateToProfiles = {},
         )
     }
@@ -435,6 +558,7 @@ private fun SettingsContentInfoPreview() {
             onReloadSeries = {},
             onReloadChannels = {},
             onLogout = {},
+            onToggleWifiOnlyDownloads = {},
             onNavigateToProfiles = {},
         )
     }
