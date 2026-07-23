@@ -17,6 +17,7 @@ import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.repository.FavoritesRepository
 import com.bobot.iptvapp.domain.repository.PlaybackProgressRepository
 import com.bobot.iptvapp.domain.usecase.FilterCatalogByLanguageUseCase
+import com.bobot.iptvapp.domain.usecase.LoadCategoryScopedCatalogUseCase
 import com.bobot.iptvapp.domain.util.displayName
 import com.bobot.iptvapp.domain.util.languageTag
 import com.bobot.iptvapp.domain.util.Resource
@@ -206,8 +207,8 @@ data class HomeUiState(
  *    default to `Resource.Success(emptyList())` — not `Resource.Loading` — so an unrequested
  *    catalog tab reads as "nothing to show yet" rather than "stuck loading forever" in
  *    [HomeUiState.isLoading] (see that property's KDoc).
- *  - Within one requested content type, [loadCategoryScopedItems] is unchanged from the previous
- *    fix: categories are fetched first (cheap, small), then items are fetched **one category at a
+ *  - Within one requested content type, [loadCategoryScopedCatalogUseCase] is unchanged from the
+ *    previous fix: categories are fetched first (cheap, small), then items are fetched **one category at a
  *    time** (a plain suspend `for` loop, never `async`/`combine`), so at most one category's
  *    raw+parsed payload is held in memory at once *for that content type*. Because loading is now
  *    triggered by distinct user actions (opening a tab) rather than one single automatic startup
@@ -223,7 +224,7 @@ data class HomeUiState(
  *
  * ## Grouping categories with content, per content type
  * [buildRowsFlow] combines a categories Flow with an items Flow (the progressively-growing
- * [MutableStateFlow] populated by [loadCategoryScopedItems] once its content type is requested)
+ * [MutableStateFlow] populated by [loadCategoryScopedCatalogUseCase] once its content type is requested)
  * and groups the items by [Channel.categoryId] / [Movie.categoryId] / [Series.categoryId] in
  * memory. Categories with no matching items (yet, or ever) are dropped (see [toRows]) so the UI
  * never renders an empty row. [loadCatalogTab] forwards every emission of this combined Flow into
@@ -334,7 +335,7 @@ data class HomeUiState(
  *    filtre précis est actif").
  *  - Purely in-memory post-processing: changing a tab's selection only makes [buildRowsFlow]'s
  *    `combine` re-run (in-process filtering) — it never touches [requestedContentTypes],
- *    [loadCatalogTab], or [loadCategoryScopedItems], so no new network fetch is ever triggered by
+ *    [loadCatalogTab], or [loadCategoryScopedCatalogUseCase], so no new network fetch is ever triggered by
  *    [onLanguageSelected].
  *  - Three dedicated `init`-time collectors forward [liveLanguageFilterState] /
  *    [movieLanguageFilterState] / [seriesLanguageFilterState] into [HomeUiState] via
@@ -356,6 +357,9 @@ data class HomeUiState(
  * @param filterCatalogByLanguageUseCase Shared domain logic for deriving available language tags
  *                            and filtering categories by language — see class KDoc "Per-tab
  *                            language filter".
+ * @param loadCategoryScopedCatalogUseCase Shared domain logic (Task 1/2) that fetches one content
+ *                            type's items one category at a time — see class KDoc "On-demand
+ *                            catalog loading" and [loadCatalogTab].
  */
 @HiltViewModel
 class HomeViewModel @Inject constructor(
@@ -365,6 +369,7 @@ class HomeViewModel @Inject constructor(
     private val appPreferencesStore: AppPreferencesStore,
     private val credentialsProvider: CredentialsProvider,
     private val filterCatalogByLanguageUseCase: FilterCatalogByLanguageUseCase,
+    private val loadCategoryScopedCatalogUseCase: LoadCategoryScopedCatalogUseCase,
 ) : ViewModel() {
 
     private companion object {
@@ -481,7 +486,7 @@ class HomeViewModel @Inject constructor(
      *
      * Pure in-memory post-processing: this only updates a plain [MutableStateFlow] consumed by
      * [buildRowsFlow]'s `combine`, which re-filters already-loaded rows in place. It never touches
-     * [requestedContentTypes], [loadCatalogTab], or [loadCategoryScopedItems] — selecting a language
+     * [requestedContentTypes], [loadCatalogTab], or [loadCategoryScopedCatalogUseCase] — selecting a language
      * never triggers a new network fetch.
      */
     fun onLanguageSelected(contentType: ContentType, language: String?) {
@@ -575,8 +580,10 @@ class HomeViewModel @Inject constructor(
      * Loads one catalog tab's content type: resets [itemsState]/[rowsState] to [Resource.Loading],
      * launches a child coroutine forwarding [buildRowsFlow]'s grouped rows into [rowsState] for the
      * rest of this ViewModel's lifetime (or until [startCatalogTabLoad] cancels the enclosing job on
-     * retry), then runs [loadCategoryScopedItems] to actually fetch the categories/items — see class
-     * KDoc "On-demand catalog loading" and "Grouping categories with content, per content type".
+     * retry), then runs [loadCategoryScopedCatalogUseCase] to actually fetch the categories/items —
+     * see class KDoc "On-demand catalog loading" and "Grouping categories with content, per content
+     * type". [LoadCategoryScopedCatalogUseCase.onCategoriesResolved] is left at its default no-op —
+     * Home does not need the resolved category list up front (unlike Search).
      */
     private suspend fun <T> CoroutineScope.loadCatalogTab(
         contentType: ContentType,
@@ -594,51 +601,7 @@ class HomeViewModel @Inject constructor(
             buildRowsFlow(contentType, categoriesFlow, itemsState, languageFilterState, categoryIdOf, toCard)
                 .collect { rowsState.value = it }
         }
-        loadCategoryScopedItems(categoriesFlow, itemsState, fetchCategoryItems)
-    }
-
-    /**
-     * Fetches one content type's items **one category at a time** instead of a single unfiltered
-     * `categoryId = null` call — see class KDoc "On-demand catalog loading" for the
-     * memory-bounding rationale.
-     *
-     * Awaits [categoriesFlow]'s terminal (non-[Resource.Loading]) value first. When that is a
-     * [Resource.Error], it is forwarded to [itemsState] as-is and no per-category fetch is
-     * attempted (categories are cheap/small, so a failure there is a real, worth-surfacing
-     * problem). Otherwise, [itemsState] is immediately set to `Resource.Success(emptyList())` —
-     * correctly resolving the zero-categories edge case without a per-category loop — and then
-     * each category's items are fetched in turn via [fetchCategoryItems] (a plain suspend `for`
-     * loop, never `async`/`combine`), merging into a running accumulator and re-publishing the
-     * accumulated list to [itemsState] after every category so [buildRowsFlow] can render newly
-     * available rows immediately.
-     *
-     * A single category's [fetchCategoryItems] call returning [Resource.Error] is treated as "no
-     * items for that category" (silently skipped, loop continues) rather than aborting the whole
-     * content type — a single flaky category endpoint must not blank out rows already
-     * successfully built from other categories.
-     */
-    private suspend fun <T> loadCategoryScopedItems(
-        categoriesFlow: Flow<Resource<List<Category>>>,
-        itemsState: MutableStateFlow<Resource<List<T>>>,
-        fetchCategoryItems: suspend (categoryId: String) -> Resource<List<T>>,
-    ) {
-        when (val categoriesResource = categoriesFlow.first { it !is Resource.Loading }) {
-            is Resource.Error -> {
-                itemsState.value = Resource.Error(categoriesResource.throwable, categoriesResource.message)
-            }
-            is Resource.Success -> {
-                val accumulated = mutableListOf<T>()
-                itemsState.value = Resource.Success(accumulated.toList())
-                for (category in categoriesResource.data) {
-                    val itemsResource = fetchCategoryItems(category.id)
-                    if (itemsResource is Resource.Success) {
-                        accumulated += itemsResource.data
-                    }
-                    itemsState.value = Resource.Success(accumulated.toList())
-                }
-            }
-            Resource.Loading -> Unit // Unreachable: the `first` predicate above excludes Loading.
-        }
+        loadCategoryScopedCatalogUseCase(categoriesFlow, itemsState, fetchCategoryItems = fetchCategoryItems)
     }
 
     /**
@@ -681,7 +644,7 @@ class HomeViewModel @Inject constructor(
      * Resolves a MOVIE-type entry by [movieId] — used by both [buildContinueWatchingFlow] and
      * [buildMyListFlow] for their MOVIE branch (OOM fix follow-up / on-demand loading).
      *
-     * Looks up [movieMap] first (the movies loaded so far by [loadCategoryScopedItems], if the
+     * Looks up [movieMap] first (the movies loaded so far by [loadCategoryScopedCatalogUseCase], if the
      * Films tab has been opened this session); if not found there (its category has not, or not
      * yet, been loaded — or the Films tab was never opened at all — or it was otherwise excluded),
      * falls back to a one-shot [CatalogRepository.getMovieDetail] network call
@@ -700,7 +663,7 @@ class HomeViewModel @Inject constructor(
     /**
      * Resolves a SERIES-type entry by [seriesId] — used by [buildMyListFlow] for its SERIES branch.
      * Series-side equivalent of [resolveMovieOrFallback]: looks up [seriesMap] first (the series
-     * loaded so far by [loadCategoryScopedItems], if the Series tab has been opened this session);
+     * loaded so far by [loadCategoryScopedCatalogUseCase], if the Series tab has been opened this session);
      * if not found there, falls back to a one-shot [CatalogRepository.getSeriesDetail] network call
      * (`get_series_info` — a genuine single-item Xtream endpoint, keyed by series id) instead of
      * silently skipping it.
