@@ -7,6 +7,7 @@ import com.bobot.iptvapp.domain.model.Movie
 import com.bobot.iptvapp.domain.model.Series
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.usecase.FilterCatalogByLanguageUseCase
+import com.bobot.iptvapp.domain.usecase.LoadCategoryScopedCatalogUseCase
 import com.bobot.iptvapp.domain.util.Resource
 import io.mockk.Runs
 import io.mockk.every
@@ -142,7 +143,7 @@ class SearchViewModelTest {
 
     /** Creates [viewModel] and drains its `init` block's reactive collector. */
     private fun createViewModel() {
-        viewModel = SearchViewModel(catalogRepository, FilterCatalogByLanguageUseCase())
+        viewModel = SearchViewModel(catalogRepository, FilterCatalogByLanguageUseCase(), LoadCategoryScopedCatalogUseCase())
         testDispatcher.scheduler.runCurrent()
     }
 
@@ -720,9 +721,9 @@ class SearchViewModelTest {
     @Test
     fun `available languages is the union of distinct tags across all three content types, as each type's categories resolve in sequence`() {
         // Categories are resolved once per content type (a single small list, unlike the
-        // progressively-accumulating item lists) — see loadCategoryScopedItems KDoc. Since content
-        // types load strictly sequentially (Live, then Movies, then Series), the union grows one
-        // content type at a time as each one's categoriesFlow resolves.
+        // progressively-accumulating item lists) — see LoadCategoryScopedCatalogUseCase KDoc. Since
+        // content types load strictly sequentially (Live, then Movies, then Series), the union grows
+        // one content type at a time as each one's categoriesFlow resolves.
         stubLiveChannels("30", listOf(frChannel))
         stubLiveChannels("31", emptyList())
         stubLiveChannels("32", emptyList())

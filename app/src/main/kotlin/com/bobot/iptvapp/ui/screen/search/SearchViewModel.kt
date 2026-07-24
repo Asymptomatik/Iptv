@@ -9,6 +9,7 @@ import com.bobot.iptvapp.domain.model.Movie
 import com.bobot.iptvapp.domain.model.Series
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.usecase.FilterCatalogByLanguageUseCase
+import com.bobot.iptvapp.domain.usecase.LoadCategoryScopedCatalogUseCase
 import com.bobot.iptvapp.domain.util.Resource
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.FlowPreview
@@ -151,19 +152,24 @@ private data class SearchFilterContext(
  *
  * [buildSearchResultsFlow] applies the exact same fix as [com.bobot.iptvapp.ui.screen.home.HomeViewModel]:
  * "fetch categories first (cheap, small), then fetch items **one category at a time** from the
- * server" via [loadCategoryScopedItems] (an intentional near-duplicate of
- * [com.bobot.iptvapp.ui.screen.home.HomeViewModel]'s private helper of the same name and shape —
- * this codebase does not share ViewModel-internal helpers across screen packages, see
- * [SearchResultItem] KDoc "Deliberately not HomeCardItem" for the same per-screen-ownership
- * convention applied to types):
+ * server" via the shared [loadCategoryScopedCatalogUseCase] (Task 3 — extracted from what used to be
+ * this ViewModel's own private `loadCategoryScopedItems` helper, near-identical to
+ * [com.bobot.iptvapp.ui.screen.home.HomeViewModel]'s own private helper of the same name/shape; see
+ * [LoadCategoryScopedCatalogUseCase] KDoc for the extraction rationale). This codebase's "no sharing
+ * of UI helpers/cards/layout between screens" convention (see [SearchResultItem] KDoc "Deliberately
+ * not HomeCardItem" — still valid and unaffected, and still documented there for card types,
+ * rows/grouping, and loading/error reduction) does not apply here: [loadCategoryScopedCatalogUseCase]
+ * is a pure, framework-free data-loading algorithm with zero UI coupling, so sharing it does not
+ * reintroduce the coupling that convention guards against (see [LoadCategoryScopedCatalogUseCase]
+ * KDoc "'No sharing of UI helpers/cards/layout between screens' still applies — to the UI"):
  *  - Live channels, movies, and series are loaded **strictly sequentially, one content type after
  *    another** (Movies' per-category loop does not start until every Live category has been
  *    fetched; Series waits for Movies) — see the single `launch { ... }` block inside
- *    [buildSearchResultsFlow] where the three [loadCategoryScopedItems] calls are awaited in
+ *    [buildSearchResultsFlow] where the three [loadCategoryScopedCatalogUseCase] calls are awaited in
  *    order, never combined/started concurrently.
  *  - Within one content type, categories are fetched **one at a time** (a plain `for` loop over
- *    suspend calls inside [loadCategoryScopedItems] — no `async`/`combine` fan-out), so at most one
- *    category's raw+parsed payload is ever held in memory at once, across all three content types
+ *    suspend calls inside [loadCategoryScopedCatalogUseCase] — no `async`/`combine` fan-out), so at
+ *    most one category's raw+parsed payload is ever held in memory at once, across all three content types
  *    combined.
  *  - Each content type's accumulated items are published progressively to a private
  *    [MutableStateFlow] (`channelsState` / `moviesState` / `seriesState`) after every category, so
@@ -325,11 +331,11 @@ private data class SearchFilterContext(
  * that content type's currently-known categories list.
  *
  * ### No second subscription to the cold category Flows
- * [loadCategoryScopedItems] is already the **only** place each `categoriesFlow` (`liveCategoriesFlow`
+ * [loadCategoryScopedCatalogUseCase] is already the **only** place each `categoriesFlow` (`liveCategoriesFlow`
  * / `vodCategoriesFlow` / `seriesCategoriesFlow`) is ever collected, via its single `categoriesFlow
  * .first { ... }` call — those Flows are cold and redo I/O on every new collector (see class KDoc
  * "Category-scoped, on-demand loading (OOM fix)"). Rather than adding a second `.first`/`.collect`
- * on any of them to learn each type's resolved categories list, [loadCategoryScopedItems] takes an
+ * on any of them to learn each type's resolved categories list, [loadCategoryScopedCatalogUseCase] takes an
  * optional `onCategoriesResolved` callback, invoked exactly once per call, right where the existing
  * `Resource.Success` branch already has `categoriesResource.data` in hand — zero-cost, zero-extra-
  * subscription. [buildSearchResultsFlow] passes callbacks that publish into
@@ -359,7 +365,7 @@ private data class SearchFilterContext(
  * ### No new network fetch
  * [onLanguageSelected] only writes to [selectedLanguageState], a plain in-memory
  * [MutableStateFlow] purely re-filtering already-accumulated state through [combine] (once a load
- * has started — see class KDoc "Lazy loading") — it never touches [loadCategoryScopedItems] or
+ * has started — see class KDoc "Lazy loading") — it never touches [loadCategoryScopedCatalogUseCase] or
  * [buildSearchResultsFlow] itself, so selecting a language never triggers a new network fetch,
  * mirroring [com.bobot.iptvapp.ui.screen.home.HomeViewModel.onLanguageSelected].
  *
@@ -367,11 +373,15 @@ private data class SearchFilterContext(
  * @param filterCatalogByLanguageUseCase Shared domain logic for deriving available language tags
  *                            and matching a category against a selection — see class KDoc "Global
  *                            language filter".
+ * @param loadCategoryScopedCatalogUseCase Shared domain logic (Task 3) that fetches one content
+ *                            type's items one category at a time — see class KDoc "Category-scoped,
+ *                            on-demand loading (OOM fix)".
  */
 @HiltViewModel
 class SearchViewModel @Inject constructor(
     private val catalogRepository: CatalogRepository,
     private val filterCatalogByLanguageUseCase: FilterCatalogByLanguageUseCase,
+    private val loadCategoryScopedCatalogUseCase: LoadCategoryScopedCatalogUseCase,
 ) : ViewModel() {
 
     private companion object {
@@ -448,7 +458,7 @@ class SearchViewModel @Inject constructor(
      *
      * Pure in-memory post-processing: only updates [selectedLanguageState], consumed by
      * [buildSearchResultsFlow]'s `combine`, which re-filters already-loaded results in place. It
-     * never touches [loadCategoryScopedItems] or [buildSearchResultsFlow] itself, so selecting a
+     * never touches [loadCategoryScopedCatalogUseCase] or [buildSearchResultsFlow] itself, so selecting a
      * language never triggers a new network fetch.
      */
     fun onLanguageSelected(language: String?) {
@@ -525,10 +535,10 @@ class SearchViewModel @Inject constructor(
      *    created exactly once per call and combined with [debouncedQuery] (not raw [_query] — see
      *    class KDoc "Debounce") to produce [reduceUiState]'s input.
      *  - The returned [Flow] is a [channelFlow] that launches a single child coroutine which
-     *    sequentially awaits [loadCategoryScopedItems] for Live, then Movies, then Series — a
+     *    sequentially awaits [loadCategoryScopedCatalogUseCase] for Live, then Movies, then Series — a
      *    plain sequential `launch { ... }` body (no `async`, no `combine` of the three loaders),
      *    which is what actually guarantees at most one content type's per-category fetch loop is
-     *    ever running at a time, on top of [loadCategoryScopedItems] itself guaranteeing at most
+     *    ever running at a time, on top of [loadCategoryScopedCatalogUseCase] itself guaranteeing at most
      *    one category's fetch is in flight within that content type. Concurrently, the
      *    `channelFlow` body also collects and forwards the query/results `combine()` so the UI
      *    keeps receiving progressively refined results as the sequential loader advances.
@@ -546,7 +556,7 @@ class SearchViewModel @Inject constructor(
         val seriesState = MutableStateFlow<Resource<List<Series>>>(Resource.Loading)
 
         // Each content type's currently-known categories list, published from the single point
-        // loadCategoryScopedItems already resolves categoriesFlow.first { ... } — never a second
+        // loadCategoryScopedCatalogUseCase already resolves categoriesFlow.first { ... } — never a second
         // subscription to the cold liveCategoriesFlow/vodCategoriesFlow/seriesCategoriesFlow — see
         // class KDoc "No second subscription to the cold category Flows".
         val liveCategoriesState = MutableStateFlow<List<Category>>(emptyList())
@@ -585,21 +595,21 @@ class SearchViewModel @Inject constructor(
                 // Strictly sequential across content types — Movies' per-category loop is not
                 // started until Live's has fully finished, and Series waits for Movies — see
                 // class KDoc "Category-scoped, on-demand loading (OOM fix)".
-                loadCategoryScopedItems(
+                loadCategoryScopedCatalogUseCase(
                     liveCategoriesFlow,
                     channelsState,
                     onCategoriesResolved = { categories -> liveCategoriesState.value = categories },
                 ) { categoryId ->
                     catalogRepository.getLiveChannels(categoryId).first { it !is Resource.Loading }
                 }
-                loadCategoryScopedItems(
+                loadCategoryScopedCatalogUseCase(
                     vodCategoriesFlow,
                     moviesState,
                     onCategoriesResolved = { categories -> vodCategoriesState.value = categories },
                 ) { categoryId ->
                     catalogRepository.getMovies(categoryId).first { it !is Resource.Loading }
                 }
-                loadCategoryScopedItems(
+                loadCategoryScopedCatalogUseCase(
                     seriesCategoriesFlow,
                     seriesState,
                     onCategoriesResolved = { categories -> seriesCategoriesState.value = categories },
@@ -608,58 +618,6 @@ class SearchViewModel @Inject constructor(
                 }
             }
             resultsFlow.collect { send(it) }
-        }
-    }
-
-    /**
-     * Fetches one content type's items **one category at a time** instead of a single unfiltered
-     * `categoryId = null` call — see class KDoc "Category-scoped, on-demand loading (OOM fix)"
-     * for the memory-bounding rationale. Near-identical to
-     * [com.bobot.iptvapp.ui.screen.home.HomeViewModel]'s private helper of the same name/shape.
-     *
-     * Awaits [categoriesFlow]'s terminal (non-[Resource.Loading]) value first. When that is a
-     * [Resource.Error], it is forwarded to [itemsState] as-is and no per-category fetch is
-     * attempted (categories are cheap/small, so a failure there is a real, worth-surfacing
-     * problem). Otherwise, [itemsState] is immediately set to `Resource.Success(emptyList())` —
-     * correctly resolving the zero-categories edge case without a per-category loop — and then
-     * each category's items are fetched in turn via [fetchCategoryItems] (a plain suspend `for`
-     * loop, never `async`/`combine`), merging into a running accumulator and re-publishing the
-     * accumulated list to [itemsState] after every category so search results keep refining
-     * progressively (see class KDoc "Does Search need the entire catalog...").
-     *
-     * A single category's [fetchCategoryItems] call returning [Resource.Error] is treated as "no
-     * items for that category" (silently skipped, loop continues) rather than aborting the whole
-     * content type — a single flaky category endpoint must not blank out matches already found in
-     * other categories.
-     *
-     * @param onCategoriesResolved Invoked exactly once, only on the [Resource.Success] branch,
-     *   with [Resource.Success.data] — lets callers capture the resolved categories list (e.g. into
-     *   a [MutableStateFlow] for the global language filter, see class KDoc "Global language
-     *   filter") without ever adding a second subscription to [categoriesFlow] itself.
-     */
-    private suspend fun <T> loadCategoryScopedItems(
-        categoriesFlow: Flow<Resource<List<Category>>>,
-        itemsState: MutableStateFlow<Resource<List<T>>>,
-        onCategoriesResolved: (categories: List<Category>) -> Unit = {},
-        fetchCategoryItems: suspend (categoryId: String) -> Resource<List<T>>,
-    ) {
-        when (val categoriesResource = categoriesFlow.first { it !is Resource.Loading }) {
-            is Resource.Error -> {
-                itemsState.value = Resource.Error(categoriesResource.throwable, categoriesResource.message)
-            }
-            is Resource.Success -> {
-                onCategoriesResolved(categoriesResource.data)
-                val accumulated = mutableListOf<T>()
-                itemsState.value = Resource.Success(accumulated.toList())
-                for (category in categoriesResource.data) {
-                    val itemsResource = fetchCategoryItems(category.id)
-                    if (itemsResource is Resource.Success) {
-                        accumulated += itemsResource.data
-                    }
-                    itemsState.value = Resource.Success(accumulated.toList())
-                }
-            }
-            Resource.Loading -> Unit // Unreachable: the `first` predicate above excludes Loading.
         }
     }
 
