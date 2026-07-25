@@ -27,7 +27,17 @@ package com.bobot.iptvapp.domain.model
  *                     Empty by default — the natural initial state before any catalog data has
  *                     loaded.
  * @property selected  The currently applied language tag, or `null` for "Toutes" (no filter).
- *                     `null` by default, matching `HomeViewModel`'s pre-existing per-tab default.
+ *                     `null` by default at construction time; [com.bobot.iptvapp.ui.screen.home.HomeViewModel]
+ *                     then applies its own one-shot, per-tab default sourced from
+ *                     [com.bobot.iptvapp.data.preferences.AppPreferencesStore.getDefaultLanguageFilter]
+ *                     the first time that tab is loaded (never re-applied afterwards, including
+ *                     across a retry), and resets back to `null` at most once per tab if that
+ *                     default (or any non-null selection) turns out to match no loaded category —
+ *                     see `HomeViewModel`'s KDoc "Default language filter and its one-shot
+ *                     fallback" for the full one-shot-default / fallback / explicit-choice-wins
+ *                     rules. An explicit user choice (via `HomeViewModel.onLanguageSelected`,
+ *                     including re-selecting `null` explicitly) always takes precedence over both
+ *                     the default and the fallback.
  */
 data class LanguageFilterState(
     val available: List<String> = emptyList(),

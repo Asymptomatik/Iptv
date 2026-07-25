@@ -29,6 +29,18 @@ class DataStoreAppPreferencesStore @Inject constructor(
     companion object {
         private val KEY_ACTIVE_PROFILE_ID = stringPreferencesKey("pref_active_profile_id")
         private val KEY_WIFI_ONLY_DOWNLOADS = booleanPreferencesKey("pref_wifi_only_downloads")
+        private val KEY_DEFAULT_LANGUAGE_FILTER = stringPreferencesKey("pref_default_language_filter")
+
+        /**
+         * Maps the raw stored value (or `null` if the key is absent) to the public semantics of
+         * [observeDefaultLanguageFilter] / [getDefaultLanguageFilter]: absent -> "FR", empty -> null.
+         */
+        private fun mapDefaultLanguageFilter(raw: String?): String? =
+            when (raw) {
+                null -> "FR"
+                "" -> null
+                else -> raw
+            }
     }
 
     override fun observeActiveProfileId(): Flow<String?> =
@@ -53,6 +65,18 @@ class DataStoreAppPreferencesStore @Inject constructor(
     override suspend fun setWifiOnlyDownloads(enabled: Boolean) {
         dataStore.edit { prefs ->
             prefs[KEY_WIFI_ONLY_DOWNLOADS] = enabled
+        }
+    }
+
+    override fun observeDefaultLanguageFilter(): Flow<String?> =
+        dataStore.data.map { prefs -> mapDefaultLanguageFilter(prefs[KEY_DEFAULT_LANGUAGE_FILTER]) }
+
+    override suspend fun getDefaultLanguageFilter(): String? =
+        dataStore.data.map { prefs -> mapDefaultLanguageFilter(prefs[KEY_DEFAULT_LANGUAGE_FILTER]) }.first()
+
+    override suspend fun setDefaultLanguageFilter(tag: String?) {
+        dataStore.edit { prefs ->
+            prefs[KEY_DEFAULT_LANGUAGE_FILTER] = tag?.trim()?.uppercase() ?: ""
         }
     }
 }

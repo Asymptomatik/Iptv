@@ -39,6 +39,33 @@ object CategoryLanguage {
     private val NESTED_LANGUAGE_TAG_PATTERN = Regex("^([A-Za-z]{2,10})\\s*[|:-]\\s*([A-Za-z]{2,3})\\s*[|:-]\\s*(.+)$")
 
     /**
+     * Matches a leading token followed by one or more plain whitespace characters and a
+     * non-empty rest, e.g. `"FR Sport"`. Tried only as a last-resort fallback, after both
+     * delimited patterns above have failed to match.
+     *
+     * Unlike `|`, `:` or `-`, a plain space is an entirely ordinary word separator, so this
+     * regex shape alone cannot distinguish a real language prefix (`"FR Sport"`) from any other
+     * two-word category name (`"HD Movies"`, `"TV Shows"`). It is therefore deliberately
+     * unconstrained on the first token's length or content beyond "one or more non-space
+     * characters" — [SPACE_PREFIX_WHITELIST] is what does the actual false-positive filtering:
+     * the matched first token is only accepted as a language tag when it exactly equals one of
+     * the known language/region codes in that closed list.
+     */
+    private val SPACE_LANGUAGE_TAG_PATTERN = Regex("^(\\S+)\\s+(.+)$")
+
+    /**
+     * Closed set of language/region codes recognised by [SPACE_LANGUAGE_TAG_PATTERN]. Compared
+     * case-insensitively against the matched first token (uppercased). Any first token not in
+     * this list is rejected, regardless of its length or shape, which is what prevents ordinary
+     * two-word category names such as `"HD Movies"` or `"TV Shows"` from being misread as
+     * carrying a language prefix.
+     */
+    private val SPACE_PREFIX_WHITELIST = setOf(
+        "FR", "FRA", "EN", "ENG", "AR", "ES", "DE", "IT", "PT", "NL", "TR", "RU", "PL",
+        "VF", "VO", "VOSTFR", "SP", "UK", "US", "BR", "CA", "BE", "CH",
+    )
+
+    /**
      * Extracts the language tag from [name], or `null` when no recognised pattern is found.
      *
      * The match is case-insensitive on the input, but the returned tag is always normalized
@@ -54,6 +81,11 @@ object CategoryLanguage {
 
         DIRECT_LANGUAGE_TAG_PATTERN.matchEntire(trimmed)?.let { match ->
             return match.groupValues[1].uppercase()
+        }
+
+        SPACE_LANGUAGE_TAG_PATTERN.matchEntire(trimmed)?.let { match ->
+            val candidate = match.groupValues[1].uppercase()
+            if (candidate in SPACE_PREFIX_WHITELIST) return candidate
         }
 
         return null
@@ -77,6 +109,11 @@ object CategoryLanguage {
 
         DIRECT_LANGUAGE_TAG_PATTERN.matchEntire(trimmed)?.let { match ->
             return match.groupValues[2].trim()
+        }
+
+        SPACE_LANGUAGE_TAG_PATTERN.matchEntire(trimmed)?.let { match ->
+            val candidate = match.groupValues[1].uppercase()
+            if (candidate in SPACE_PREFIX_WHITELIST) return match.groupValues[2].trim()
         }
 
         return trimmed

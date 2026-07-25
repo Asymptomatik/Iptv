@@ -22,6 +22,8 @@ import com.bobot.iptvapp.domain.util.displayName
 import com.bobot.iptvapp.domain.util.languageTag
 import com.bobot.iptvapp.domain.util.Resource
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
@@ -348,6 +350,36 @@ data class HomeUiState(
  *    left untouched by this internal refactor (see that class's KDoc), since
  *    [com.bobot.iptvapp.ui.screen.home.HomeScreen] consumes it directly.
  *
+ * ## Default language filter and its one-shot fallback
+ * [AppPreferencesStore.getDefaultLanguageFilter] provides a *one-shot* default selection (`"FR"`
+ * unless configured otherwise, or `null` for "Toutes") — not a live-updating preference, so it is
+ * read exactly once in [init] and memoized in [defaultLanguageFilter], a [CompletableDeferred]
+ * rather than an observed `Flow`.
+ *  - [loadCatalogTab] `await()`s [defaultLanguageFilter] *before* launching the coroutine that
+ *    collects [buildRowsFlow] for that tab — this ordering is required: without it, [buildRowsFlow]'s
+ *    combine could process the tab's first categories emission before the default is known,
+ *    letting the "no matching category" fallback below run against a still-null selection and
+ *    never re-arm (see [fallbackAppliedContentTypes]).
+ *  - The default is applied at most once per tab, per ViewModel instance, guarded by
+ *    [defaultAppliedContentTypes] — this specifically survives [onRetry], which re-invokes
+ *    [loadCatalogTab] for every already-requested content type; without this guard a retry would
+ *    silently re-apply the default over a selection the user had since cleared.
+ *  - **Fallback**: once the default (or any non-null selection) is applied, it may point to a
+ *    language tag that no loaded category actually has (e.g. an account with no FR content). The
+ *    first time a tab's [buildRowsFlow] processes a [Resource.Success] categories emission (see
+ *    [fallbackAppliedContentTypes] — again a ViewModel-scoped, not a `combine`-local, guard so a
+ *    retry never re-arms it), if the current selection is non-null and absent from the freshly
+ *    recomputed [LanguageFilterState.available], the selection is reset to `null` ("Toutes").
+ *    This never fires a second time for the same tab/instance even if categories keep changing
+ *    afterwards (e.g. a matching category appears later) — deliberate, per the brief: once
+ *    "Toutes" has been chosen for the user, it stays chosen until the user acts explicitly.
+ *  - **Explicit choice always wins**: [onLanguageSelected] records the tab in
+ *    [explicitSelectionContentTypes]. Once a tab is there, neither the default nor the fallback
+ *    above may ever touch its selection again, including across [onRetry].
+ *  - [buildRowsFlow] re-reads [languageFilterState]'s selection *after* the fallback runs for the
+ *    same emission and passes that corrected value to [toRows], so a fallback never renders one
+ *    stale, filtered frame before the corrected "Toutes" rows appear.
+ *
  * @param catalogRepository Read access to categories and content lists for all three content types.
  * @param favoritesRepository Read access to the active profile's favorites list.
  * @param playbackProgressRepository Read access to the active profile's Continue Watching history.
@@ -431,11 +463,95 @@ class HomeViewModel @Inject constructor(
      */
     private val catalogTabJobs = mutableMapOf<ContentType, Job>()
 
+    /**
+     * One-shot memoized result of [AppPreferencesStore.getDefaultLanguageFilter], read exactly once
+     * in [init] — see class KDoc "Default language filter and its one-shot fallback". A
+     * [CompletableDeferred], not an observed `Flow`: this preference is a one-time default applied
+     * per tab, never a reactively-updating value. [loadCatalogTab] `await()`s this before starting
+     * to collect [buildRowsFlow] for its tab, so the default is always known before that tab's first
+     * categories emission is processed.
+     *
+     * **Guarantee: always completed, and [init]'s coroutine never crashes because of this read.**
+     * [init] wraps its three sequential preference/credentials reads in a `try/catch` that rethrows
+     * [CancellationException] (never swallow cooperative cancellation) but absorbs any other
+     * [Exception] (e.g. a DataStore `IOException` on a corrupted/unavailable preferences file), then
+     * completes this deferred to `null` in a `finally` block if it is not already completed.
+     * `viewModelScope` is backed by a `SupervisorJob` **without** a `CoroutineExceptionHandler`, so
+     * letting such an exception escape `launch` would crash the whole app (not just leave every
+     * [loadCatalogTab] awaiting this deferred suspended forever, which the `finally` alone would not
+     * prevent either). Absorbing it here also guarantees the rest of [init] — the "Reprendre"/"Ma
+     * liste"/catalog `combine` wiring below — still runs after a failed read, instead of the whole
+     * `launch` body aborting partway through. `null` means "no default / Toutes", the same graceful
+     * degradation as a normal absent preference — it deliberately never hardcodes `"FR"`, which
+     * remains [DataStoreAppPreferencesStore]'s fallback, not this ViewModel's.
+     */
+    private val defaultLanguageFilter = CompletableDeferred<String?>()
+
+    /**
+     * Content types for which the [defaultLanguageFilter] default has already been applied (or
+     * deliberately skipped due to an explicit choice), for this ViewModel instance — guarantees the
+     * default is applied at most once per tab, surviving [onRetry] re-invoking [loadCatalogTab] for
+     * an already-requested content type. See class KDoc "Default language filter and its one-shot
+     * fallback".
+     */
+    private val defaultAppliedContentTypes = mutableSetOf<ContentType>()
+
+    /**
+     * Content types for which the user has made an explicit [onLanguageSelected] choice, for this
+     * ViewModel instance. Once a tab is in this set, neither the [defaultLanguageFilter] default nor
+     * the "no matching category" fallback in [buildRowsFlow] may ever modify that tab's selection
+     * again — including across [onRetry]. See class KDoc "Default language filter and its one-shot
+     * fallback".
+     */
+    private val explicitSelectionContentTypes = mutableSetOf<ContentType>()
+
+    /**
+     * Content types for which the "selected language has no matching loaded category" fallback (see
+     * [buildRowsFlow]) has already run, for this ViewModel instance. Deliberately a ViewModel-scoped
+     * `MutableSet`, **not** a variable local to [buildRowsFlow] or [loadCatalogTab] — a local
+     * variable would be reset every time [onRetry] restarts the tab's `combine`, letting the
+     * fallback re-arm and silently clear a since-cleared-then-reapplied selection after a retry.
+     *
+     * Note: the `add(contentType)` guard below wraps both the fallback's *eligibility check* and its
+     * *action*, so eligibility is only ever evaluated on the first `Resource.Success` categories tick
+     * for a given tab. This relies on [CatalogRepository]'s per-content-type categories flows being
+     * single-shot (`Loading` then one complete `Success`, never incremental); if those flows ever
+     * became incremental, eligibility would need to be re-evaluated on every `Success` tick instead.
+     */
+    private val fallbackAppliedContentTypes = mutableSetOf<ContentType>()
+
     init {
         viewModelScope.launch {
-            // Fetch the active profile ID once; HomeViewModel is re-created on profile switch per AppNavGraph.
-            activeProfileId = appPreferencesStore.getActiveProfileId()
-            activeCredentials = credentialsProvider.getCredentials()
+            try {
+                // Fetch the active profile ID once; HomeViewModel is re-created on profile switch per AppNavGraph.
+                activeProfileId = appPreferencesStore.getActiveProfileId()
+                activeCredentials = credentialsProvider.getCredentials()
+                // One-shot default language filter — see class KDoc "Default language filter and its
+                // one-shot fallback". Read once here (same lifecycle as the two fields above), never
+                // observed reactively.
+                defaultLanguageFilter.complete(appPreferencesStore.getDefaultLanguageFilter())
+            } catch (cancellation: CancellationException) {
+                // Never swallow cooperative cancellation — rethrow so viewModelScope's cancellation
+                // keeps working normally (e.g. when this ViewModel is cleared).
+                throw cancellation
+            } catch (error: Exception) {
+                // Absorbed intentionally, no logging (this file has none, and does not introduce a
+                // logging dependency): any of the three reads above can throw (e.g. a DataStore
+                // IOException on a corrupted/unavailable preferences file), and viewModelScope is
+                // backed by a SupervisorJob with no CoroutineExceptionHandler — letting this escape
+                // `launch` would crash the app, not just this ViewModel. Degradation is graceful and
+                // silent: the `finally` below still completes [defaultLanguageFilter] to `null`, and
+                // the rest of `init` below (Reprendre/Ma liste/catalog wiring) still runs — every
+                // consumer already tolerates a null activeProfileId/defaultLanguageFilter.
+            } finally {
+                // Guarantee (see [defaultLanguageFilter] KDoc): this deferred must ALWAYS complete,
+                // even if any of the three reads above throws. `null` means "no default / Toutes",
+                // never a hardcoded "FR" (that fallback belongs to DataStoreAppPreferencesStore, not
+                // here).
+                if (!defaultLanguageFilter.isCompleted) {
+                    defaultLanguageFilter.complete(null)
+                }
+            }
 
             val continueWatchingFlow = activeProfileId?.let { buildContinueWatchingFlow(it, moviesState) }
                 ?: flowOf(Resource.Success(emptyList()))
@@ -490,6 +606,12 @@ class HomeViewModel @Inject constructor(
      * never triggers a new network fetch.
      */
     fun onLanguageSelected(contentType: ContentType, language: String?) {
+        // Marks the choice explicit *before* applying it — from this point on, neither the
+        // preference-driven default nor buildRowsFlow's fallback may ever touch this tab's
+        // selection again, including across onRetry(). Applies even when language == null: an
+        // explicit "Toutes" choice is protected exactly like any other explicit choice — see class
+        // KDoc "Default language filter and its one-shot fallback".
+        explicitSelectionContentTypes.add(contentType)
         when (contentType) {
             ContentType.LIVE -> liveLanguageFilterState.update { it.withSelection(language) }
             ContentType.MOVIE -> movieLanguageFilterState.update { it.withSelection(language) }
@@ -597,6 +719,22 @@ class HomeViewModel @Inject constructor(
     ) {
         itemsState.value = Resource.Loading
         rowsState.value = Resource.Loading
+
+        // Default language filter — see class KDoc "Default language filter and its one-shot
+        // fallback". This await() MUST precede launching the buildRowsFlow collector below: it
+        // guarantees the default is known before this tab's first categories emission is processed,
+        // so the fallback (in buildRowsFlow) never races a still-unknown default. Applied at most
+        // once per tab/instance (defaultAppliedContentTypes), and skipped entirely once the user has
+        // made an explicit choice for this tab (explicitSelectionContentTypes) — including across
+        // onRetry() re-invoking this function for an already-requested content type.
+        val defaultLanguage = defaultLanguageFilter.await()
+        if (defaultAppliedContentTypes.add(contentType) &&
+            contentType !in explicitSelectionContentTypes &&
+            defaultLanguage != null
+        ) {
+            languageFilterState.update { it.withSelection(defaultLanguage) }
+        }
+
         launch {
             buildRowsFlow(contentType, categoriesFlow, itemsState, languageFilterState, categoryIdOf, toCard)
                 .collect { rowsState.value = it }
@@ -622,6 +760,25 @@ class HomeViewModel @Inject constructor(
      * above writes back into that same [MutableStateFlow], reading its raw emissions would make an
      * available-only update (selection unchanged) spuriously re-run this `combine`;
      * `distinctUntilChanged` filters those out.
+     *
+     * ## "No matching category" fallback (default and explicit selections alike)
+     * Immediately after [LanguageFilterState.available] is recomputed above, this same side effect
+     * checks whether the *current* selection is still valid: if it is non-null, the tab has no
+     * explicit choice recorded in [explicitSelectionContentTypes], and the selection is absent from
+     * the freshly recomputed [LanguageFilterState.available], the selection is reset to `null`
+     * ("Toutes"). This runs at most once per tab, per ViewModel instance, guarded by
+     * [fallbackAppliedContentTypes] — a ViewModel-scoped `MutableSet`, deliberately not a variable
+     * local to this function, since a local variable would be reset every time [onRetry] restarts
+     * this `combine`, letting the fallback re-arm and clear a selection the user had already
+     * corrected. Once consumed, a tab whose matching category later disappears again is *not*
+     * reset a second time — per the brief, once "Toutes" has applied (or the default was confirmed
+     * valid) for a tab/instance, the fallback never re-fires for it.
+     *
+     * Because the fallback can change [languageFilterState]'s selection *during* this same `combine`
+     * emission, [selectedLanguage] (the `combine` parameter, reflecting the *pre-fallback* value) is
+     * not used directly for [toRows] when categories just resolved successfully; the corrected,
+     * post-fallback selection is re-read from [languageFilterState] instead, so this emission never
+     * renders one stale, filtered frame before the corrected "Toutes" rows appear.
      */
     private fun <T> buildRowsFlow(
         contentType: ContentType,
@@ -633,10 +790,25 @@ class HomeViewModel @Inject constructor(
     ): Flow<Resource<List<HomeRow>>> {
         val selectedLanguageFlow = languageFilterState.map { it.selected }.distinctUntilChanged()
         return combine(categoriesFlow, itemsFlow, selectedLanguageFlow) { categoriesResource, itemsResource, selectedLanguage ->
+            var effectiveSelectedLanguage = selectedLanguage
             if (categoriesResource is Resource.Success) {
                 languageFilterState.update { filterCatalogByLanguageUseCase.deriveAvailableLanguages(categoriesResource.data, it) }
+
+                if (fallbackAppliedContentTypes.add(contentType)) {
+                    val stateAfterAvailableUpdate = languageFilterState.value
+                    val currentSelected = stateAfterAvailableUpdate.selected
+                    if (currentSelected != null &&
+                        contentType !in explicitSelectionContentTypes &&
+                        currentSelected !in stateAfterAvailableUpdate.available
+                    ) {
+                        languageFilterState.update { it.withSelection(null) }
+                    }
+                }
+                // Re-read after the fallback above — never the pre-fallback `selectedLanguage`
+                // combine parameter, see this function's KDoc "No matching category fallback".
+                effectiveSelectedLanguage = languageFilterState.value.selected
             }
-            toRows(contentType, categoriesResource, itemsResource, selectedLanguage, categoryIdOf, toCard)
+            toRows(contentType, categoriesResource, itemsResource, effectiveSelectedLanguage, categoryIdOf, toCard)
         }
     }
 

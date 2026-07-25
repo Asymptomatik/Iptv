@@ -52,4 +52,35 @@ interface AppPreferencesStore {
      * Sets the Wi-Fi only downloads preference to [enabled].
      */
     suspend fun setWifiOnlyDownloads(enabled: Boolean)
+
+    /**
+     * Emits the default language filter tag on collection, then on every change.
+     *
+     * Semantics:
+     *  - the underlying key being absent (never written) yields `"FR"`, the product default;
+     *  - an explicitly stored empty string yields `null`, meaning "All / no filter", which is
+     *    therefore distinguishable from "never configured".
+     *
+     * No migration is required for this preference: an absent key already produces the
+     * intended default ("FR"), so existing installs simply pick up "FR" on their next launch
+     * without any explicit migration step.
+     *
+     * Note: as of this task, no production caller writes this preference yet. It is exposed
+     * ahead of a future user-facing setting; it is not dead code.
+     */
+    fun observeDefaultLanguageFilter(): Flow<String?>
+
+    /**
+     * One-shot read of the default language filter tag. See [observeDefaultLanguageFilter]
+     * for the absent-vs-empty semantics.
+     */
+    suspend fun getDefaultLanguageFilter(): String?
+
+    /**
+     * Sets the default language filter to [tag].
+     *
+     * Passing `null` stores an empty string, meaning "All / no filter". A non-null [tag] is
+     * trimmed and upper-cased before being stored (e.g. `"  fr "` is stored as `"FR"`).
+     */
+    suspend fun setDefaultLanguageFilter(tag: String?)
 }
