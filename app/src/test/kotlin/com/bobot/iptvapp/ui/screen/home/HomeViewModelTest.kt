@@ -1611,15 +1611,17 @@ class HomeViewModelTest {
         testDispatcher.scheduler.runCurrent()
         assertEquals("FR", viewModel.uiState.value.selectedLiveLanguage)
 
+        // The reloaded catalog has no FR category at all. Swap it in *before* retrying and without
+        // an intervening `runCurrent()`, so the old collector is cancelled without ever seeing it:
+        // the FR-less catalog is then the retry's own first terminal result, matching the cold,
+        // single-shot categories flow the repository actually exposes, rather than a later hot tick.
+        liveCategoriesFlow.value = Resource.Success(listOf(sportCategory, newsCategory))
         viewModel.onRetry()
         testDispatcher.scheduler.runCurrent()
 
-        // The reloaded catalog has no FR category at all. FR was never an explicit user choice,
-        // so leaving it selected would filter every row out and strand the tab empty with no chip
-        // selected — and no way back, FR no longer being among the offered languages.
-        liveCategoriesFlow.value = Resource.Success(listOf(sportCategory, newsCategory))
-        testDispatcher.scheduler.runCurrent()
-
+        // FR was never an explicit user choice, so leaving it selected would filter every row out
+        // and strand the tab empty with no chip selected — and no way back, FR no longer being
+        // among the offered languages.
         assertNull(viewModel.uiState.value.selectedLiveLanguage)
     }
 

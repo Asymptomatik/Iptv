@@ -772,13 +772,18 @@ class HomeViewModel @Inject constructor(
      * checks whether the *current* selection is still valid: if it is non-null, the tab has no
      * explicit choice recorded in [explicitSelectionContentTypes], and the selection is absent from
      * the freshly recomputed [LanguageFilterState.available], the selection is reset to `null`
-     * ("Toutes"). This runs at most once per tab, per ViewModel instance, guarded by
+     * ("Toutes"). It *resets* at most once per tab, per ViewModel instance, guarded by
      * [fallbackAppliedContentTypes] — a ViewModel-scoped `MutableSet`, deliberately not a variable
      * local to this function, since a local variable would be reset every time [onRetry] restarts
      * this `combine`, letting the fallback re-arm and clear a selection the user had already
-     * corrected. Once consumed, a tab whose matching category later disappears again is *not*
-     * reset a second time — per the brief, once "Toutes" has applied (or the default was confirmed
-     * valid) for a tab/instance, the fallback never re-fires for it.
+     * corrected. Once it has actually reset a tab, a matching category disappearing again later
+     * does *not* reset it a second time — per the brief, once "Toutes" has applied for a
+     * tab/instance, the fallback never re-fires for it.
+     *
+     * The *check* above, however, runs on every successful categories emission: confirming that the
+     * current selection is still valid does **not** consume the guard, or a selection that was valid
+     * on first load and vanished from a later reload would be stranded outside `available` forever.
+     * See [fallbackAppliedContentTypes].
      *
      * Because the fallback can change [languageFilterState]'s selection *during* this same `combine`
      * emission, [selectedLanguage] (the `combine` parameter, reflecting the *pre-fallback* value) is
