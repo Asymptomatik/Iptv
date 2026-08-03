@@ -169,7 +169,10 @@ class PlayerViewModelTest {
         viewModel.initialize("http://example.com:8080/movie/u/p/9.mp4", "9")
         testDispatcher.scheduler.runCurrent()
 
-        verify(exactly = 1) { playerManager.prepare(any(), any()) }
+        // Third matcher is `any()` on purpose: the assertion is "prepare ran once, whatever
+        // it was passed", and a 2-argument form would silently narrow that to "once with the
+        // default empty subtitle list".
+        verify(exactly = 1) { playerManager.prepare(any(), any(), any()) }
     }
 
     // ── onPlayerError / retry ─────────────────────────────────────────────────
@@ -214,7 +217,9 @@ class PlayerViewModelTest {
         assertFalse("hasError should be cleared by retry", viewModel.uiState.value.hasError)
         assertTrue("isBuffering should be true after retry", viewModel.uiState.value.isBuffering)
         // prepare is expected twice: once from initialize, once from retry.
-        verify(exactly = 2) { playerManager.prepare(streamUrl = url, startPositionMs = 0L) }
+        verify(exactly = 2) {
+            playerManager.prepare(streamUrl = url, startPositionMs = 0L, externalSubtitles = any())
+        }
     }
 
     // ── LIVE progress exclusion (Task 23 decision) ───────────────────────────────
@@ -510,6 +515,30 @@ class PlayerViewModelTest {
                 startPositionMs = 0L,
                 externalSubtitles = subtitles,
             )
+        }
+    }
+
+    @Test
+    fun `retry re-passes the external subtitles resolved by initialize instead of dropping them`() {
+        // `retry()` re-prepares from the retained `resolvedExternalSubtitles` rather than
+        // letting `prepare`'s `emptyList()` default apply. Nothing else pins that down: every
+        // other retry test resolves to an empty list, so the distinction is invisible there.
+        val listenerSlot = slot<Player.Listener>()
+        every { player.addListener(capture(listenerSlot)) } just Runs
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+        val subtitles = listOf(ExternalSubtitle(url = "http://example.com/sub.srt", language = "fr"))
+        coEvery { catalogRepository.getMovieDetail("42") } returns Resource.Success(sampleMovie(externalSubtitles = subtitles))
+
+        val url = "http://example.com:8080/movie/u/p/42.mp4"
+        viewModel.initialize(url, "42")
+        testDispatcher.scheduler.runCurrent()
+
+        listenerSlot.captured.onPlayerError(mockk<PlaybackException>(relaxed = true))
+        viewModel.retry()
+
+        // Twice: once from initialize, once from retry — both carrying the resolved subtitles.
+        verify(exactly = 2) {
+            playerManager.prepare(streamUrl = url, startPositionMs = 0L, externalSubtitles = subtitles)
         }
     }
 
