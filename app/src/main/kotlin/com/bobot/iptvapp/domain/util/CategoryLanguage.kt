@@ -54,15 +54,30 @@ object CategoryLanguage {
     private val SPACE_LANGUAGE_TAG_PATTERN = Regex("^(\\S+)\\s+(.+)$")
 
     /**
-     * Closed set of language/region codes recognised by [SPACE_LANGUAGE_TAG_PATTERN]. Compared
+     * Closed set of language codes recognised by [SPACE_LANGUAGE_TAG_PATTERN]. Compared
      * case-insensitively against the matched first token (uppercased). Any first token not in
      * this list is rejected, regardless of its length or shape, which is what prevents ordinary
      * two-word category names such as `"HD Movies"` or `"TV Shows"` from being misread as
      * carrying a language prefix.
+     *
+     * Deliberately **languages only** — the country/region codes `SP`, `UK`, `US`, `BR`, `CA`,
+     * `BE` and `CH` are excluded here. A country is not a language, and behind a mere space the
+     * signal is too weak to act on: `"US Sports"` would be shown as `"Sports"` filed under a
+     * pseudo-language `US`, and every `"CA …"` category would collapse into one row on the
+     * Films/Séries tabs, whose row key *is* the language tag. `SP` is not even the code for
+     * Spanish (`ES` is) and just as plausibly abbreviates Sport or Special. The delimited
+     * patterns are unaffected: `"UK | Sports"`, `"US - Movies"` and `"BR: Novelas"` are still
+     * recognised, the explicit delimiter being a deliberate signal from the provider.
+     *
+     * `VF`, `VO` and `VOSTFR` are not ISO codes but are kept: they are strong French
+     * audiovisual conventions that genuinely describe a version's language.
+     *
+     * `IT` is the one knowingly retained ambiguity (`"IT Support"` would be misread), Italian
+     * being far likelier than an IT-helpdesk category in an IPTV catalogue.
      */
     private val SPACE_PREFIX_WHITELIST = setOf(
         "FR", "FRA", "EN", "ENG", "AR", "ES", "DE", "IT", "PT", "NL", "TR", "RU", "PL",
-        "VF", "VO", "VOSTFR", "SP", "UK", "US", "BR", "CA", "BE", "CH",
+        "VF", "VO", "VOSTFR",
     )
 
     /**

@@ -198,6 +198,53 @@ class CategoryLanguageTest {
     }
 
     @Test
+    fun `extractLanguageTag returns null for country codes behind a plain space`() {
+        // Countries are not languages: behind a mere space the signal is too weak to act on.
+        // "US Sports" must stay "US Sports", not become "Sports" filed under a pseudo-language.
+        listOf(
+            "SP Sports",
+            "UK Entertainment",
+            "US Sports",
+            "BR Movies",
+            "CA Movies",
+            "BE Channels",
+            "CH Channels",
+        ).forEach { name ->
+            assertNull("unexpected tag for \"$name\"", CategoryLanguage.extractLanguageTag(name))
+        }
+    }
+
+    @Test
+    fun `extractDisplayName keeps country codes behind a plain space`() {
+        listOf(
+            "SP Sports",
+            "UK Entertainment",
+            "US Sports",
+            "BR Movies",
+            "CA Movies",
+            "BE Channels",
+            "CH Channels",
+        ).forEach { name ->
+            assertEquals(name, CategoryLanguage.extractDisplayName(name))
+        }
+    }
+
+    @Test
+    fun `extractLanguageTag still returns country codes when an explicit delimiter is present`() {
+        // The delimiter is a deliberate signal from the provider, so it is still honoured.
+        assertEquals("UK", CategoryLanguage.extractLanguageTag("UK | Sports"))
+        assertEquals("US", CategoryLanguage.extractLanguageTag("US - Movies"))
+        assertEquals("BR", CategoryLanguage.extractLanguageTag("BR: Novelas"))
+    }
+
+    @Test
+    fun `extractLanguageTag treats IT behind a space as Italian - knowingly retained ambiguity`() {
+        // Documents an accepted trade-off: "IT Support" is misread as Italian, Italian being far
+        // likelier than an IT-helpdesk category in an IPTV catalogue.
+        assertEquals("IT", CategoryLanguage.extractLanguageTag("IT Support"))
+    }
+
+    @Test
     fun `extractLanguageTag returns null when whitelisted code is not the leading token`() {
         val result = CategoryLanguage.extractLanguageTag("Sport FR")
 
