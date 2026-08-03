@@ -365,14 +365,16 @@ data class HomeUiState(
  *    [loadCatalogTab] for every already-requested content type; without this guard a retry would
  *    silently re-apply the default over a selection the user had since cleared.
  *  - **Fallback**: once the default (or any non-null selection) is applied, it may point to a
- *    language tag that no loaded category actually has (e.g. an account with no FR content). The
- *    first time a tab's [buildRowsFlow] processes a [Resource.Success] categories emission (see
- *    [fallbackAppliedContentTypes] — again a ViewModel-scoped, not a `combine`-local, guard so a
- *    retry never re-arms it), if the current selection is non-null and absent from the freshly
- *    recomputed [LanguageFilterState.available], the selection is reset to `null` ("Toutes").
- *    This never fires a second time for the same tab/instance even if categories keep changing
- *    afterwards (e.g. a matching category appears later) — deliberate, per the brief: once
- *    "Toutes" has been chosen for the user, it stays chosen until the user acts explicitly.
+ *    language tag that no loaded category actually has (e.g. an account with no FR content). On a
+ *    tab's [Resource.Success] categories emissions, if the current selection is non-null and absent
+ *    from the freshly recomputed [LanguageFilterState.available], the selection is reset to `null`
+ *    ("Toutes"). It fires **at most once** per tab/instance, guarded by
+ *    [fallbackAppliedContentTypes] (ViewModel-scoped, not `combine`-local, so a retry never re-arms
+ *    it): once "Toutes" has been chosen for the user, it stays chosen until the user acts
+ *    explicitly, even if a matching category appears later — deliberate, per the brief. What the
+ *    guard does *not* do is stop the eligibility check itself from being re-evaluated on later
+ *    emissions; see [fallbackAppliedContentTypes] for the dead state that would otherwise strand a
+ *    tab when a previously valid automatic selection disappears from a reloaded catalog.
  *  - **Explicit choice always wins**: [onLanguageSelected] records the tab in
  *    [explicitSelectionContentTypes]. Once a tab is there, neither the default nor the fallback
  *    above may ever touch its selection again, including across [onRetry].
@@ -512,11 +514,15 @@ class HomeViewModel @Inject constructor(
      * variable would be reset every time [onRetry] restarts the tab's `combine`, letting the
      * fallback re-arm and silently clear a since-cleared-then-reapplied selection after a retry.
      *
-     * Note: the `add(contentType)` guard below wraps both the fallback's *eligibility check* and its
-     * *action*, so eligibility is only ever evaluated on the first `Resource.Success` categories tick
-     * for a given tab. This relies on [CatalogRepository]'s per-content-type categories flows being
-     * single-shot (`Loading` then one complete `Success`, never incremental); if those flows ever
-     * became incremental, eligibility would need to be re-evaluated on every `Success` tick instead.
+     * A tab is recorded here only when the fallback **actually fires**, never merely because a first
+     * `Resource.Success` went by. Consuming the guard on the first tick regardless would strand the
+     * tab in a dead state: initial load has `FR`, so the fallback is eligible but does nothing and
+     * the guard is burnt; a later [onRetry] returns a catalog without any `FR` category; `available`
+     * drops to `[EN]` while `selected` stays `FR`, so `toRows` filters everything out and the tab
+     * renders empty with no chip selected — and, `FR` no longer being in `languages`, with no way
+     * back other than picking another language. Since the fallback still stands down for any tab in
+     * [explicitSelectionContentTypes], re-checking eligibility on later ticks can only ever revise an
+     * *automatic* selection, never a user's own.
      */
     private val fallbackAppliedContentTypes = mutableSetOf<ContentType>()
 
@@ -794,13 +800,15 @@ class HomeViewModel @Inject constructor(
             if (categoriesResource is Resource.Success) {
                 languageFilterState.update { filterCatalogByLanguageUseCase.deriveAvailableLanguages(categoriesResource.data, it) }
 
-                if (fallbackAppliedContentTypes.add(contentType)) {
+                if (contentType !in fallbackAppliedContentTypes) {
                     val stateAfterAvailableUpdate = languageFilterState.value
                     val currentSelected = stateAfterAvailableUpdate.selected
                     if (currentSelected != null &&
                         contentType !in explicitSelectionContentTypes &&
                         currentSelected !in stateAfterAvailableUpdate.available
                     ) {
+                        // Consumed only when the fallback actually fires — see the field's KDoc.
+                        fallbackAppliedContentTypes.add(contentType)
                         languageFilterState.update { it.withSelection(null) }
                     }
                 }

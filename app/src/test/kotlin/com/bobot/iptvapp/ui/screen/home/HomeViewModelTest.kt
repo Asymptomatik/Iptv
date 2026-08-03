@@ -1596,6 +1596,34 @@ class HomeViewModelTest {
     }
 
     @Test
+    fun `an automatic FR selection that vanishes from a reloaded catalog still falls back to Toutes`() {
+        coEvery { appPreferencesStore.getDefaultLanguageFilter() } returns "FR"
+        createViewModel()
+        val frSport = Category(id = "30", name = "FR | Sport", type = ContentType.LIVE)
+        stubLiveChannels("30", listOf(Channel(id = "c30", name = "FRChan", logoUrl = null, categoryId = "30", epgChannelId = null)))
+        stubLiveChannels("1", listOf(chan1))
+        stubLiveChannels("2", emptyList())
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        // First load *does* carry FR: the default applies, and the fallback — eligible but with
+        // nothing to correct — must not burn its one-shot guard on this no-op.
+        liveCategoriesFlow.value = Resource.Success(listOf(frSport))
+        testDispatcher.scheduler.runCurrent()
+        assertEquals("FR", viewModel.uiState.value.selectedLiveLanguage)
+
+        viewModel.onRetry()
+        testDispatcher.scheduler.runCurrent()
+
+        // The reloaded catalog has no FR category at all. FR was never an explicit user choice,
+        // so leaving it selected would filter every row out and strand the tab empty with no chip
+        // selected — and no way back, FR no longer being among the offered languages.
+        liveCategoriesFlow.value = Resource.Success(listOf(sportCategory, newsCategory))
+        testDispatcher.scheduler.runCurrent()
+
+        assertNull(viewModel.uiState.value.selectedLiveLanguage)
+    }
+
+    @Test
     fun `explicit Toutes choice made while FR categories are loaded survives a retry`() {
         coEvery { appPreferencesStore.getDefaultLanguageFilter() } returns "FR"
         createViewModel()
