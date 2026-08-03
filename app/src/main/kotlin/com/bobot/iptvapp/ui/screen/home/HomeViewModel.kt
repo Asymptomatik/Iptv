@@ -474,18 +474,22 @@ class HomeViewModel @Inject constructor(
      * categories emission is processed.
      *
      * **Guarantee: always completed, and [init]'s coroutine never crashes because of this read.**
-     * [init] wraps its three sequential preference/credentials reads in a `try/catch` that rethrows
-     * [CancellationException] (never swallow cooperative cancellation) but absorbs any other
-     * [Exception] (e.g. a DataStore `IOException` on a corrupted/unavailable preferences file), then
-     * completes this deferred to `null` in a `finally` block if it is not already completed.
-     * `viewModelScope` is backed by a `SupervisorJob` **without** a `CoroutineExceptionHandler`, so
-     * letting such an exception escape `launch` would crash the whole app (not just leave every
-     * [loadCatalogTab] awaiting this deferred suspended forever, which the `finally` alone would not
-     * prevent either). Absorbing it here also guarantees the rest of [init] — the "Reprendre"/"Ma
-     * liste"/catalog `combine` wiring below — still runs after a failed read, instead of the whole
-     * `launch` body aborting partway through. `null` means "no default / Toutes", the same graceful
-     * degradation as a normal absent preference — it deliberately never hardcodes `"FR"`, which
-     * remains [DataStoreAppPreferencesStore]'s fallback, not this ViewModel's.
+     * [init] performs its three preference/credentials reads through [readOrNull], which wraps **each
+     * read individually** in a `try/catch` that rethrows [CancellationException] (never swallow
+     * cooperative cancellation) but absorbs any other [Exception] (e.g. a DataStore `IOException` on
+     * a corrupted/unavailable preferences file) into `null`. The per-read isolation is the point: the
+     * three preferences are independent, so a failing credentials read must not skip the language
+     * read that follows it — with a single shared `try`, an unrelated credentials failure silently
+     * degraded every tab to "Toutes". A `finally` block still completes this deferred to `null` if
+     * nothing else has, covering the residual paths [readOrNull] does not absorb (a [Throwable] that
+     * is not an [Exception]). `viewModelScope` is backed by a `SupervisorJob` **without** a
+     * `CoroutineExceptionHandler`, so letting such an exception escape `launch` would crash the whole
+     * app (not just leave every [loadCatalogTab] awaiting this deferred suspended forever, which the
+     * `finally` alone would not prevent either). Absorbing them also guarantees the rest of [init] —
+     * the "Reprendre"/"Ma liste"/catalog `combine` wiring below — still runs after a failed read,
+     * instead of the whole `launch` body aborting partway through. `null` means "no default /
+     * Toutes", the same graceful degradation as a normal absent preference — it deliberately never
+     * hardcodes `"FR"`, which remains [DataStoreAppPreferencesStore]'s fallback, not this ViewModel's.
      */
     private val defaultLanguageFilter = CompletableDeferred<String?>()
 
@@ -529,26 +533,19 @@ class HomeViewModel @Inject constructor(
     init {
         viewModelScope.launch {
             try {
+                // Each read is isolated in its own try/catch (see [readOrNull]) rather than sharing
+                // one: they are three independent preferences, and a failure on one must not skip
+                // the next two. Sharing a single `try` made a credentials read failure jump straight
+                // to `catch`, leaving the default language filter unread — degrading the tabs to
+                // "Toutes" for a reason entirely unrelated to the language preference itself.
+
                 // Fetch the active profile ID once; HomeViewModel is re-created on profile switch per AppNavGraph.
-                activeProfileId = appPreferencesStore.getActiveProfileId()
-                activeCredentials = credentialsProvider.getCredentials()
+                activeProfileId = readOrNull { appPreferencesStore.getActiveProfileId() }
+                activeCredentials = readOrNull { credentialsProvider.getCredentials() }
                 // One-shot default language filter — see class KDoc "Default language filter and its
                 // one-shot fallback". Read once here (same lifecycle as the two fields above), never
                 // observed reactively.
-                defaultLanguageFilter.complete(appPreferencesStore.getDefaultLanguageFilter())
-            } catch (cancellation: CancellationException) {
-                // Never swallow cooperative cancellation — rethrow so viewModelScope's cancellation
-                // keeps working normally (e.g. when this ViewModel is cleared).
-                throw cancellation
-            } catch (error: Exception) {
-                // Absorbed intentionally, no logging (this file has none, and does not introduce a
-                // logging dependency): any of the three reads above can throw (e.g. a DataStore
-                // IOException on a corrupted/unavailable preferences file), and viewModelScope is
-                // backed by a SupervisorJob with no CoroutineExceptionHandler — letting this escape
-                // `launch` would crash the app, not just this ViewModel. Degradation is graceful and
-                // silent: the `finally` below still completes [defaultLanguageFilter] to `null`, and
-                // the rest of `init` below (Reprendre/Ma liste/catalog wiring) still runs — every
-                // consumer already tolerates a null activeProfileId/defaultLanguageFilter.
+                defaultLanguageFilter.complete(readOrNull { appPreferencesStore.getDefaultLanguageFilter() })
             } finally {
                 // Guarantee (see [defaultLanguageFilter] KDoc): this deferred must ALWAYS complete,
                 // even if any of the three reads above throws. `null` means "no default / Toutes",
@@ -600,6 +597,32 @@ class HomeViewModel @Inject constructor(
             }
         }
     }
+
+    /**
+     * Runs a single [init] preference/credentials read, degrading a failure to `null` instead of
+     * aborting the caller.
+     *
+     * Deliberately scoped to **one** read per call: [init]'s three reads are independent
+     * preferences, and wrapping them together in one `try` meant the first failure skipped every
+     * read after it — an unavailable credentials store left [defaultLanguageFilter] unread, so every
+     * catalog tab silently fell back to "Toutes" for a reason having nothing to do with the language
+     * preference.
+     *
+     * [CancellationException] is rethrown, never absorbed: swallowing it would break cooperative
+     * cancellation of `viewModelScope` (e.g. when this ViewModel is cleared). Any other [Exception]
+     * (typically a DataStore `IOException` on a corrupted or unavailable preferences file) becomes
+     * `null` — the same value an absent preference yields, so every consumer already handles it.
+     * Absorbed silently, without logging: this file has none and does not introduce a logging
+     * dependency.
+     */
+    private suspend fun <T> readOrNull(read: suspend () -> T): T? =
+        try {
+            read()
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (error: Exception) {
+            null
+        }
 
     /**
      * Updates the language filter selection for [contentType]'s catalog tab (Chaines/Films/Series
@@ -712,6 +735,22 @@ class HomeViewModel @Inject constructor(
      * see class KDoc "On-demand catalog loading" and "Grouping categories with content, per content
      * type". [LoadCategoryScopedCatalogUseCase.onCategoriesResolved] is left at its default no-op —
      * Home does not need the resolved category list up front (unlike Search).
+     *
+     * ## Two subscriptions to [categoriesFlow], one network request
+     * [categoriesFlow] is a **cold** `flow { }` and is collected twice here — by [buildRowsFlow]'s
+     * `combine` and by [loadCategoryScopedCatalogUseCase]'s `first { }`, started concurrently. Both
+     * subscriptions are deliberate and must stay: [buildRowsFlow] keeps observing so a later
+     * categories emission still re-derives the tab's available languages, while the use-case only
+     * needs the first terminal value.
+     *
+     * De-duplicating the resulting *network request* is `CatalogRepositoryImpl`'s job, not this
+     * function's — see its "Concurrent first fetches" section, where a per-content-type `Mutex` makes
+     * concurrent collectors share a single fetch. Fixing it there rather than here is deliberate: it
+     * covers every consumer (Search collects the same Flows) and, critically, changes no timing in
+     * this ViewModel. Funnelling both consumers through a shared `StateFlow` here would delay the
+     * terminal value by one dispatch, and that delay is observable — the "Ma liste"/"Reprendre" rows
+     * resolve their entries against the tab's *already loaded* items, so a late items load makes them
+     * miss and fall back to a per-item `getMovieDetail`/`getSeriesDetail` request.
      */
     private suspend fun <T> CoroutineScope.loadCatalogTab(
         contentType: ContentType,

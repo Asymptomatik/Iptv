@@ -27,6 +27,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
@@ -101,11 +103,36 @@ class CatalogRepositoryImpl @Inject constructor(
     // (on the first successful fetch) and cleared on credential change.
     // Concurrent first-fetches may both write to the field; the last write wins,
     // which is acceptable since both would contain equivalent data from the same
-    // server endpoint.
+    // server endpoint. That tolerance still applies to the stream-list fields, but
+    // no longer to the three category fields: those are now guarded by a mutex so a
+    // concurrent first fetch happens once, not once per collector — see "Concurrent
+    // first fetches (categories)" below.
 
     @Volatile private var cachedLiveCategories: List<Category>? = null
     @Volatile private var cachedVodCategories: List<Category>? = null
     @Volatile private var cachedSeriesCategories: List<Category>? = null
+
+    // ── Concurrent first fetches (categories) ─────────────────────────────────
+    //
+    // The category Flows below are cold: each collection runs the whole body, so
+    // concurrent collectors all read the memo above as null and each fire their own
+    // request. That is not hypothetical — HomeViewModel.loadCatalogTab deliberately
+    // collects a tab's categories Flow twice at once (buildRowsFlow observes it for
+    // language derivation, LoadCategoryScopedCatalogUseCase awaits its first terminal
+    // value), so every tab load doubled the categories request.
+    //
+    // One Mutex per content type, not one shared: a caller loading several types at
+    // once (SearchViewModel) must keep fetching them in parallel. The mutex only
+    // serializes same-type first fetches, and the memo is re-read after acquiring it,
+    // so the waiter returns the winner's result instead of refetching. Once the memo
+    // is populated the lock is never taken again — the fast path above it is lock-free.
+    //
+    // Only the categories are guarded. The stream-list caches keep their documented
+    // "last write wins" tolerance: nothing collects those Flows twice concurrently.
+
+    private val liveCategoriesFetchMutex = Mutex()
+    private val vodCategoriesFetchMutex = Mutex()
+    private val seriesCategoriesFetchMutex = Mutex()
 
     @Volatile private var cachedAllChannels: List<Channel>? = null
     @Volatile private var cachedAllMovies: List<Movie>? = null
@@ -133,39 +160,50 @@ class CatalogRepositoryImpl @Inject constructor(
     override fun observeLiveCategories(): Flow<Resource<List<Category>>> = flow {
         emit(Resource.Loading)
         cachedLiveCategories?.let { emit(Resource.Success(it)); return@flow }
-        try {
-            val result = dataSource.getLiveCategories()
-            cachedLiveCategories = result
-            persistCategoriesQuietly(result)
-            emit(Resource.Success(result))
-        } catch (t: Throwable) {
-            emitCategoriesFromRoomCacheOrError(ContentType.LIVE, t)
+        // See "Concurrent first fetches (categories)" above. Re-reads the memo once the lock is
+        // held, so a collector that queued behind a concurrent first fetch reuses its result.
+        liveCategoriesFetchMutex.withLock {
+            cachedLiveCategories?.let { emit(Resource.Success(it)); return@withLock }
+            try {
+                val result = dataSource.getLiveCategories()
+                cachedLiveCategories = result
+                persistCategoriesQuietly(result)
+                emit(Resource.Success(result))
+            } catch (t: Throwable) {
+                emitCategoriesFromRoomCacheOrError(ContentType.LIVE, t)
+            }
         }
     }.flowOn(ioDispatcher)
 
     override fun observeVodCategories(): Flow<Resource<List<Category>>> = flow {
         emit(Resource.Loading)
         cachedVodCategories?.let { emit(Resource.Success(it)); return@flow }
-        try {
-            val result = dataSource.getVodCategories()
-            cachedVodCategories = result
-            persistCategoriesQuietly(result)
-            emit(Resource.Success(result))
-        } catch (t: Throwable) {
-            emitCategoriesFromRoomCacheOrError(ContentType.MOVIE, t)
+        vodCategoriesFetchMutex.withLock {
+            cachedVodCategories?.let { emit(Resource.Success(it)); return@withLock }
+            try {
+                val result = dataSource.getVodCategories()
+                cachedVodCategories = result
+                persistCategoriesQuietly(result)
+                emit(Resource.Success(result))
+            } catch (t: Throwable) {
+                emitCategoriesFromRoomCacheOrError(ContentType.MOVIE, t)
+            }
         }
     }.flowOn(ioDispatcher)
 
     override fun observeSeriesCategories(): Flow<Resource<List<Category>>> = flow {
         emit(Resource.Loading)
         cachedSeriesCategories?.let { emit(Resource.Success(it)); return@flow }
-        try {
-            val result = dataSource.getSeriesCategories()
-            cachedSeriesCategories = result
-            persistCategoriesQuietly(result)
-            emit(Resource.Success(result))
-        } catch (t: Throwable) {
-            emitCategoriesFromRoomCacheOrError(ContentType.SERIES, t)
+        seriesCategoriesFetchMutex.withLock {
+            cachedSeriesCategories?.let { emit(Resource.Success(it)); return@withLock }
+            try {
+                val result = dataSource.getSeriesCategories()
+                cachedSeriesCategories = result
+                persistCategoriesQuietly(result)
+                emit(Resource.Success(result))
+            } catch (t: Throwable) {
+                emitCategoriesFromRoomCacheOrError(ContentType.SERIES, t)
+            }
         }
     }.flowOn(ioDispatcher)
 

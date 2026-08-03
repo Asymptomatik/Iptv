@@ -27,6 +27,7 @@ import io.mockk.verify
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -1593,6 +1594,49 @@ class HomeViewModelTest {
         testDispatcher.scheduler.runCurrent()
 
         assertNull(viewModel.uiState.value.selectedLiveLanguage)
+    }
+
+    @Test
+    fun `a tab load subscribes the categories Flow twice, on purpose`() {
+        // buildRowsFlow keeps observing (so a later categories emission still re-derives the tab's
+        // available languages) while LoadCategoryScopedCatalogUseCase only awaits the first terminal
+        // value. Both subscriptions are intended; de-duplicating the resulting network request is
+        // CatalogRepositoryImpl's job (see its "Concurrent first fetches" section and
+        // CatalogRepositoryImplTest), not this ViewModel's — funnelling both through a shared
+        // StateFlow here would delay the items load by one dispatch and make the "Ma liste" rows
+        // miss the tab's already-loaded items. This test pins that division of responsibility.
+        var subscriptions = 0
+        every { catalogRepository.observeLiveCategories() } returns flow {
+            subscriptions++
+            emit(Resource.Loading)
+            emit(Resource.Success(listOf(sportCategory)))
+        }
+        stubLiveChannels("1", listOf(chan1))
+        createViewModel()
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(2, subscriptions)
+        assertEquals(1, viewModel.uiState.value.liveRows.size)
+    }
+
+    @Test
+    fun `a failing credentials read still lets the default language filter apply`() {
+        // The three init reads used to share one try/catch, so a credentials failure jumped straight
+        // to catch and left the language preference unread — silently degrading every tab to
+        // "Toutes" for a reason unrelated to the language preference.
+        coEvery { credentialsProvider.getCredentials() } throws IOException("DataStore indisponible")
+        coEvery { appPreferencesStore.getDefaultLanguageFilter() } returns "FR"
+        createViewModel()
+        val frSport = Category(id = "30", name = "FR | Sport", type = ContentType.LIVE)
+        stubLiveChannels("30", listOf(Channel(id = "c30", name = "FRChan", logoUrl = null, categoryId = "30", epgChannelId = null)))
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        liveCategoriesFlow.value = Resource.Success(listOf(frSport))
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals("FR", viewModel.uiState.value.selectedLiveLanguage)
     }
 
     @Test

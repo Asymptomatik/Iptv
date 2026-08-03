@@ -22,9 +22,13 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -119,6 +123,38 @@ class CatalogRepositoryImplTest {
                 assertEquals(Resource.Success(emptyList<Category>()), awaitItem())
                 awaitComplete()
             }
+        }
+
+    // ── observeLiveCategories — concurrent first fetches ─────────────────────
+
+    @Test
+    fun `two concurrent first collections of observeLiveCategories share a single data source fetch`() =
+        runTest(testDispatcher) {
+            // The Flow is cold, so concurrent collectors all read the in-memory memo as null. Home
+            // makes this the normal case, not a rare race: loading one catalog tab collects its
+            // categories Flow twice at once (buildRowsFlow observes it, LoadCategoryScopedCatalogUseCase
+            // awaits its first terminal value), which used to double every categories request.
+            val categories = listOf(Category("1", "News", ContentType.LIVE))
+            val releaseFetch = CompletableDeferred<Unit>()
+            var fetches = 0
+            coEvery { dataSource.getLiveCategories() } coAnswers {
+                fetches++
+                // Keeps the first fetch in flight so the second collector genuinely overlaps it,
+                // instead of arriving after the memo was already filled.
+                releaseFetch.await()
+                categories
+            }
+
+            val first = async { repository.observeLiveCategories().toList() }
+            val second = async { repository.observeLiveCategories().toList() }
+            runCurrent()
+            releaseFetch.complete(Unit)
+
+            val expected = listOf(Resource.Loading, Resource.Success(categories))
+            assertEquals(expected, first.await())
+            // The waiter is served the winner's result rather than refetching.
+            assertEquals(expected, second.await())
+            assertEquals(1, fetches)
         }
 
     // ── observeLiveCategories — error paths ──────────────────────────────────
