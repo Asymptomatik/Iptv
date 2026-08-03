@@ -71,7 +71,12 @@ class PlayerViewModelTest {
         player = mockk(relaxed = true)
         playerManager = mockk()
         every { playerManager.player } returns player
-        every { playerManager.prepare(any(), any()) } just Runs
+        // Stubbed on the full 3-parameter signature: `prepare` has default values, so a
+        // 2-argument `every` is routed through the `prepare$default` bridge and actually
+        // records `prepare(any(), any(), eq(emptyList()))`. Any call carrying non-empty
+        // external subtitles then matches no answer, and the resulting MockKException
+        // escapes `runTest` to be blamed on whichever test happens to run next.
+        every { playerManager.prepare(any(), any(), any()) } just Runs
         every { playerManager.release() } just Runs
         every { playerManager.getAudioTracks() } returns emptyList()
         every { playerManager.getSubtitleTracks() } returns emptyList()
