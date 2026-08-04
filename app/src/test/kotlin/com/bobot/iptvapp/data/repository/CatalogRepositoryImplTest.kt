@@ -25,6 +25,7 @@ import io.mockk.mockk
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -241,6 +242,64 @@ class CatalogRepositoryImplTest {
                 assertEquals(exception, (emissions.last() as Resource.Error).throwable)
             }
             assertEquals(1, fetches)
+        }
+
+    @Test
+    fun `a waiter takes the attempt over when the collector owning the fetch is cancelled`() =
+        runTest(testDispatcher) {
+            // The request runs in its owner's coroutine, so leaving that screen cancels it. The
+            // waiter left behind is still on screen: it must restart the attempt rather than stay on
+            // Resource.Loading for the lifetime of the repository.
+            val categories = listOf(Category("1", "News", ContentType.LIVE))
+            val releaseTakeover = CompletableDeferred<Unit>()
+            var fetches = 0
+            coEvery { dataSource.getLiveCategories() } coAnswers {
+                if (++fetches == 1) {
+                    awaitCancellation()
+                } else {
+                    releaseTakeover.await()
+                    categories
+                }
+            }
+
+            val owner = async { repository.observeLiveCategories().toList() }
+            runCurrent()
+            val waiter = async { repository.observeLiveCategories().toList() }
+            runCurrent()
+
+            owner.cancel()
+            runCurrent()
+            releaseTakeover.complete(Unit)
+
+            assertEquals(listOf(Resource.Loading, Resource.Success(categories)), waiter.await())
+            assertEquals(2, fetches)
+        }
+
+    @Test
+    fun `cancelling every participant leaves no in-flight attempt behind for the next collection`() =
+        runTest(testDispatcher) {
+            // Cancellation must retire the shared attempt, not park it: a later collection that finds
+            // a leftover in-flight Deferred would join something already dead.
+            val categories = listOf(Category("1", "News", ContentType.LIVE))
+            var fetches = 0
+            coEvery { dataSource.getLiveCategories() } coAnswers {
+                if (++fetches == 1) awaitCancellation() else categories
+            }
+
+            val owner = async { repository.observeLiveCategories().toList() }
+            runCurrent()
+            val waiter = async { repository.observeLiveCategories().toList() }
+            runCurrent()
+            waiter.cancel()
+            owner.cancel()
+            runCurrent()
+
+            repository.observeLiveCategories().test {
+                assertEquals(Resource.Loading, awaitItem())
+                assertEquals(Resource.Success(categories), awaitItem())
+                awaitComplete()
+            }
+            assertEquals(2, fetches)
         }
 
     @Test

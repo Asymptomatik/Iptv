@@ -21,6 +21,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.Flow
@@ -442,10 +443,18 @@ class CatalogRepositoryImpl @Inject constructor(
         }
     }
 
-    /** Runs a Room write [block], silently ignoring any failure (best-effort cache). */
+    /**
+     * Runs a Room write [block], silently ignoring any failure (best-effort cache).
+     *
+     * Cancellation is deliberately *not* absorbed: swallowing it would leave the caller running with
+     * an already-cancelled context, so the next suspension point would throw somewhere far less
+     * expected — see [loadCategories], whose owner must reach its cleanup in a known state.
+     */
     private suspend fun persistQuietly(block: suspend () -> Unit) {
         try {
             block()
+        } catch (cancellation: CancellationException) {
+            throw cancellation
         } catch (t: Throwable) {
             // Best-effort cache write — a failure here does not affect the caller's
             // already-successful network/mock result.
@@ -475,6 +484,10 @@ class CatalogRepositoryImpl @Inject constructor(
     ): Resource<List<T>> {
         val cached = try {
             fetchFromCache()
+        } catch (cancellation: CancellationException) {
+            // An empty cache is a legitimate answer; a cancelled read is not one, and must not be
+            // laundered into a Resource.Error while the coroutine is already gone.
+            throw cancellation
         } catch (cacheReadError: Throwable) {
             emptyList()
         }
@@ -509,11 +522,24 @@ class CatalogRepositoryImpl @Inject constructor(
      * Collectors arriving after an invalidation refuse to join an attempt from an older generation
      * and start their own, so a retry genuinely refetches.
      *
+     * The same gate guards [persistCategoriesQuietly], but only narrows the window there rather than
+     * closing it: an invalidation landing between the check and the write still persists the old
+     * account's categories. That is a symptom of a wider, pre-existing limitation — the Room cache is
+     * keyed by [ContentType] alone, is not partitioned per credentials, and [invalidateCache] does
+     * not purge it. Anything the offline fallback returns may therefore predate the current account.
+     * Making that guarantee real needs the cache scoped to a session in the schema, not more locking
+     * here.
+     *
      * ## Cancellation
      * The attempt runs in its owner's coroutine, not in an external scope, so leaving the screen
      * still cancels the request. Waiters observe the owner's cancellation as a cancelled
      * [CompletableDeferred] and take the attempt over instead of failing — a waiter that is still
      * active must not be cancelled by an unrelated collector going away.
+     *
+     * That hand-over only works because the owner resolves the shared [CompletableDeferred] on
+     * *every* exit path, from a [NonCancellable] `finally`. An owner that returned without resolving
+     * it would leave its waiters suspended for the lifetime of the repository, which on screen reads
+     * as a spinner that never stops.
      */
     private suspend fun loadCategories(
         state: CategoryFetchState,
@@ -556,27 +582,41 @@ class CatalogRepositoryImpl @Inject constructor(
                 }
             }
 
-            val result = try {
+            // Once we own [deferred], every exit path must resolve it and retire it from
+            // [CategoryFetchState.inFlight], or the waiters stay suspended for ever. The owner's own
+            // job may already be cancelled by the time we get here, so the cleanup runs in a
+            // [NonCancellable] `finally` — a plain `mutex.withLock` on a cancelled job would throw
+            // before [deferred] is ever resolved.
+            var result: Resource<List<Category>>? = null
+            try {
                 val fresh = fetch()
-                state.mutex.withLock {
-                    if (state.generation.get() == generation) writeMemo(fresh)
+                val publishable = state.mutex.withLock {
+                    (state.generation.get() == generation).also { if (it) writeMemo(fresh) }
                 }
-                persistCategoriesQuietly(fresh)
-                Resource.Success(fresh)
+                // Same gate for Room: a result the memo refused is the previous account's and has no
+                // business landing in the offline cache either. See "Invalidation generations".
+                if (publishable) persistCategoriesQuietly(fresh)
+                result = Resource.Success(fresh)
             } catch (cancellation: CancellationException) {
-                state.mutex.withLock { if (state.inFlight === deferred) state.inFlight = null }
-                deferred.cancel(cancellation)
+                // Leaves [result] null: the `finally` below cancels [deferred], which hands the
+                // attempt over to whichever waiter is still active.
                 throw cancellation
             } catch (t: Throwable) {
                 // Deliberately not memoized, matching the previous behaviour: a Room fallback or an
                 // error never becomes the session cache.
-                fromRoomCacheOrError(t) {
+                result = fromRoomCacheOrError(t) {
                     catalogCacheDao.observeCategoriesByType(contentType.name).first().toDomain()
                 }
+            } finally {
+                withContext(NonCancellable) {
+                    state.mutex.withLock { if (state.inFlight === deferred) state.inFlight = null }
+                }
+                // Retired first, resolved second: a collector arriving in between starts a fresh
+                // attempt rather than joining one that is already over.
+                val terminal = result
+                if (terminal != null) deferred.complete(terminal) else deferred.cancel()
             }
-            state.mutex.withLock { if (state.inFlight === deferred) state.inFlight = null }
-            deferred.complete(result)
-            return result
+            return requireNotNull(result)
         }
     }
 
@@ -593,23 +633,29 @@ class CatalogRepositoryImpl @Inject constructor(
      * with the *previous* account's data. Bumping the generation makes that late result
      * unpublishable and stops any collector arriving from here on from joining that attempt. See
      * [loadCategories], "Invalidation generations".
+     *
+     * The generation is bumped **before** the memo is cleared, and that order is load-bearing: with
+     * the reverse order an in-flight attempt could slip between the two statements, still read its
+     * own generation as current, and write the stale result back into a memo that has just been
+     * emptied. Bumping first leaves only two outcomes — either the attempt wrote before the bump and
+     * the clear that follows removes it, or it checks after the bump and refuses to write at all.
      */
     override fun invalidateCache(type: ContentType) {
         when (type) {
             ContentType.LIVE -> {
+                liveCategoriesFetch.generation.incrementAndGet()
                 cachedLiveCategories = null
                 cachedAllChannels = null
-                liveCategoriesFetch.generation.incrementAndGet()
             }
             ContentType.MOVIE -> {
+                vodCategoriesFetch.generation.incrementAndGet()
                 cachedVodCategories = null
                 cachedAllMovies = null
-                vodCategoriesFetch.generation.incrementAndGet()
             }
             ContentType.SERIES -> {
+                seriesCategoriesFetch.generation.incrementAndGet()
                 cachedSeriesCategories = null
                 cachedAllSeries = null
-                seriesCategoriesFetch.generation.incrementAndGet()
             }
         }
     }
