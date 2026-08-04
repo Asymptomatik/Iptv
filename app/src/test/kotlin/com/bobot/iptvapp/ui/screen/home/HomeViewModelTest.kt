@@ -1597,28 +1597,31 @@ class HomeViewModelTest {
     }
 
     @Test
-    fun `a tab load subscribes the categories Flow twice, on purpose`() {
-        // buildRowsFlow keeps observing (so a later categories emission still re-derives the tab's
-        // available languages) while LoadCategoryScopedCatalogUseCase only awaits the first terminal
-        // value. Both subscriptions are intended; de-duplicating the resulting network request is
-        // CatalogRepositoryImpl's job (see its "Concurrent first fetches" section and
-        // CatalogRepositoryImplTest), not this ViewModel's — funnelling both through a shared
-        // StateFlow here would delay the items load by one dispatch and make the "Ma liste" rows
-        // miss the tab's already-loaded items. This test pins that division of responsibility.
-        var subscriptions = 0
-        every { catalogRepository.observeLiveCategories() } returns flow {
-            subscriptions++
+    fun `a cold categories Flow still lets My List resolve from loaded items, with no detail fallback`() {
+        // Same guarantee as `MOVIE favorite already present in a loaded category …`, but against a
+        // COLD categories Flow — the shape the real repository returns, and the one whose timing is
+        // fragile. Deliberately not asserting how many times the Flow is subscribed: that is an
+        // implementation detail, and de-duplicating the resulting network request belongs to
+        // CatalogRepositoryImpl (see its "Concurrent first fetches" section). What must hold is this
+        // timing guarantee — routing the tab's two consumers through a shared StateFlow inside the
+        // ViewModel delays the items load by one dispatch, and My List then misses the loaded items
+        // and issues a getMovieDetail per entry.
+        every { catalogRepository.observeVodCategories() } returns flow {
             emit(Resource.Loading)
-            emit(Resource.Success(listOf(sportCategory)))
+            emit(Resource.Success(listOf(actionCategory)))
         }
-        stubLiveChannels("1", listOf(chan1))
+        stubMovies("10", listOf(movie1))
         createViewModel()
 
-        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        favoritesFlow.value = listOf(
+            FavoriteItem(profileId = "profile-1", contentId = "m1", contentType = ContentType.MOVIE, addedAt = 1000),
+        )
         testDispatcher.scheduler.runCurrent()
 
-        assertEquals(2, subscriptions)
-        assertEquals(1, viewModel.uiState.value.liveRows.size)
+        assertEquals(1, viewModel.uiState.value.movieRows.size)
+        assertEquals(1, viewModel.uiState.value.myListRows.first().items.size)
+        coVerify(exactly = 0) { catalogRepository.getMovieDetail(any()) }
     }
 
     @Test

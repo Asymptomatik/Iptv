@@ -473,7 +473,9 @@ class HomeViewModel @Inject constructor(
      * to collect [buildRowsFlow] for its tab, so the default is always known before that tab's first
      * categories emission is processed.
      *
-     * **Guarantee: always completed, and [init]'s coroutine never crashes because of this read.**
+     * **Guarantee: always completed, and no ordinary [Exception] from these reads can crash [init]'s
+     * coroutine.** Cancellation and [Error] still propagate — the `finally` completes this deferred
+     * before they do, so no consumer is left suspended, but the rest of [init] does not run.
      * [init] performs its three preference/credentials reads through [readOrNull], which wraps **each
      * read individually** in a `try/catch` that rethrows [CancellationException] (never swallow
      * cooperative cancellation) but absorbs any other [Exception] (e.g. a DataStore `IOException` on
@@ -738,19 +740,22 @@ class HomeViewModel @Inject constructor(
      *
      * ## Two subscriptions to [categoriesFlow], one network request
      * [categoriesFlow] is a **cold** `flow { }` and is collected twice here — by [buildRowsFlow]'s
-     * `combine` and by [loadCategoryScopedCatalogUseCase]'s `first { }`, started concurrently. Both
-     * subscriptions are deliberate and must stay: [buildRowsFlow] keeps observing so a later
-     * categories emission still re-derives the tab's available languages, while the use-case only
-     * needs the first terminal value.
+     * `combine` and by [loadCategoryScopedCatalogUseCase]'s `first { }`, started concurrently.
+     * [buildRowsFlow] stays subscribed rather than taking a snapshot because it is written against
+     * the `Flow<Resource<List<Category>>>` interface contract, under which a later emission must
+     * still re-derive the tab's available languages. `CatalogRepositoryImpl` happens not to exercise
+     * that today — its category Flows emit `Loading`, one terminal value, then complete — so the
+     * behaviour is only observable through a test double. It is a contract this ViewModel honours,
+     * not a code path production currently takes.
      *
      * De-duplicating the resulting *network request* is `CatalogRepositoryImpl`'s job, not this
-     * function's — see its "Concurrent first fetches" section, where a per-content-type `Mutex` makes
-     * concurrent collectors share a single fetch. Fixing it there rather than here is deliberate: it
-     * covers every consumer (Search collects the same Flows) and, critically, changes no timing in
-     * this ViewModel. Funnelling both consumers through a shared `StateFlow` here would delay the
-     * terminal value by one dispatch, and that delay is observable — the "Ma liste"/"Reprendre" rows
-     * resolve their entries against the tab's *already loaded* items, so a late items load makes them
-     * miss and fall back to a per-item `getMovieDetail`/`getSeriesDetail` request.
+     * function's — see its "Concurrent first fetches" section, where concurrent collectors share a
+     * single attempt. Fixing it there rather than here is deliberate: it covers every consumer, and
+     * critically it changes no timing in this ViewModel. Funnelling both consumers through a shared
+     * `StateFlow` here would delay the terminal value by one dispatch, and that delay is observable —
+     * the "Ma liste"/"Reprendre" rows resolve their entries against the tab's *already loaded* items,
+     * so a late items load makes them miss and fall back to a per-item
+     * `getMovieDetail`/`getSeriesDetail` request.
      */
     private suspend fun <T> CoroutineScope.loadCatalogTab(
         contentType: ContentType,
