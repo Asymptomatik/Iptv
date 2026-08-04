@@ -10,43 +10,48 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 
 /**
- * In-memory fake implementation of [CatalogCacheDao], deliberately mirroring the interface's
- * **current** shape — a single unpartitioned store per entity type, with no notion of account.
+ * In-memory fake implementation of [CatalogCacheDao], mirroring the interface's real
+ * (Task 3) shape — every entity carries an `accountKey`, and every store is keyed by the
+ * composite `(accountKey, <natural key>)`, exactly matching the composite primary key
+ * declared on each production entity.
  *
  * This is the fixture used by [com.bobot.iptvapp.data.repository.CatalogRepositoryAccountPartitionTest]
- * to reproduce (and, in a later task, verify the fix for) the cross-account cache bleed bug: two
- * different Xtream accounts sharing the same Room tables means data written under one account is
- * visible to another. A real Room database is deliberately not used here — this project runs JVM
- * unit tests without Robolectric, so no test can instantiate an actual Room database; this fake
- * stands in for it.
+ * to verify the cross-account Room cache partitioning: two different Xtream accounts never
+ * see each other's cached rows, and a returning account (same `accountKey`) finds its own
+ * data intact. A real Room database is deliberately not used here — this project runs JVM
+ * unit tests without Robolectric, so no test can instantiate an actual Room database; this
+ * fake stands in for it.
  *
- * Storage is a set of plain [MutableMap]s keyed by each entity's natural key, honoring the same
- * filters ([observeCategoriesByType]'s `contentType`, `*ByCategory`'s `categoryId`, `*BySeriesId`'s
- * `seriesId`, one-shot `getXById`'s `id`) as the production Room queries. `observe*` methods return
- * a [Flow] via [flowOf] over a snapshot of the current in-memory state at call time — not a live
- * query — which is sufficient here since every caller in [CatalogRepositoryImpl] collects with
+ * Storage is a set of plain [MutableMap]s keyed by `accountKey` plus each entity's natural
+ * key. `observe*` methods return a [Flow] via [flowOf] over a snapshot of the current
+ * in-memory state at call time — not a live query — which is sufficient here since every
+ * caller in [com.bobot.iptvapp.data.repository.CatalogRepositoryImpl] collects with
  * `.first()` immediately after invoking the method.
  */
 class FakeCatalogCacheDao : CatalogCacheDao {
 
-    private val categories = mutableMapOf<String, CategoryEntity>()
-    private val channels = mutableMapOf<String, ChannelEntity>()
-    private val movies = mutableMapOf<String, MovieEntity>()
-    private val series = mutableMapOf<String, SeriesEntity>()
-    private val seasons = mutableMapOf<Pair<String, Int>, SeasonEntity>()
-    private val episodes = mutableMapOf<String, EpisodeEntity>()
+    private val categories = mutableMapOf<Pair<String, String>, CategoryEntity>()
+    private val channels = mutableMapOf<Pair<String, String>, ChannelEntity>()
+    private val movies = mutableMapOf<Pair<String, String>, MovieEntity>()
+    private val series = mutableMapOf<Pair<String, String>, SeriesEntity>()
+    private val seasons = mutableMapOf<Triple<String, String, Int>, SeasonEntity>()
+    private val episodes = mutableMapOf<Pair<String, String>, EpisodeEntity>()
 
     // ── Categories ────────────────────────────────────────────────────────────
 
     override suspend fun upsertCategories(categories: List<CategoryEntity>) {
-        categories.forEach { this.categories[it.id] = it }
+        categories.forEach { this.categories[it.accountKey to it.id] = it }
     }
 
-    override fun observeCategoriesByType(contentType: String): Flow<List<CategoryEntity>> =
-        flowOf(categories.values.filter { it.contentType.name == contentType }.sortedBy { it.name })
+    override fun observeCategoriesByType(accountKey: String, contentType: String): Flow<List<CategoryEntity>> =
+        flowOf(
+            categories.values
+                .filter { it.accountKey == accountKey && it.contentType.name == contentType }
+                .sortedBy { it.name },
+        )
 
-    override suspend fun clearCategoriesByType(contentType: String) {
-        categories.values.removeAll { it.contentType.name == contentType }
+    override suspend fun clearCategoriesByType(accountKey: String, contentType: String) {
+        categories.values.removeAll { it.accountKey == accountKey && it.contentType.name == contentType }
     }
 
     override suspend fun clearAllCategories() {
@@ -56,14 +61,18 @@ class FakeCatalogCacheDao : CatalogCacheDao {
     // ── Channels ──────────────────────────────────────────────────────────────
 
     override suspend fun upsertChannels(channels: List<ChannelEntity>) {
-        channels.forEach { this.channels[it.id] = it }
+        channels.forEach { this.channels[it.accountKey to it.id] = it }
     }
 
-    override fun observeAllChannels(): Flow<List<ChannelEntity>> =
-        flowOf(channels.values.sortedBy { it.name })
+    override fun observeAllChannels(accountKey: String): Flow<List<ChannelEntity>> =
+        flowOf(channels.values.filter { it.accountKey == accountKey }.sortedBy { it.name })
 
-    override fun observeChannelsByCategory(categoryId: String): Flow<List<ChannelEntity>> =
-        flowOf(channels.values.filter { it.categoryId == categoryId }.sortedBy { it.name })
+    override fun observeChannelsByCategory(accountKey: String, categoryId: String): Flow<List<ChannelEntity>> =
+        flowOf(
+            channels.values
+                .filter { it.accountKey == accountKey && it.categoryId == categoryId }
+                .sortedBy { it.name },
+        )
 
     override suspend fun clearChannels() {
         channels.clear()
@@ -72,16 +81,20 @@ class FakeCatalogCacheDao : CatalogCacheDao {
     // ── Movies ────────────────────────────────────────────────────────────────
 
     override suspend fun upsertMovies(movies: List<MovieEntity>) {
-        movies.forEach { this.movies[it.id] = it }
+        movies.forEach { this.movies[it.accountKey to it.id] = it }
     }
 
-    override fun observeAllMovies(): Flow<List<MovieEntity>> =
-        flowOf(movies.values.sortedBy { it.title })
+    override fun observeAllMovies(accountKey: String): Flow<List<MovieEntity>> =
+        flowOf(movies.values.filter { it.accountKey == accountKey }.sortedBy { it.title })
 
-    override fun observeMoviesByCategory(categoryId: String): Flow<List<MovieEntity>> =
-        flowOf(movies.values.filter { it.categoryId == categoryId }.sortedBy { it.title })
+    override fun observeMoviesByCategory(accountKey: String, categoryId: String): Flow<List<MovieEntity>> =
+        flowOf(
+            movies.values
+                .filter { it.accountKey == accountKey && it.categoryId == categoryId }
+                .sortedBy { it.title },
+        )
 
-    override suspend fun getMovieById(id: String): MovieEntity? = movies[id]
+    override suspend fun getMovieById(accountKey: String, id: String): MovieEntity? = movies[accountKey to id]
 
     override suspend fun clearMovies() {
         movies.clear()
@@ -90,16 +103,20 @@ class FakeCatalogCacheDao : CatalogCacheDao {
     // ── Series ────────────────────────────────────────────────────────────────
 
     override suspend fun upsertSeries(series: List<SeriesEntity>) {
-        series.forEach { this.series[it.id] = it }
+        series.forEach { this.series[it.accountKey to it.id] = it }
     }
 
-    override fun observeAllSeries(): Flow<List<SeriesEntity>> =
-        flowOf(series.values.sortedBy { it.title })
+    override fun observeAllSeries(accountKey: String): Flow<List<SeriesEntity>> =
+        flowOf(series.values.filter { it.accountKey == accountKey }.sortedBy { it.title })
 
-    override fun observeSeriesByCategory(categoryId: String): Flow<List<SeriesEntity>> =
-        flowOf(series.values.filter { it.categoryId == categoryId }.sortedBy { it.title })
+    override fun observeSeriesByCategory(accountKey: String, categoryId: String): Flow<List<SeriesEntity>> =
+        flowOf(
+            series.values
+                .filter { it.accountKey == accountKey && it.categoryId == categoryId }
+                .sortedBy { it.title },
+        )
 
-    override suspend fun getSeriesById(id: String): SeriesEntity? = series[id]
+    override suspend fun getSeriesById(accountKey: String, id: String): SeriesEntity? = series[accountKey to id]
 
     override suspend fun clearSeries() {
         series.clear()
@@ -108,14 +125,18 @@ class FakeCatalogCacheDao : CatalogCacheDao {
     // ── Seasons ───────────────────────────────────────────────────────────────
 
     override suspend fun upsertSeasons(seasons: List<SeasonEntity>) {
-        seasons.forEach { this.seasons[it.seriesId to it.seasonNumber] = it }
+        seasons.forEach { this.seasons[Triple(it.accountKey, it.seriesId, it.seasonNumber)] = it }
     }
 
-    override fun observeSeasonsBySeriesId(seriesId: String): Flow<List<SeasonEntity>> =
-        flowOf(seasons.values.filter { it.seriesId == seriesId }.sortedBy { it.seasonNumber })
+    override fun observeSeasonsBySeriesId(accountKey: String, seriesId: String): Flow<List<SeasonEntity>> =
+        flowOf(
+            seasons.values
+                .filter { it.accountKey == accountKey && it.seriesId == seriesId }
+                .sortedBy { it.seasonNumber },
+        )
 
-    override suspend fun clearSeasonsBySeriesId(seriesId: String) {
-        seasons.keys.removeAll { it.first == seriesId }
+    override suspend fun clearSeasonsBySeriesId(accountKey: String, seriesId: String) {
+        seasons.keys.removeAll { it.first == accountKey && it.second == seriesId }
     }
 
     override suspend fun clearAllSeasons() {
@@ -125,30 +146,31 @@ class FakeCatalogCacheDao : CatalogCacheDao {
     // ── Episodes ──────────────────────────────────────────────────────────────
 
     override suspend fun upsertEpisodes(episodes: List<EpisodeEntity>) {
-        episodes.forEach { this.episodes[it.id] = it }
+        episodes.forEach { this.episodes[it.accountKey to it.id] = it }
     }
 
     override fun observeEpisodesBySeriesAndSeason(
+        accountKey: String,
         seriesId: String,
         seasonNumber: Int,
     ): Flow<List<EpisodeEntity>> =
         flowOf(
             episodes.values
-                .filter { it.seriesId == seriesId && it.seasonNumber == seasonNumber }
+                .filter { it.accountKey == accountKey && it.seriesId == seriesId && it.seasonNumber == seasonNumber }
                 .sortedBy { it.episodeNumber },
         )
 
-    override fun observeEpisodesBySeriesId(seriesId: String): Flow<List<EpisodeEntity>> =
+    override fun observeEpisodesBySeriesId(accountKey: String, seriesId: String): Flow<List<EpisodeEntity>> =
         flowOf(
             episodes.values
-                .filter { it.seriesId == seriesId }
+                .filter { it.accountKey == accountKey && it.seriesId == seriesId }
                 .sortedWith(compareBy({ it.seasonNumber }, { it.episodeNumber })),
         )
 
-    override suspend fun getEpisodeById(id: String): EpisodeEntity? = episodes[id]
+    override suspend fun getEpisodeById(accountKey: String, id: String): EpisodeEntity? = episodes[accountKey to id]
 
-    override suspend fun clearEpisodesBySeriesId(seriesId: String) {
-        episodes.values.removeAll { it.seriesId == seriesId }
+    override suspend fun clearEpisodesBySeriesId(accountKey: String, seriesId: String) {
+        episodes.values.removeAll { it.accountKey == accountKey && it.seriesId == seriesId }
     }
 
     override suspend fun clearAllEpisodes() {

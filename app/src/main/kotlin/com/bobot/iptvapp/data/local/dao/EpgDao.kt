@@ -13,6 +13,13 @@ import kotlinx.coroutines.flow.Flow
  * cached locally for instant display without network round-trips during live playback
  * or channel browsing.
  *
+ * ## Account partitioning (schema v3)
+ * [EpgProgramEntity] carries an `accountKey` column as part of its composite primary
+ * key (see [com.bobot.iptvapp.domain.util.accountKeyOf]). All read queries and all
+ * targeted deletes below accept `accountKey` and filter on it. [clearAll] remains
+ * global and unparameterised — it backs the full-logout purge, not per-account
+ * isolation.
+ *
  * ## Pruning
  * EPG programmes accumulate over time. Call [pruneOldPrograms] periodically (e.g. on
  * app foreground or after a refresh) to delete rows whose [EpgProgramEntity.endMillis]
@@ -28,56 +35,60 @@ interface EpgDao {
     /**
      * Inserts or updates a batch of EPG programme entries.
      *
-     * Uses [Upsert] (INSERT OR REPLACE on the composite primary key `channelId + startMillis`).
-     * Re-upserting the same programme is idempotent.
+     * Uses [Upsert] (INSERT OR REPLACE on the composite primary key
+     * `accountKey + channelId + startMillis`). Re-upserting the same programme is
+     * idempotent.
      */
     @Upsert
     suspend fun upsert(programs: List<EpgProgramEntity>)
 
     /**
-     * Observes all EPG entries for the given [channelId], ordered by start time ascending
-     * (chronological order). Includes both past and future programmes.
+     * Observes all EPG entries for [accountKey] and the given [channelId], ordered by
+     * start time ascending (chronological order). Includes both past and future
+     * programmes.
      *
      * [channelId] matches [com.bobot.iptvapp.domain.model.Channel.epgChannelId].
      */
     @Query("""
         SELECT * FROM epg_programs
-        WHERE channelId = :channelId
+        WHERE accountKey = :accountKey
+          AND channelId   = :channelId
         ORDER BY startMillis ASC
     """)
-    fun observeByChannelId(channelId: String): Flow<List<EpgProgramEntity>>
+    fun observeByChannelId(accountKey: String, channelId: String): Flow<List<EpgProgramEntity>>
 
     /**
-     * Returns the currently airing programme for a [channelId] at [nowMillis].
-     * Returns `null` when no programme covers the given instant.
+     * Returns the currently airing programme for [accountKey] and a [channelId] at
+     * [nowMillis]. Returns `null` when no programme covers the given instant.
      */
     @Query("""
         SELECT * FROM epg_programs
-        WHERE channelId   = :channelId
+        WHERE accountKey  = :accountKey
+          AND channelId   = :channelId
           AND startMillis <= :nowMillis
           AND endMillis    > :nowMillis
         LIMIT 1
     """)
-    suspend fun getCurrentProgram(channelId: String, nowMillis: Long): EpgProgramEntity?
+    suspend fun getCurrentProgram(accountKey: String, channelId: String, nowMillis: Long): EpgProgramEntity?
 
     /**
-     * Deletes all EPG entries whose [EpgProgramEntity.endMillis] is strictly before
-     * [beforeMillis].
+     * Deletes all EPG entries for [accountKey] whose [EpgProgramEntity.endMillis] is
+     * strictly before [beforeMillis].
      *
-     * Typical usage: `pruneOldPrograms(System.currentTimeMillis())` removes all
-     * already-aired programmes.
+     * Typical usage: `pruneOldPrograms(accountKey, System.currentTimeMillis())` removes
+     * all already-aired programmes for that account.
      */
-    @Query("DELETE FROM epg_programs WHERE endMillis < :beforeMillis")
-    suspend fun pruneOldPrograms(beforeMillis: Long)
+    @Query("DELETE FROM epg_programs WHERE accountKey = :accountKey AND endMillis < :beforeMillis")
+    suspend fun pruneOldPrograms(accountKey: String, beforeMillis: Long)
 
     /**
-     * Deletes all EPG entries for the given [channelId].
+     * Deletes all EPG entries for [accountKey] and the given [channelId].
      * Useful when re-fetching EPG for a specific channel.
      */
-    @Query("DELETE FROM epg_programs WHERE channelId = :channelId")
-    suspend fun clearByChannelId(channelId: String)
+    @Query("DELETE FROM epg_programs WHERE accountKey = :accountKey AND channelId = :channelId")
+    suspend fun clearByChannelId(accountKey: String, channelId: String)
 
-    /** Deletes all EPG programme rows. */
+    /** Deletes all EPG programme rows, across every account. */
     @Query("DELETE FROM epg_programs")
     suspend fun clearAll()
 }

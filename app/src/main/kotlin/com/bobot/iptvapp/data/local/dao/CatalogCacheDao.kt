@@ -30,6 +30,18 @@ import kotlinx.coroutines.flow.Flow
  * the conversion. The TEXT column value in the database is the enum name written by
  * [com.bobot.iptvapp.data.local.Converters].
  *
+ * ## Account partitioning (schema v3)
+ * Every entity in this DAO carries an `accountKey` column as part of its composite
+ * primary key (see [com.bobot.iptvapp.domain.util.accountKeyOf]). All read queries and
+ * all targeted deletes below accept `accountKey` and filter on it, so that content cached
+ * under one Xtream account never surfaces when reading under another. [Upsert] write
+ * methods do not need an explicit `accountKey` parameter — it travels on the entity
+ * itself, set by the caller (repository layer) before persisting.
+ *
+ * The "clear entire table" methods ([clearAllCategories], [clearChannels], [clearMovies],
+ * [clearSeries], [clearAllSeasons], [clearAllEpisodes]) remain global and unparameterised
+ * by design — they back the full-logout purge, not per-account isolation.
+ *
  * ## Migration policy
  * All tables in this DAO are catalog caches. Destructive fallback is acceptable for
  * cache tables in the event of a migration gap — the next app open re-populates them.
@@ -38,162 +50,171 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface CatalogCacheDao {
 
-    // ── Categories ────────────────────────────────────────────────────────────
+    // ── Categories ──────────────────────────────────────────────────────────
 
     /** Inserts or refreshes a list of categories. */
     @Upsert
     suspend fun upsertCategories(categories: List<CategoryEntity>)
 
     /**
-     * Observes categories whose `contentType` column equals the given [contentType] name,
-     * ordered alphabetically by name.
+     * Observes categories for [accountKey] whose `contentType` column equals the given
+     * [contentType] name, ordered alphabetically by name.
      *
      * @param contentType [com.bobot.iptvapp.domain.model.ContentType] enum name,
      *   e.g. `ContentType.LIVE.name`.
      */
-    @Query("SELECT * FROM categories WHERE contentType = :contentType ORDER BY name ASC")
-    fun observeCategoriesByType(contentType: String): Flow<List<CategoryEntity>>
+    @Query("SELECT * FROM categories WHERE accountKey = :accountKey AND contentType = :contentType ORDER BY name ASC")
+    fun observeCategoriesByType(accountKey: String, contentType: String): Flow<List<CategoryEntity>>
 
     /**
-     * Deletes all categories whose `contentType` column equals the given [contentType] name.
+     * Deletes categories for [accountKey] whose `contentType` column equals the given
+     * [contentType] name.
      *
      * @param contentType [com.bobot.iptvapp.domain.model.ContentType] enum name.
      */
-    @Query("DELETE FROM categories WHERE contentType = :contentType")
-    suspend fun clearCategoriesByType(contentType: String)
+    @Query("DELETE FROM categories WHERE accountKey = :accountKey AND contentType = :contentType")
+    suspend fun clearCategoriesByType(accountKey: String, contentType: String)
 
-    /** Deletes all category rows. */
+    /** Deletes all category rows, across every account. */
     @Query("DELETE FROM categories")
     suspend fun clearAllCategories()
 
-    // ── Channels ──────────────────────────────────────────────────────────────
+    // ── Channels ────────────────────────────────────────────────────────────
 
     /** Inserts or refreshes a list of live channels. */
     @Upsert
     suspend fun upsertChannels(channels: List<ChannelEntity>)
 
-    /** Observes all live channels alphabetically by name. */
-    @Query("SELECT * FROM channels ORDER BY name ASC")
-    fun observeAllChannels(): Flow<List<ChannelEntity>>
+    /** Observes all live channels for [accountKey], alphabetically by name. */
+    @Query("SELECT * FROM channels WHERE accountKey = :accountKey ORDER BY name ASC")
+    fun observeAllChannels(accountKey: String): Flow<List<ChannelEntity>>
 
-    /** Observes live channels belonging to the given [categoryId], alphabetically. */
-    @Query("SELECT * FROM channels WHERE categoryId = :categoryId ORDER BY name ASC")
-    fun observeChannelsByCategory(categoryId: String): Flow<List<ChannelEntity>>
+    /** Observes live channels for [accountKey] belonging to the given [categoryId], alphabetically. */
+    @Query("SELECT * FROM channels WHERE accountKey = :accountKey AND categoryId = :categoryId ORDER BY name ASC")
+    fun observeChannelsByCategory(accountKey: String, categoryId: String): Flow<List<ChannelEntity>>
 
-    /** Deletes all channel rows. */
+    /** Deletes all channel rows, across every account. */
     @Query("DELETE FROM channels")
     suspend fun clearChannels()
 
-    // ── Movies ────────────────────────────────────────────────────────────────
+    // ── Movies ──────────────────────────────────────────────────────────────
 
     /** Inserts or refreshes a list of movies. */
     @Upsert
     suspend fun upsertMovies(movies: List<MovieEntity>)
 
-    /** Observes all movies alphabetically by title. */
-    @Query("SELECT * FROM movies ORDER BY title ASC")
-    fun observeAllMovies(): Flow<List<MovieEntity>>
+    /** Observes all movies for [accountKey], alphabetically by title. */
+    @Query("SELECT * FROM movies WHERE accountKey = :accountKey ORDER BY title ASC")
+    fun observeAllMovies(accountKey: String): Flow<List<MovieEntity>>
 
-    /** Observes movies in the given [categoryId], alphabetically by title. */
-    @Query("SELECT * FROM movies WHERE categoryId = :categoryId ORDER BY title ASC")
-    fun observeMoviesByCategory(categoryId: String): Flow<List<MovieEntity>>
+    /** Observes movies for [accountKey] in the given [categoryId], alphabetically by title. */
+    @Query("SELECT * FROM movies WHERE accountKey = :accountKey AND categoryId = :categoryId ORDER BY title ASC")
+    fun observeMoviesByCategory(accountKey: String, categoryId: String): Flow<List<MovieEntity>>
 
     /**
-     * One-shot lookup of a single movie by its stream [id].
+     * One-shot lookup of a single movie for [accountKey] by its stream [id].
      * Returns `null` when the movie is not in the cache.
      */
-    @Query("SELECT * FROM movies WHERE id = :id LIMIT 1")
-    suspend fun getMovieById(id: String): MovieEntity?
+    @Query("SELECT * FROM movies WHERE accountKey = :accountKey AND id = :id LIMIT 1")
+    suspend fun getMovieById(accountKey: String, id: String): MovieEntity?
 
-    /** Deletes all movie rows. */
+    /** Deletes all movie rows, across every account. */
     @Query("DELETE FROM movies")
     suspend fun clearMovies()
 
-    // ── Series ────────────────────────────────────────────────────────────────
+    // ── Series ──────────────────────────────────────────────────────────────
 
     /** Inserts or refreshes a list of series metadata entries. */
     @Upsert
     suspend fun upsertSeries(series: List<SeriesEntity>)
 
-    /** Observes all series alphabetically by title. */
-    @Query("SELECT * FROM series ORDER BY title ASC")
-    fun observeAllSeries(): Flow<List<SeriesEntity>>
+    /** Observes all series for [accountKey], alphabetically by title. */
+    @Query("SELECT * FROM series WHERE accountKey = :accountKey ORDER BY title ASC")
+    fun observeAllSeries(accountKey: String): Flow<List<SeriesEntity>>
 
-    /** Observes series in the given [categoryId], alphabetically by title. */
-    @Query("SELECT * FROM series WHERE categoryId = :categoryId ORDER BY title ASC")
-    fun observeSeriesByCategory(categoryId: String): Flow<List<SeriesEntity>>
+    /** Observes series for [accountKey] in the given [categoryId], alphabetically by title. */
+    @Query("SELECT * FROM series WHERE accountKey = :accountKey AND categoryId = :categoryId ORDER BY title ASC")
+    fun observeSeriesByCategory(accountKey: String, categoryId: String): Flow<List<SeriesEntity>>
 
     /**
-     * One-shot lookup of a single series by its [id].
+     * One-shot lookup of a single series for [accountKey] by its [id].
      * Returns `null` when the series is not in the cache.
      */
-    @Query("SELECT * FROM series WHERE id = :id LIMIT 1")
-    suspend fun getSeriesById(id: String): SeriesEntity?
+    @Query("SELECT * FROM series WHERE accountKey = :accountKey AND id = :id LIMIT 1")
+    suspend fun getSeriesById(accountKey: String, id: String): SeriesEntity?
 
-    /** Deletes all series metadata rows. */
+    /** Deletes all series metadata rows, across every account. */
     @Query("DELETE FROM series")
     suspend fun clearSeries()
 
-    // ── Seasons ───────────────────────────────────────────────────────────────
+    // ── Seasons ─────────────────────────────────────────────────────────────
 
     /** Inserts or refreshes a list of seasons. */
     @Upsert
     suspend fun upsertSeasons(seasons: List<SeasonEntity>)
 
     /**
-     * Observes seasons for a specific [seriesId], ordered by season number ascending.
+     * Observes seasons for [accountKey] and a specific [seriesId], ordered by season
+     * number ascending.
      */
-    @Query("SELECT * FROM seasons WHERE seriesId = :seriesId ORDER BY seasonNumber ASC")
-    fun observeSeasonsBySeriesId(seriesId: String): Flow<List<SeasonEntity>>
+    @Query("SELECT * FROM seasons WHERE accountKey = :accountKey AND seriesId = :seriesId ORDER BY seasonNumber ASC")
+    fun observeSeasonsBySeriesId(accountKey: String, seriesId: String): Flow<List<SeasonEntity>>
 
-    /** Deletes all seasons belonging to the given [seriesId]. */
-    @Query("DELETE FROM seasons WHERE seriesId = :seriesId")
-    suspend fun clearSeasonsBySeriesId(seriesId: String)
+    /** Deletes seasons for [accountKey] belonging to the given [seriesId]. */
+    @Query("DELETE FROM seasons WHERE accountKey = :accountKey AND seriesId = :seriesId")
+    suspend fun clearSeasonsBySeriesId(accountKey: String, seriesId: String)
 
-    /** Deletes all season rows. */
+    /** Deletes all season rows, across every account. */
     @Query("DELETE FROM seasons")
     suspend fun clearAllSeasons()
 
-    // ── Episodes ──────────────────────────────────────────────────────────────
+    // ── Episodes ────────────────────────────────────────────────────────────
 
     /** Inserts or refreshes a list of episodes. */
     @Upsert
     suspend fun upsertEpisodes(episodes: List<EpisodeEntity>)
 
     /**
-     * Observes episodes for a specific series and season, ordered by episode number.
+     * Observes episodes for [accountKey] and a specific series and season, ordered by
+     * episode number.
      */
     @Query("""
         SELECT * FROM episodes
-        WHERE seriesId    = :seriesId
-          AND seasonNumber = :seasonNumber
+        WHERE accountKey   = :accountKey
+          AND seriesId      = :seriesId
+          AND seasonNumber  = :seasonNumber
         ORDER BY episodeNumber ASC
     """)
-    fun observeEpisodesBySeriesAndSeason(seriesId: String, seasonNumber: Int): Flow<List<EpisodeEntity>>
+    fun observeEpisodesBySeriesAndSeason(
+        accountKey: String,
+        seriesId: String,
+        seasonNumber: Int,
+    ): Flow<List<EpisodeEntity>>
 
     /**
-     * Observes all episodes for a series across all seasons, ordered for sequential
-     * playback (season ASC, episode ASC).
+     * Observes all episodes for [accountKey] and a series across all seasons, ordered
+     * for sequential playback (season ASC, episode ASC).
      */
     @Query("""
         SELECT * FROM episodes
-        WHERE seriesId = :seriesId
+        WHERE accountKey = :accountKey
+          AND seriesId    = :seriesId
         ORDER BY seasonNumber ASC, episodeNumber ASC
     """)
-    fun observeEpisodesBySeriesId(seriesId: String): Flow<List<EpisodeEntity>>
+    fun observeEpisodesBySeriesId(accountKey: String, seriesId: String): Flow<List<EpisodeEntity>>
 
     /**
-     * One-shot lookup of a single episode by its stream [id].
+     * One-shot lookup of a single episode for [accountKey] by its stream [id].
      * Returns `null` when the episode is not in the cache.
      */
-    @Query("SELECT * FROM episodes WHERE id = :id LIMIT 1")
-    suspend fun getEpisodeById(id: String): EpisodeEntity?
+    @Query("SELECT * FROM episodes WHERE accountKey = :accountKey AND id = :id LIMIT 1")
+    suspend fun getEpisodeById(accountKey: String, id: String): EpisodeEntity?
 
-    /** Deletes all episodes belonging to the given [seriesId]. */
-    @Query("DELETE FROM episodes WHERE seriesId = :seriesId")
-    suspend fun clearEpisodesBySeriesId(seriesId: String)
+    /** Deletes episodes for [accountKey] belonging to the given [seriesId]. */
+    @Query("DELETE FROM episodes WHERE accountKey = :accountKey AND seriesId = :seriesId")
+    suspend fun clearEpisodesBySeriesId(accountKey: String, seriesId: String)
 
-    /** Deletes all episode rows. */
+    /** Deletes all episode rows, across every account. */
     @Query("DELETE FROM episodes")
     suspend fun clearAllEpisodes()
 }

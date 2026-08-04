@@ -70,7 +70,7 @@ import com.bobot.iptvapp.data.local.entity.SeriesEntity
         EpgProgramEntity::class,
         DownloadEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)

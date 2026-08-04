@@ -19,8 +19,15 @@ fun EpgProgramEntity.toDomain(): EpgProgram = EpgProgram(
     endMillis = endMillis,
 )
 
-/** Maps a domain [EpgProgram] to the [EpgProgramEntity] for Room cache persistence. */
-fun EpgProgram.toEntity(): EpgProgramEntity = EpgProgramEntity(
+/**
+ * Maps a domain [EpgProgram] to the [EpgProgramEntity] for Room cache persistence.
+ *
+ * @param accountKey The owning account's cache partition key (see
+ *   [com.bobot.iptvapp.domain.util.accountKeyOf]), part of the entity's composite
+ *   primary key.
+ */
+fun EpgProgram.toEntity(accountKey: String): EpgProgramEntity = EpgProgramEntity(
+    accountKey = accountKey,
     channelId = channelId,
     title = title,
     description = description,
@@ -32,4 +39,4 @@ fun EpgProgram.toEntity(): EpgProgramEntity = EpgProgramEntity(
 fun List<EpgProgramEntity>.toDomain(): List<EpgProgram> = map { it.toDomain() }
 
 /** Convenience extension to map a list of [EpgProgram]s. */
-fun List<EpgProgram>.toEntity(): List<EpgProgramEntity> = map { it.toEntity() }
+fun List<EpgProgram>.toEntity(accountKey: String): List<EpgProgramEntity> = map { it.toEntity(accountKey) }

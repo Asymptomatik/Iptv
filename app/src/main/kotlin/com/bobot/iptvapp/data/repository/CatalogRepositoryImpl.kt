@@ -17,6 +17,7 @@ import com.bobot.iptvapp.domain.model.Season
 import com.bobot.iptvapp.domain.model.Series
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.util.Resource
+import com.bobot.iptvapp.domain.util.accountKeyOf
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
@@ -83,6 +84,18 @@ import javax.inject.Inject
  * gap left since Task 10: the `seasons`/`episodes` tables existed but were never written
  * to. [getCachedEpisodeWithSeries] reads this data back to resolve a "Continue Watching"
  * entry for series content without a network round-trip.
+ *
+ * ## Account partitioning (Task 3 carry-forward)
+ * Every Room read and write in this class is scoped to the currently configured Xtream
+ * account via [currentAccountKey], resolved fresh on each operation from
+ * [credentialsProvider]`.getCredentials()`. This is a deliberate choice over caching the
+ * account key in a field: resolving per-operation avoids any initialization-order race
+ * with the `init {}` block's credentials observer, and sidesteps the `drop(1)` on
+ * [CredentialsProvider.observeCredentials] entirely (that flow is only used for
+ * *invalidating* the in-memory session cache, never for resolving the account key). When
+ * [currentAccountKey] returns `null` (no credentials yet, e.g. before onboarding or right
+ * after logout), Room is not touched at all: reads behave as an empty cache (preserving
+ * [Resource.Error] on the fallback path) and writes are silently skipped.
  *
  * ## Dispatcher
  * All data source calls run on [ioDispatcher] (default: [kotlinx.coroutines.Dispatchers.IO])
@@ -225,16 +238,19 @@ class CatalogRepositoryImpl @Inject constructor(
 
     override fun getLiveChannels(categoryId: String?): Flow<Resource<List<Channel>>> = flow {
         emit(Resource.Loading)
+        val accountKey = currentAccountKey()
         if (categoryId == null) {
             cachedAllChannels?.let { emit(Resource.Success(it)); return@flow }
             try {
                 val result = dataSource.getLiveChannels(null)
                 cachedAllChannels = result
-                persistQuietly { catalogCacheDao.upsertChannels(result.toEntity()) }
+                persistQuietly(accountKey) { key -> catalogCacheDao.upsertChannels(result.toEntity(key)) }
                 emit(Resource.Success(result))
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
-                emitFromRoomCacheOrError(t) { catalogCacheDao.observeAllChannels().first().toDomain() }
+                emitFromRoomCacheOrError(accountKey, t) { key ->
+                    catalogCacheDao.observeAllChannels(key).first().toDomain()
+                }
             }
         } else {
             // Derive from the cached full list when available to avoid a redundant
@@ -245,12 +261,12 @@ class CatalogRepositoryImpl @Inject constructor(
             } else {
                 try {
                     val result = dataSource.getLiveChannels(categoryId)
-                    persistQuietly { catalogCacheDao.upsertChannels(result.toEntity()) }
+                    persistQuietly(accountKey) { key -> catalogCacheDao.upsertChannels(result.toEntity(key)) }
                     emit(Resource.Success(result))
                 } catch (t: Throwable) {
                     rethrowIfCancellation(t)
-                    emitFromRoomCacheOrError(t) {
-                        catalogCacheDao.observeChannelsByCategory(categoryId).first().toDomain()
+                    emitFromRoomCacheOrError(accountKey, t) { key ->
+                        catalogCacheDao.observeChannelsByCategory(key, categoryId).first().toDomain()
                     }
                 }
             }
@@ -259,16 +275,19 @@ class CatalogRepositoryImpl @Inject constructor(
 
     override fun getMovies(categoryId: String?): Flow<Resource<List<Movie>>> = flow {
         emit(Resource.Loading)
+        val accountKey = currentAccountKey()
         if (categoryId == null) {
             cachedAllMovies?.let { emit(Resource.Success(it)); return@flow }
             try {
                 val result = dataSource.getMovies(null)
                 cachedAllMovies = result
-                persistQuietly { catalogCacheDao.upsertMovies(result.toEntity()) }
+                persistQuietly(accountKey) { key -> catalogCacheDao.upsertMovies(result.toEntity(key)) }
                 emit(Resource.Success(result))
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
-                emitFromRoomCacheOrError(t) { catalogCacheDao.observeAllMovies().first().toDomain() }
+                emitFromRoomCacheOrError(accountKey, t) { key ->
+                    catalogCacheDao.observeAllMovies(key).first().toDomain()
+                }
             }
         } else {
             val fromCache = cachedAllMovies?.filter { it.categoryId == categoryId }
@@ -277,12 +296,12 @@ class CatalogRepositoryImpl @Inject constructor(
             } else {
                 try {
                     val result = dataSource.getMovies(categoryId)
-                    persistQuietly { catalogCacheDao.upsertMovies(result.toEntity()) }
+                    persistQuietly(accountKey) { key -> catalogCacheDao.upsertMovies(result.toEntity(key)) }
                     emit(Resource.Success(result))
                 } catch (t: Throwable) {
                     rethrowIfCancellation(t)
-                    emitFromRoomCacheOrError(t) {
-                        catalogCacheDao.observeMoviesByCategory(categoryId).first().toDomain()
+                    emitFromRoomCacheOrError(accountKey, t) { key ->
+                        catalogCacheDao.observeMoviesByCategory(key, categoryId).first().toDomain()
                     }
                 }
             }
@@ -291,16 +310,19 @@ class CatalogRepositoryImpl @Inject constructor(
 
     override fun getSeriesList(categoryId: String?): Flow<Resource<List<Series>>> = flow {
         emit(Resource.Loading)
+        val accountKey = currentAccountKey()
         if (categoryId == null) {
             cachedAllSeries?.let { emit(Resource.Success(it)); return@flow }
             try {
                 val result = dataSource.getSeriesList(null)
                 cachedAllSeries = result
-                persistQuietly { catalogCacheDao.upsertSeries(result.toEntity()) }
+                persistQuietly(accountKey) { key -> catalogCacheDao.upsertSeries(result.toEntity(key)) }
                 emit(Resource.Success(result))
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
-                emitFromRoomCacheOrError(t) { catalogCacheDao.observeAllSeries().first().toDomain() }
+                emitFromRoomCacheOrError(accountKey, t) { key ->
+                    catalogCacheDao.observeAllSeries(key).first().toDomain()
+                }
             }
         } else {
             val fromCache = cachedAllSeries?.filter { it.categoryId == categoryId }
@@ -309,12 +331,12 @@ class CatalogRepositoryImpl @Inject constructor(
             } else {
                 try {
                     val result = dataSource.getSeriesList(categoryId)
-                    persistQuietly { catalogCacheDao.upsertSeries(result.toEntity()) }
+                    persistQuietly(accountKey) { key -> catalogCacheDao.upsertSeries(result.toEntity(key)) }
                     emit(Resource.Success(result))
                 } catch (t: Throwable) {
                     rethrowIfCancellation(t)
-                    emitFromRoomCacheOrError(t) {
-                        catalogCacheDao.observeSeriesByCategory(categoryId).first().toDomain()
+                    emitFromRoomCacheOrError(accountKey, t) { key ->
+                        catalogCacheDao.observeSeriesByCategory(key, categoryId).first().toDomain()
                     }
                 }
             }
@@ -353,7 +375,7 @@ class CatalogRepositoryImpl @Inject constructor(
         withContext(ioDispatcher) {
             try {
                 val result = dataSource.getSeriesInfo(seriesId)
-                persistSeriesDetailQuietly(result)
+                currentAccountKey()?.let { accountKey -> persistSeriesDetailQuietly(accountKey, result) }
                 Resource.Success(result)
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
@@ -391,8 +413,11 @@ class CatalogRepositoryImpl @Inject constructor(
     override suspend fun getCachedEpisodeWithSeries(episodeId: String): Pair<Series, Episode>? =
         withContext(ioDispatcher) {
             try {
-                val episodeEntity = catalogCacheDao.getEpisodeById(episodeId) ?: return@withContext null
-                val seriesEntity = catalogCacheDao.getSeriesById(episodeEntity.seriesId) ?: return@withContext null
+                val accountKey = currentAccountKey() ?: return@withContext null
+                val episodeEntity =
+                    catalogCacheDao.getEpisodeById(accountKey, episodeId) ?: return@withContext null
+                val seriesEntity =
+                    catalogCacheDao.getSeriesById(accountKey, episodeEntity.seriesId) ?: return@withContext null
                 seriesEntity.toDomain() to episodeEntity.toDomain()
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
@@ -424,19 +449,30 @@ class CatalogRepositoryImpl @Inject constructor(
     // ── Offline-first Room cache helpers (Task 11b carry-forward) ────────────
 
     /**
-     * Persists a freshly fetched category list to the Room cache, ignoring write failures.
+     * Resolves the cache partition key for the currently configured Xtream account, or
+     * `null` when no credentials are configured (before onboarding, or after logout).
+     *
+     * Resolved fresh on every call — see class-level KDoc "Account partitioning" for why
+     * this is deliberately not cached in a field.
+     */
+    private suspend fun currentAccountKey(): String? =
+        credentialsProvider.getCredentials()?.let { accountKeyOf(it) }
+
+    /**
+     * Persists a freshly fetched category list to the Room cache under [accountKey],
+     * ignoring write failures.
      *
      * Caching is a side-effect of a successful fetch — a Room write error must not
      * downgrade an otherwise successful [Resource.Success] emission to an error.
      */
-    private suspend fun persistCategoriesQuietly(categories: List<Category>) {
-        persistQuietly { catalogCacheDao.upsertCategories(categories.toEntity()) }
+    private suspend fun persistCategoriesQuietly(accountKey: String, categories: List<Category>) {
+        persistQuietly { catalogCacheDao.upsertCategories(categories.toEntity(accountKey)) }
     }
 
     /**
      * Persists a freshly fetched series detail — the series metadata plus its flattened
-     * season/episode tree — to the Room cache, ignoring write failures (Task 11b/25
-     * carry-forward; see class-level KDoc "Series detail write-through").
+     * season/episode tree — to the Room cache under [accountKey], ignoring write failures
+     * (Task 11b/25 carry-forward; see class-level KDoc "Series detail write-through").
      *
      * [series] is expected to have [Series.seasons] populated (each [Season] with its
      * [Season.episodes] populated), as returned by a successful `getSeriesInfo` call.
@@ -444,12 +480,12 @@ class CatalogRepositoryImpl @Inject constructor(
      * injected explicitly since it is denormalised at the entity layer (not present on
      * the domain models).
      */
-    private suspend fun persistSeriesDetailQuietly(series: Series) {
+    private suspend fun persistSeriesDetailQuietly(accountKey: String, series: Series) {
         persistQuietly {
-            catalogCacheDao.upsertSeries(listOf(series).toEntity())
-            catalogCacheDao.upsertSeasons(series.seasons.map { it.toEntity(series.id) })
+            catalogCacheDao.upsertSeries(listOf(series).toEntity(accountKey))
+            catalogCacheDao.upsertSeasons(series.seasons.map { it.toEntity(series.id, accountKey) })
             catalogCacheDao.upsertEpisodes(
-                series.seasons.flatMap { season -> season.episodes.toEntity(series.id) },
+                series.seasons.flatMap { season -> season.episodes.toEntity(series.id, accountKey) },
             )
         }
     }
@@ -497,6 +533,35 @@ class CatalogRepositoryImpl @Inject constructor(
         fetchFromCache: suspend () -> List<T>,
     ) {
         emit(fromRoomCacheOrError(error, fetchFromCache))
+    }
+
+    /**
+     * Account-aware variant of [emitFromRoomCacheOrError]. When [accountKey] is `null`
+     * (no credentials configured — see [currentAccountKey]), Room is not read at all and
+     * [error] is emitted directly, matching the "empty cache" outcome of the accounted
+     * path without ever touching the DAO.
+     */
+    private suspend fun <T> FlowCollector<Resource<List<T>>>.emitFromRoomCacheOrError(
+        accountKey: String?,
+        error: Throwable,
+        fetchFromCache: suspend (String) -> List<T>,
+    ) {
+        if (accountKey == null) {
+            emit(Resource.Error(throwable = error))
+        } else {
+            emitFromRoomCacheOrError(error) { fetchFromCache(accountKey) }
+        }
+    }
+
+    /**
+     * Account-aware variant of [persistQuietly] for the offline-first Room cache writes.
+     * When [accountKey] is `null` (no credentials configured — see [currentAccountKey]),
+     * the write is skipped entirely rather than persisted under a missing partition.
+     */
+    private suspend fun persistQuietly(accountKey: String?, block: suspend (String) -> Unit) {
+        if (accountKey != null) {
+            persistQuietly { block(accountKey) }
+        }
     }
 
     /**
@@ -577,6 +642,11 @@ class CatalogRepositoryImpl @Inject constructor(
         writeMemo: (List<Category>) -> Unit,
         fetch: suspend () -> List<Category>,
     ): Resource<List<Category>> {
+        // Resolved once per call (i.e. once per flow collection triggering this attempt),
+        // not cached in a field — see class-level KDoc "Account partitioning". A `null`
+        // here (no credentials) simply means the owner below skips the Room write and the
+        // Room fallback degrades to Resource.Error, exactly like an empty cache would.
+        val accountKey = currentAccountKey()
         while (true) {
             readMemo()?.let { return Resource.Success(it) }
 
@@ -624,7 +694,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 }
                 // Same gate for Room: a result the memo refused is the previous account's and has no
                 // business landing in the offline cache either. See "Invalidation generations".
-                if (publishable) persistCategoriesQuietly(fresh)
+                if (publishable && accountKey != null) persistCategoriesQuietly(accountKey, fresh)
                 result = Resource.Success(fresh)
             } catch (cancellation: CancellationException) {
                 // Leaves [result] null: the `finally` below cancels [deferred], which hands the
@@ -633,8 +703,12 @@ class CatalogRepositoryImpl @Inject constructor(
             } catch (t: Throwable) {
                 // Deliberately not memoized, matching the previous behaviour: a Room fallback or an
                 // error never becomes the session cache.
-                result = fromRoomCacheOrError(t) {
-                    catalogCacheDao.observeCategoriesByType(contentType.name).first().toDomain()
+                result = if (accountKey == null) {
+                    Resource.Error(throwable = t)
+                } else {
+                    fromRoomCacheOrError(t) {
+                        catalogCacheDao.observeCategoriesByType(accountKey, contentType.name).first().toDomain()
+                    }
                 }
             } finally {
                 withContext(NonCancellable) {

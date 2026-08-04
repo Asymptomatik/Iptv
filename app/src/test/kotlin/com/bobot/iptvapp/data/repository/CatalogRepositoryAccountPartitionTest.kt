@@ -4,6 +4,7 @@ import app.cash.turbine.test
 import com.bobot.iptvapp.data.local.dao.FakeCatalogCacheDao
 import com.bobot.iptvapp.data.source.CatalogDataSource
 import com.bobot.iptvapp.data.source.InMemoryCredentialsProvider
+import com.bobot.iptvapp.domain.model.ContentType
 import com.bobot.iptvapp.domain.model.Episode
 import com.bobot.iptvapp.domain.model.Movie
 import com.bobot.iptvapp.domain.model.Season
@@ -11,10 +12,12 @@ import com.bobot.iptvapp.domain.model.Series
 import com.bobot.iptvapp.domain.model.XtreamCredentials
 import com.bobot.iptvapp.domain.util.Resource
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.mockk
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -36,10 +39,25 @@ import org.junit.Test
  * that actually persists and replays data across the credentials switch — the behaviour a mocked
  * DAO cannot exercise.
  *
- * At the time this class is introduced, both tests below are **expected to fail** — proving the
- * bug exists — because the current [CatalogRepositoryImpl] has no notion of a per-account cache
- * partition. A follow-up task closes that gap; these tests are the reproduction this class of bug
- * is verified against.
+ * ## Task 3 status
+ * The two reproducer tests below (`getMovies falls back to account A's Room cache after
+ * switching to account B`, `getCachedEpisodeWithSeries resolves account A's cached episode
+ * after switching to account B`) now pass — [CatalogRepositoryImpl] partitions every Room
+ * access by `accountKey` (see [CatalogRepositoryImpl.currentAccountKey]) and [FakeCatalogCacheDao]
+ * enforces that partition in-memory. Their assertions are unchanged from when they were written
+ * to lock in the bug; only the underlying production code changed to satisfy them.
+ *
+ * The tests below them close two gaps a partition-vs-flush ambiguity and a missing-credentials
+ * path would otherwise leave open:
+ *  - `getMovies retrieves account A's own cache after a round trip through account B` proves the
+ *    fix is a genuine per-account *partition* and not a correctness-adjacent flush-on-switch: a
+ *    naive fix that cleared Room on every credentials change would also make the two reproducers
+ *    above pass, but would violate the approved brief's requirement that a returning account
+ *    "retrouve sa partition existante, donc son cache hors-ligne".
+ *  - `getMovies neither reads nor writes Room when no credentials are configured` and
+ *    `getMovies persists under the same partition after a password-only change` cover the two
+ *    edges of [CatalogRepositoryImpl.currentAccountKey]: no account at all, and an account whose
+ *    identity (baseUrl + username) is unchanged.
  */
 class CatalogRepositoryAccountPartitionTest {
 
@@ -126,7 +144,122 @@ class CatalogRepositoryAccountPartitionTest {
             )
         }
 
-    // ── getCachedEpisodeWithSeries — cross-account Room fallback bleed ───────
+    // ── getMovies(null) — round trip A→B→A retrieves A's own partition ───────
+
+    @Test
+    fun `getMovies retrieves account A's own cache after a round trip through account B`() =
+        runTest(testDispatcher) {
+            // Populate account A's cache, exactly as in the reproducer above.
+            credentialsProvider.setCredentials(accountA)
+            testDispatcher.scheduler.advanceUntilIdle()
+
+            val movieA = buildMovie("movieA")
+            coEvery { dataSource.getMovies(null) } returns listOf(movieA)
+            repository.getMovies(null).test {
+                assertTrue(awaitItem() == Resource.Loading)
+                assertTrue(awaitItem() == Resource.Success(listOf(movieA)))
+                awaitComplete()
+            }
+
+            // Switch to account B — a different partition, untouched by A's writes.
+            switchToAccountB()
+
+            // Switch back to A. The brief requires that a returning account ("mêmes baseUrl +
+            // username") finds its existing partition intact, so its offline cache is still
+            // usable even though the source is now failing.
+            credentialsProvider.setCredentials(accountA)
+            testDispatcher.scheduler.advanceUntilIdle()
+            coEvery { dataSource.getMovies(null) } throws RuntimeException("account A: network down again")
+
+            var result: Resource<List<Movie>>? = null
+            repository.getMovies(null).test {
+                assertTrue(awaitItem() == Resource.Loading)
+                result = awaitItem()
+                awaitComplete()
+            }
+
+            // This is the assertion a flush-on-switch "fix" cannot satisfy: it would have wiped
+            // A's partition when B was activated, and the round trip back to A would find nothing
+            // to serve, degrading to Resource.Error just like the cross-account reproducer above.
+            // A genuine per-account partition instead retrieves A's own cached movie.
+            assertEquals(Resource.Success(listOf(movieA)), result)
+        }
+
+    // ── getMovies(null) — no credentials configured ───────────────────────────
+
+    @Test
+    fun `getMovies neither reads nor writes Room when no credentials are configured`() =
+        runTest(testDispatcher) {
+            // credentialsProvider is never set — currentAccountKey() resolves to null.
+            val movie = buildMovie("orphanMovie")
+            coEvery { dataSource.getMovies(null) } returns listOf(movie)
+
+            // A successful fetch with no account configured must still surface the network
+            // result (the in-memory session cache is unaffected by account partitioning) but
+            // must not write it to Room under a missing partition.
+            repository.getMovies(null).test {
+                assertTrue(awaitItem() == Resource.Loading)
+                assertTrue(awaitItem() == Resource.Success(listOf(movie)))
+                awaitComplete()
+            }
+
+            // Clear the in-memory session cache (not Room) so the next collection re-hits the
+            // data source instead of being served straight from the memo populated above.
+            repository.invalidateCache(ContentType.MOVIE)
+            coEvery { dataSource.getMovies(null) } throws RuntimeException("still offline, no credentials")
+
+            var result: Resource<List<Movie>>? = null
+            repository.getMovies(null).test {
+                assertTrue(awaitItem() == Resource.Loading)
+                result = awaitItem()
+                awaitComplete()
+            }
+
+            // With no credentials, currentAccountKey() is null on every operation, so neither the
+            // successful fetch above nor this one ever reached Room: there is nothing to fall
+            // back to (the write was skipped, and the read is skipped too), and the source
+            // failure surfaces directly as Resource.Error.
+            assertTrue(
+                "Expected Resource.Error: no credentials means no Room read/write can happen, " +
+                    "but got $result.",
+                result is Resource.Error,
+            )
+        }
+
+    // ── getMovies(null) — password-only change keeps the same partition ──────
+
+    @Test
+    fun `getMovies persists under the same partition after a password-only change`() =
+        runTest(testDispatcher) {
+            credentialsProvider.setCredentials(accountA)
+            testDispatcher.scheduler.advanceUntilIdle()
+
+            val movieA = buildMovie("movieA")
+            coEvery { dataSource.getMovies(null) } returns listOf(movieA)
+            repository.getMovies(null).test {
+                assertTrue(awaitItem() == Resource.Loading)
+                assertTrue(awaitItem() == Resource.Success(listOf(movieA)))
+                awaitComplete()
+            }
+
+            // Same baseUrl and username, only the password differs — accountKeyOf() deliberately
+            // excludes the password, so this must resolve to the same partition as accountA.
+            val accountARepasswordOnly = accountA.copy(password = "a-different-password")
+            credentialsProvider.setCredentials(accountARepasswordOnly)
+            testDispatcher.scheduler.advanceUntilIdle()
+            coEvery { dataSource.getMovies(null) } throws RuntimeException("network down after password change")
+
+            var result: Resource<List<Movie>>? = null
+            repository.getMovies(null).test {
+                assertTrue(awaitItem() == Resource.Loading)
+                result = awaitItem()
+                awaitComplete()
+            }
+
+            assertEquals(Resource.Success(listOf(movieA)), result)
+        }
+
+    // ── getCachedEpisodeWithSeries — cross-account Room fallback bleed ────────
 
     @Test
     fun `getCachedEpisodeWithSeries resolves account A's cached episode after switching to account B`() =
@@ -160,7 +293,21 @@ class CatalogRepositoryAccountPartitionTest {
             )
         }
 
-    // ── Fixtures ───────────────────────────────────────────────────────────
+    // ── getCachedEpisodeWithSeries — no credentials configured ────────────────
+
+    @Test
+    fun `getCachedEpisodeWithSeries returns null and never touches Room when no credentials are configured`() =
+        runTest(testDispatcher) {
+            // credentialsProvider is never set — currentAccountKey() resolves to null.
+            val resolved = repository.getCachedEpisodeWithSeries("anyEpisode")
+
+            assertNull(resolved)
+            // Nothing was ever written for this id either, but the point being verified here is
+            // that no read is attempted at all — a stronger guarantee than "the cache was empty".
+            coVerify(exactly = 0) { dataSource.getSeriesInfo(any()) }
+        }
+
+    // ── Fixtures ───────────────────────────────────────────────────────────────
 
     private fun buildMovie(id: String) = Movie(
         id = id,

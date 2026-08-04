@@ -8,8 +8,8 @@ import androidx.room.Index
  *
  * ## Key design (Task 5 carry-forward)
  * The domain model [com.bobot.iptvapp.domain.model.EpgProgram] has no standalone id.
- * The composite primary key `(channelId, startMillis)` is the natural key: a programme
- * start time is unique per channel.
+ * The composite primary key `(accountKey, channelId, startMillis)` is the natural key: a
+ * programme start time is unique per channel per account.
  *
  * [channelId] matches [com.bobot.iptvapp.domain.model.Channel.epgChannelId].
  *
@@ -19,6 +19,10 @@ import androidx.room.Index
  * "delete entries whose [endMillis] is before now").
  *
  * Entity-to-domain mapping is handled in Task 11 local repositories.
+ *
+ * ## Account partitioning (schema v3)
+ * [accountKey] (see [com.bobot.iptvapp.domain.util.accountKeyOf]) is part of the
+ * composite primary key so that the cache is isolated per Xtream account.
  *
  * ## Index on [endMillis] (Task 11b carry-forward)
  * [com.bobot.iptvapp.data.local.dao.EpgDao.pruneOldPrograms] filters on
@@ -41,10 +45,11 @@ import androidx.room.Index
  */
 @Entity(
     tableName = "epg_programs",
-    primaryKeys = ["channelId", "startMillis"],
+    primaryKeys = ["accountKey", "channelId", "startMillis"],
     indices = [Index(value = ["endMillis"])],
 )
 data class EpgProgramEntity(
+    val accountKey: String,
     val channelId: String,
     /** Programme start time as epoch milliseconds (UTC). Part of composite primary key. */
     val startMillis: Long,

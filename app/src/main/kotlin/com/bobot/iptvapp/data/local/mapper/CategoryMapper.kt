@@ -21,8 +21,15 @@ fun CategoryEntity.toDomain(): Category = Category(
     type = contentType,
 )
 
-/** Maps a domain [Category] to the [CategoryEntity] for Room cache persistence. */
-fun Category.toEntity(): CategoryEntity = CategoryEntity(
+/**
+ * Maps a domain [Category] to the [CategoryEntity] for Room cache persistence.
+ *
+ * @param accountKey The owning account's cache partition key (see
+ *   [com.bobot.iptvapp.domain.util.accountKeyOf]), part of the entity's composite
+ *   primary key.
+ */
+fun Category.toEntity(accountKey: String): CategoryEntity = CategoryEntity(
+    accountKey = accountKey,
     id = id,
     name = name,
     contentType = type,
@@ -32,4 +39,4 @@ fun Category.toEntity(): CategoryEntity = CategoryEntity(
 fun List<CategoryEntity>.toDomain(): List<Category> = map { it.toDomain() }
 
 /** Convenience extension to map a list of [Category]s. */
-fun List<Category>.toEntity(): List<CategoryEntity> = map { it.toEntity() }
+fun List<Category>.toEntity(accountKey: String): List<CategoryEntity> = map { it.toEntity(accountKey) }
