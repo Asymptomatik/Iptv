@@ -25,25 +25,29 @@ import com.bobot.iptvapp.data.local.entity.SeriesEntity
  * Room database for the IPTV app.
  *
  * ## Schema version
- * **Version 1** — initial schema. No migrations are defined yet (there is no prior
- * version to migrate from).
+ * **Version 3** — cache tables are now partitioned by account.
+ *
+ * ### Migration history
+ * - `MIGRATION_1_2`: adds `accountKey` column to cache tables (not a partitioning yet).
+ * - `MIGRATION_2_3`: recreates cache tables with `accountKey` as part of composite primary keys.
+ *
+ * **No `fallbackToDestructiveMigration()` is registered at the database level.**
  *
  * ## Migration policy
  *
- * ### User data tables — `profiles`, `favorites`, `playback_progress`
+ * ### User data tables — `profiles`, `favorites`, `playback_progress`, `downloads`
  * These tables store user-generated content that **cannot** be recovered from the
  * Xtream Codes server. Schema changes to any of these tables **MUST** be accompanied
  * by a proper Room `Migration` object. `fallbackToDestructiveMigration()` must never
  * be applied globally in production builds once the app has been released, as it would
- * silently erase user profiles, favorites, and watch history.
+ * silently erase user profiles, favorites, watch history, and downloaded episodes.
  *
  * ### Catalog cache tables — `categories`, `channels`, `movies`, `series`, `seasons`, `episodes`, `epg_programs`
- * These are offline-first caches of the Xtream Codes API. Losing them is recoverable —
- * the next app open re-fetches and rebuilds the cache transparently. In the event of a
- * migration gap on these tables, `fallbackToDestructiveMigration()` is acceptable in an
- * explicit debug or CI configuration. In production, prefer writing migrations for all
- * tables to avoid the risk of accidentally destroying user data if the scope of a
- * destructive fallback is misconfigured.
+ * These are offline-first caches of the Xtream Codes API, now **partitioned by account**
+ * via `accountKey` in the composite primary key. Losing them is recoverable — the next app
+ * open re-fetches and rebuilds the cache transparently for the current account. This allows
+ * cache table schema changes to be handled by destructive recreation (as in `MIGRATION_2_3`),
+ * since each account's partition is self-contained and loss of cache is not permanent.
  *
  * ### Schema export
  * `exportSchema = true` instructs KSP to write a JSON schema snapshot to the directory

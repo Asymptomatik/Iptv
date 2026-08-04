@@ -164,6 +164,10 @@ interface CatalogRepository {
     /**
      * Invalidates all in-memory session caches held by this repository.
      *
+     * This method affects **only the in-memory session cache** — it does not access the
+     * Room database. The Room offline-first cache is automatically partitioned by account
+     * and does not require invalidation: each account's data partition is self-contained.
+     *
      * Called automatically by [com.bobot.iptvapp.data.repository.CatalogRepositoryImpl]
      * when credentials change (via [com.bobot.iptvapp.data.source.CredentialsProvider.observeCredentials]),
      * ensuring that the next request fetches fresh content from the new server.
@@ -179,6 +183,10 @@ interface CatalogRepository {
     /**
      * Invalidates the in-memory session cache for a single [ContentType] only.
      *
+     * This method affects **only the in-memory session cache** — it does not access the
+     * Room database. The Room offline-first cache is automatically partitioned by account
+     * and does not require targeted invalidation.
+     *
      * Unlike [invalidateCaches] (which clears every cached list and category across
      * all content types — used for global events such as a credentials/server change),
      * this method clears only the cache(s) associated with [type]:
@@ -188,9 +196,7 @@ interface CatalogRepository {
      *
      * Intended for targeted reloads (e.g. a per-type content filter change) where
      * invalidating the other, unrelated content types' caches would cause needless
-     * re-fetches. The underlying Room offline-first cache is not affected by this
-     * call — only the in-memory session cache described in [CatalogRepository]'s
-     * class-level documentation.
+     * re-fetches.
      *
      * @param type the content type whose in-memory cache should be cleared.
      */

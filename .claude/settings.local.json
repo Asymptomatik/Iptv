@@ -1,4 +1,7 @@
 {
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787"
+  },
   "permissions": {
     "allow": [
       "Bash(gradle -v)",
@@ -15,10 +18,16 @@
       "Bash(git config *)",
       "Bash(apt-cache policy *)",
       "Bash(sudo -n true)",
-      "Bash(echo \"sudo_check_exit=$?\")"
+      "Bash(echo \"sudo_check_exit=$?\")",
+      "Read(//mnt/c/Users/bobot/Documents/Second Brain/30 - Projets/**)",
+      "Bash(find / -maxdepth 6 -iname \"*obsidian*\" -type d)",
+      "Bash(find / -maxdepth 8 -iname \"journal.md\")",
+      "Bash(find / -maxdepth 10 -ipath \"*AI Agents*\" -type d)",
+      "Read(//home/bobot/**)",
+      "Read(//mnt/c/Users/bobot/**)"
     ]
   },
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787"
+  "remote": {
+    "defaultEnvironmentId": "env_01ANWVo3TDqRFg3CxGhYbfET"
   }
 }

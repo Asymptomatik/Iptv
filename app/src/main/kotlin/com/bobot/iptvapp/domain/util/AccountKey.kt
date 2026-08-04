@@ -7,10 +7,10 @@ import java.security.MessageDigest
 /**
  * Derives a stable, account-scoped cache key from Xtream Codes credentials.
  *
- * The key is computed from the normalised [baseUrl] and [username] (not the password),
- * hashed with SHA-256 to provide hygiene benefits (avoid storing credentials in plaintext in
- * a secondary data structure). However, this is **not** a security measure — see the "Security
- * Note" below.
+ * The key is computed from the normalised [XtreamCredentials.baseUrl] and [XtreamCredentials.username]
+ * (not the password), hashed with SHA-256 to provide hygiene benefits (avoid storing credentials
+ * in plaintext in a secondary data structure). However, this is **not** a security measure — see the
+ * "Security Note" below.
  *
  * ## Usage and Purpose
  * - **Cache isolation**: Room databases and preference caches can be scoped per account,
@@ -31,8 +31,10 @@ import java.security.MessageDigest
  *    trailing slashes from the raw string.
  * 3. Lowercase the scheme and host (case-insensitive per RFC 3986).
  * 4. Preserve the path exactly as-is (case-sensitive; `"http://x/Path"` ≠ `"http://x/path"`).
- * 5. Remove trailing slashes from the entire URL (including path).
+ * 5. Remove trailing slashes from the path only.
  * 6. Drop default ports: `:80` for `http`, `:443` for `https`. Non-default ports are preserved.
+ * 7. **Preserve query parameters** — if present, included as-is (e.g. `?param=value`).
+ * 8. **Preserve fragment** — if present, included as-is (e.g. `#section`).
  *
  * Examples of normalisation:
  * - `" http://EXAMPLE.com:8080 "` → `"http://example.com:8080"`
@@ -40,7 +42,9 @@ import java.security.MessageDigest
  * - `"https://example.com:443/"` → `"https://example.com"` (default port + trailing slash dropped)
  * - `"http://example.com/Path/"` → `"http://example.com/Path"` (path case preserved, trailing slash dropped)
  * - `"http://example.com/path"` → `"http://example.com/path"` (path case matters)
- * - Unparsable URL → apply `trim().trimEnd('/')` as fallback.
+ * - `"http://example.com/api?v=2"` → `"http://example.com/api?v=2"` (query preserved)
+ * - `"http://example.com#top"` → `"http://example.com#top"` (fragment preserved)
+ * - Unparsable URL → apply `trim().trimEnd('/')` as fallback (scheme/host lowercasing not applied).
  *
  * ## Username Normalisation
  * The username is **not** case-normalised; only whitespace is trimmed. This asymmetry
@@ -55,6 +59,18 @@ import java.security.MessageDigest
  * ## Hash Format
  * The result is SHA-256 in lowercase hexadecimal, always 64 characters long.
  * Input is the concatenation `"<normalized-base-url>|<trimmed-username>"`.
+ *
+ * ## Edge cases — Hostnames with underscores
+ * `java.net.URI` parsing adheres to RFC 2396, which forbids underscores in hostnames. If a
+ * server hostname contains an underscore (e.g. `http://my_server:8080`), URI parsing fails,
+ * and the normaliser falls back to the raw `trim().trimEnd('/')` string. In this fallback
+ * mode, **scheme/host lowercasing is not applied**, so the case is preserved as typed.
+ *
+ * **Risk and mitigation**: If the same account is accessed via `HTTP://my_server` (uppercase)
+ * and later `http://my_server` (lowercase), this creates a partition scission — the cache
+ * is split into two keys. The app refetches the catalog for the second URL (benign, automatic),
+ * and once data is fetched, the scission is resolved. This is a **recoverable race condition**,
+ * never a **fusion** of two distinct accounts, and remains within the assumed risk model.
  */
 fun accountKeyOf(credentials: XtreamCredentials): String {
     val normalised = normalizeBaseUrl(credentials.baseUrl)
@@ -114,7 +130,13 @@ private fun normalizeBaseUrl(baseUrl: String): String {
 
         reconstructed
     } catch (e: Exception) {
-        // If URI parsing fails, fall back to trimming trailing slashes
+        // If URI parsing fails (e.g. underscore in hostname, which violates RFC 2396),
+        // fall back to trimming trailing slashes. In this case, scheme/host lowercasing
+        // is not applied — the URL is used as-is (trimmed). This may cause partition
+        // scission if the same account is accessed via both "HTTP://..." and "http://..."
+        // (e.g., user types "HTTP" then manually switches to "http" for the same server).
+        // This remains safe: scission causes a re-fetch (benign, auto-repairing), never fusion
+        // of distinct accounts, and is rare in practice.
         trimmed.trimEnd('/')
     }
 

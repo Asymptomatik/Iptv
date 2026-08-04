@@ -674,13 +674,13 @@ class CatalogRepositoryImpl @Inject constructor(
      * Collectors arriving after an invalidation refuse to join an attempt from an older generation
      * and start their own, so a retry genuinely refetches.
      *
-     * The same gate guards [persistCategoriesQuietly], but only narrows the window there rather than
-     * closing it: an invalidation landing between the check and the write still persists the old
-     * account's categories. That is a symptom of a wider, pre-existing limitation — the Room cache is
-     * keyed by [ContentType] alone, is not partitioned per credentials, and [invalidateCache] does
-     * not purge it. Anything the offline fallback returns may therefore predate the current account.
-     * Making that guarantee real needs the cache scoped to a session in the schema, not more locking
-     * here.
+     * The same gate guards [persistCategoriesQuietly]. Unlike the in-memory session cache
+     * (which has no credential awareness), the Room cache is now **partitioned by account** via
+     * `accountKey` in the composite primary key. Each persistent write targets the current account's
+     * partition, resolved per-operation via [currentAccountKey]. This partition isolation makes the
+     * in-flight window safe: even if an invalidation lands between the check and the write, the
+     * persisted categories remain scoped to their account. The offline fallback can return data
+     * only for the account currently in [CredentialsProvider] — never from a switched-away account.
      *
      * ## Cancellation
      * The attempt runs in its owner's coroutine, not in an external scope, so leaving the screen
