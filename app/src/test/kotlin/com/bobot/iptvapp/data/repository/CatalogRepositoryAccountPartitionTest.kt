@@ -416,19 +416,55 @@ class CatalogRepositoryAccountPartitionTest {
             }
 
             // Every global clearAll* call on the fake DAO now fails, simulating a Room I/O error
-            // during the logout purge.
-            catalogCacheDao.onGlobalClear = { throw RuntimeException("simulated Room purge failure") }
+            // during the logout purge. onGlobalClear only instruments the six clears owned by
+            // CatalogCacheDao (see FakeCatalogCacheDao's KDoc "Simulating a failing purge") — the
+            // seventh table, epg_programs, is purged through epgDao.clearAll(), a relaxed mock
+            // elsewhere in this file that never throws by default. Force it to fail too so all
+            // seven tables purged by purgeAllCachePartitionsQuietly are actually exercised by this
+            // resilience test, not just six of them.
+            var purgeAttempts = 0
+            catalogCacheDao.onGlobalClear = {
+                purgeAttempts++
+                throw RuntimeException("simulated Room purge failure")
+            }
+            coEvery { epgDao.clearAll() } throws RuntimeException("simulated EPG purge failure")
 
-            // Logout — the purge fails for every table, but this must not crash the
+            // Logout — the purge fails for all seven tables, but this must not crash the
             // application-scoped credentials-observer coroutine, nor the invalidateCaches() call
             // that precedes the purge in the same collect{} block.
             logout()
+            assertEquals(
+                "Expected one onGlobalClear invocation per CatalogCacheDao global clear method.",
+                6,
+                purgeAttempts,
+            )
+            coVerify(exactly = 1) { epgDao.clearAll() }
 
-            // A normal operation afterwards must still work: the observer's coroutine (and thus
-            // future credential-change collections) survived the purge failure. Stub a fresh
-            // result under the now-null-credentials state (currentAccountKey() resolves to null,
-            // so Room is skipped for this call regardless — the point here is only that the
-            // repository is still functional at all).
+            // Proving "the observer does not crash" requires more than a later getMovies(null)
+            // call succeeding: getMovies resolves currentAccountKey() directly from
+            // credentialsProvider.getCredentials() on every invocation and never goes through the
+            // observer's collect{} block at all — so that assertion alone would pass identically
+            // even if the observer coroutine were dead after the first purge failure. Instead,
+            // force a *second* credentials transition (re-login, then logout again) and assert the
+            // purge is attempted a second time: only a live observer coroutine collects that
+            // transition and reaches purgeAllCachePartitionsQuietly() again.
+            credentialsProvider.setCredentials(accountA)
+            testDispatcher.scheduler.advanceUntilIdle()
+            logout()
+
+            assertEquals(
+                "The observer must still be alive after the first purge failure: a second logout " +
+                    "must reach purgeAllCachePartitionsQuietly() and attempt every clear again, " +
+                    "exactly as the first logout did. If the observer's collect{} coroutine had " +
+                    "died, this second logout would never be processed and purgeAttempts would " +
+                    "stay at 6.",
+                12,
+                purgeAttempts,
+            )
+            coVerify(exactly = 2) { epgDao.clearAll() }
+
+            // A normal operation afterwards must also still work end-to-end: the repository is
+            // still fully functional, not merely still collecting credential changes.
             val movieAfterFailedPurge = buildMovie("movieAfterFailedPurge")
             coEvery { dataSource.getMovies(null) } returns listOf(movieAfterFailedPurge)
             repository.getMovies(null).test {
