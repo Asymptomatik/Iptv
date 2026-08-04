@@ -17,8 +17,13 @@ import com.bobot.iptvapp.domain.model.Season
 import com.bobot.iptvapp.domain.model.Series
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.util.Resource
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -27,7 +32,10 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 
 /**
@@ -101,11 +109,51 @@ class CatalogRepositoryImpl @Inject constructor(
     // (on the first successful fetch) and cleared on credential change.
     // Concurrent first-fetches may both write to the field; the last write wins,
     // which is acceptable since both would contain equivalent data from the same
-    // server endpoint.
+    // server endpoint. That tolerance still applies to the stream-list fields, but
+    // no longer to the three category fields: concurrent collectors now share a single
+    // attempt, and a result issued before an invalidation can no longer be written at
+    // all — see "Concurrent first fetches (categories)" below.
 
     @Volatile private var cachedLiveCategories: List<Category>? = null
     @Volatile private var cachedVodCategories: List<Category>? = null
     @Volatile private var cachedSeriesCategories: List<Category>? = null
+
+    // ── Concurrent first fetches (categories) ─────────────────────────────────
+    //
+    // The category Flows below are cold: each collection runs the whole body, so
+    // concurrent collectors all read the memo above as null and each fire their own
+    // request. That is not hypothetical — HomeViewModel.loadCatalogTab collects a tab's
+    // categories Flow twice at once (buildRowsFlow observes it for language derivation,
+    // LoadCategoryScopedCatalogUseCase awaits its first terminal value), so every tab
+    // load doubled the categories request.
+    //
+    // See [loadCategories] for how one attempt is shared, why the shared terminal covers
+    // failures too, and how invalidation generations keep a mid-flight request from
+    // repopulating a cache that was just cleared.
+    //
+    // One state per content type, not one shared: the repository should never serialize
+    // requests to independent endpoints just because two screens want different types at
+    // the same time.
+    //
+    // Only the categories are guarded. The stream-list caches keep their documented
+    // "last write wins" tolerance: nothing collects those Flows twice concurrently.
+
+    private class CategoryFetchState {
+        val mutex = Mutex()
+
+        /** Bumped by [invalidateCache], which is not `suspend` and so cannot take [mutex]. */
+        val generation = AtomicInteger(0)
+
+        /** The attempt currently in flight, or `null` when none is. Guarded by [mutex]. */
+        var inFlight: CompletableDeferred<Resource<List<Category>>>? = null
+
+        /** [generation] as captured when [inFlight] started. Guarded by [mutex]. */
+        var inFlightGeneration: Int = 0
+    }
+
+    private val liveCategoriesFetch = CategoryFetchState()
+    private val vodCategoriesFetch = CategoryFetchState()
+    private val seriesCategoriesFetch = CategoryFetchState()
 
     @Volatile private var cachedAllChannels: List<Channel>? = null
     @Volatile private var cachedAllMovies: List<Movie>? = null
@@ -133,40 +181,44 @@ class CatalogRepositoryImpl @Inject constructor(
     override fun observeLiveCategories(): Flow<Resource<List<Category>>> = flow {
         emit(Resource.Loading)
         cachedLiveCategories?.let { emit(Resource.Success(it)); return@flow }
-        try {
-            val result = dataSource.getLiveCategories()
-            cachedLiveCategories = result
-            persistCategoriesQuietly(result)
-            emit(Resource.Success(result))
-        } catch (t: Throwable) {
-            emitCategoriesFromRoomCacheOrError(ContentType.LIVE, t)
-        }
+        // Resolved first, emitted after: nothing is emitted while a lock is held.
+        emit(
+            loadCategories(
+                state = liveCategoriesFetch,
+                contentType = ContentType.LIVE,
+                readMemo = { cachedLiveCategories },
+                writeMemo = { cachedLiveCategories = it },
+                fetch = { dataSource.getLiveCategories() },
+            ),
+        )
     }.flowOn(ioDispatcher)
 
     override fun observeVodCategories(): Flow<Resource<List<Category>>> = flow {
         emit(Resource.Loading)
         cachedVodCategories?.let { emit(Resource.Success(it)); return@flow }
-        try {
-            val result = dataSource.getVodCategories()
-            cachedVodCategories = result
-            persistCategoriesQuietly(result)
-            emit(Resource.Success(result))
-        } catch (t: Throwable) {
-            emitCategoriesFromRoomCacheOrError(ContentType.MOVIE, t)
-        }
+        emit(
+            loadCategories(
+                state = vodCategoriesFetch,
+                contentType = ContentType.MOVIE,
+                readMemo = { cachedVodCategories },
+                writeMemo = { cachedVodCategories = it },
+                fetch = { dataSource.getVodCategories() },
+            ),
+        )
     }.flowOn(ioDispatcher)
 
     override fun observeSeriesCategories(): Flow<Resource<List<Category>>> = flow {
         emit(Resource.Loading)
         cachedSeriesCategories?.let { emit(Resource.Success(it)); return@flow }
-        try {
-            val result = dataSource.getSeriesCategories()
-            cachedSeriesCategories = result
-            persistCategoriesQuietly(result)
-            emit(Resource.Success(result))
-        } catch (t: Throwable) {
-            emitCategoriesFromRoomCacheOrError(ContentType.SERIES, t)
-        }
+        emit(
+            loadCategories(
+                state = seriesCategoriesFetch,
+                contentType = ContentType.SERIES,
+                readMemo = { cachedSeriesCategories },
+                writeMemo = { cachedSeriesCategories = it },
+                fetch = { dataSource.getSeriesCategories() },
+            ),
+        )
     }.flowOn(ioDispatcher)
 
     // ── Stream lists ──────────────────────────────────────────────────────────
@@ -181,6 +233,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 persistQuietly { catalogCacheDao.upsertChannels(result.toEntity()) }
                 emit(Resource.Success(result))
             } catch (t: Throwable) {
+                rethrowIfCancellation(t)
                 emitFromRoomCacheOrError(t) { catalogCacheDao.observeAllChannels().first().toDomain() }
             }
         } else {
@@ -195,6 +248,7 @@ class CatalogRepositoryImpl @Inject constructor(
                     persistQuietly { catalogCacheDao.upsertChannels(result.toEntity()) }
                     emit(Resource.Success(result))
                 } catch (t: Throwable) {
+                    rethrowIfCancellation(t)
                     emitFromRoomCacheOrError(t) {
                         catalogCacheDao.observeChannelsByCategory(categoryId).first().toDomain()
                     }
@@ -213,6 +267,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 persistQuietly { catalogCacheDao.upsertMovies(result.toEntity()) }
                 emit(Resource.Success(result))
             } catch (t: Throwable) {
+                rethrowIfCancellation(t)
                 emitFromRoomCacheOrError(t) { catalogCacheDao.observeAllMovies().first().toDomain() }
             }
         } else {
@@ -225,6 +280,7 @@ class CatalogRepositoryImpl @Inject constructor(
                     persistQuietly { catalogCacheDao.upsertMovies(result.toEntity()) }
                     emit(Resource.Success(result))
                 } catch (t: Throwable) {
+                    rethrowIfCancellation(t)
                     emitFromRoomCacheOrError(t) {
                         catalogCacheDao.observeMoviesByCategory(categoryId).first().toDomain()
                     }
@@ -243,6 +299,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 persistQuietly { catalogCacheDao.upsertSeries(result.toEntity()) }
                 emit(Resource.Success(result))
             } catch (t: Throwable) {
+                rethrowIfCancellation(t)
                 emitFromRoomCacheOrError(t) { catalogCacheDao.observeAllSeries().first().toDomain() }
             }
         } else {
@@ -255,6 +312,7 @@ class CatalogRepositoryImpl @Inject constructor(
                     persistQuietly { catalogCacheDao.upsertSeries(result.toEntity()) }
                     emit(Resource.Success(result))
                 } catch (t: Throwable) {
+                    rethrowIfCancellation(t)
                     emitFromRoomCacheOrError(t) {
                         catalogCacheDao.observeSeriesByCategory(categoryId).first().toDomain()
                     }
@@ -276,6 +334,7 @@ class CatalogRepositoryImpl @Inject constructor(
             try {
                 Resource.Success(dataSource.getMovieInfo(movieId))
             } catch (t: Throwable) {
+                rethrowIfCancellation(t)
                 Resource.Error(throwable = t)
             }
         }
@@ -297,6 +356,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 persistSeriesDetailQuietly(result)
                 Resource.Success(result)
             } catch (t: Throwable) {
+                rethrowIfCancellation(t)
                 Resource.Error(throwable = t)
             }
         }
@@ -311,6 +371,7 @@ class CatalogRepositoryImpl @Inject constructor(
             try {
                 Resource.Success(dataSource.getShortEpg(channelId, limit))
             } catch (t: Throwable) {
+                rethrowIfCancellation(t)
                 Resource.Error(throwable = t)
             }
         }
@@ -334,6 +395,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 val seriesEntity = catalogCacheDao.getSeriesById(episodeEntity.seriesId) ?: return@withContext null
                 seriesEntity.toDomain() to episodeEntity.toDomain()
             } catch (t: Throwable) {
+                rethrowIfCancellation(t)
                 null
             }
         }
@@ -353,6 +415,7 @@ class CatalogRepositoryImpl @Inject constructor(
                     onFailure = { t -> Resource.Error(throwable = t) },
                 )
             } catch (t: Throwable) {
+                rethrowIfCancellation(t)
                 // Guard against data sources that throw instead of returning Result.failure.
                 Resource.Error(throwable = t)
             }
@@ -391,26 +454,36 @@ class CatalogRepositoryImpl @Inject constructor(
         }
     }
 
-    /** Runs a Room write [block], silently ignoring any failure (best-effort cache). */
-    private suspend fun persistQuietly(block: suspend () -> Unit) {
-        try {
-            block()
-        } catch (t: Throwable) {
-            // Best-effort cache write — a failure here does not affect the caller's
-            // already-successful network/mock result.
-        }
+    /**
+     * Rethrows [t] when it is this coroutine's own cancellation.
+     *
+     * Every public method here funnels failures into a [Resource.Error] (or a Room fallback) through
+     * a broad `catch (Throwable)`. Left alone, those blocks also swallow the cancellation raised when
+     * the caller's job goes away — a screen that navigates back would get a plausible-looking error
+     * state instead of simply stopping. Called first in each such block so cancellation stays
+     * cancellation.
+     */
+    private fun rethrowIfCancellation(t: Throwable) {
+        if (t is CancellationException) throw t
     }
 
     /**
-     * Emits the Room-cached categories for [contentType] as [Resource.Success] when
-     * non-empty, otherwise emits [Resource.Error] wrapping the original fetch [error].
+     * Runs a Room write [block], silently ignoring any failure (best-effort cache).
+     *
+     * Cancellation is deliberately *not* absorbed: swallowing it would leave the caller running with
+     * an already-cancelled context, so the next suspension point would throw somewhere far less
+     * expected — see [loadCategories], whose owner must reach its cleanup in a known state. It is
+     * relayed to the immediate caller only; the callers that need it to travel further guard their
+     * own `catch (Throwable)` with [rethrowIfCancellation].
      */
-    private suspend fun FlowCollector<Resource<List<Category>>>.emitCategoriesFromRoomCacheOrError(
-        contentType: ContentType,
-        error: Throwable,
-    ) {
-        emitFromRoomCacheOrError(error) {
-            catalogCacheDao.observeCategoriesByType(contentType.name).first().toDomain()
+    private suspend fun persistQuietly(block: suspend () -> Unit) {
+        try {
+            block()
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (t: Throwable) {
+            // Best-effort cache write — a failure here does not affect the caller's
+            // already-successful network/mock result.
         }
     }
 
@@ -423,15 +496,156 @@ class CatalogRepositoryImpl @Inject constructor(
         error: Throwable,
         fetchFromCache: suspend () -> List<T>,
     ) {
+        emit(fromRoomCacheOrError(error, fetchFromCache))
+    }
+
+    /**
+     * Value-returning form of [emitFromRoomCacheOrError], for callers that must obtain the terminal
+     * [Resource] without being inside a [FlowCollector] — see [loadCategories], which resolves the
+     * terminal value first and only emits it afterwards.
+     */
+    private suspend fun <T> fromRoomCacheOrError(
+        error: Throwable,
+        fetchFromCache: suspend () -> List<T>,
+    ): Resource<List<T>> {
         val cached = try {
             fetchFromCache()
+        } catch (cancellation: CancellationException) {
+            // An empty cache is a legitimate answer; a cancelled read is not one, and must not be
+            // laundered into a Resource.Error while the coroutine is already gone.
+            throw cancellation
         } catch (cacheReadError: Throwable) {
             emptyList()
         }
-        if (cached.isNotEmpty()) {
-            emit(Resource.Success(cached))
+        return if (cached.isNotEmpty()) {
+            Resource.Success(cached)
         } else {
-            emit(Resource.Error(throwable = error))
+            Resource.Error(throwable = error)
+        }
+    }
+
+    /**
+     * Resolves one content type's categories, collapsing concurrent first loads into a **single
+     * attempt** whose terminal [Resource] every participant shares.
+     *
+     * ## Why single-flight rather than "memoize on success"
+     * A plain mutex around the fetch only de-duplicates an attempt that *succeeds and fills the
+     * memo*. Two collectors hitting an offline server would still run two full requests back to
+     * back — worse than before, since the mutex serializes what used to be concurrent, roughly
+     * doubling the time before both branches reach their terminal value. Sharing the in-flight
+     * attempt's result instead covers every terminal alike: a network [Resource.Success], a Room
+     * cache fallback, or a [Resource.Error].
+     *
+     * The shared attempt is not remembered: the owner retires [CategoryFetchState.inFlight] as soon
+     * as it reaches its terminal value, *just before* publishing that value to the waiters, so a
+     * *later* collection retries rather than being served a stale failure. That order is deliberate
+     * — clearing after publishing would let a collector arriving in between rejoin an attempt that
+     * is already over, and on a cancelled attempt rejoin it again and again.
+     *
+     * ## Invalidation generations
+     * [invalidateCache] can fire at any moment from the application-scoped credentials observer,
+     * which is not tied to any collector's job — so it lands mid-flight rather than cancelling the
+     * request. Each attempt captures [CategoryFetchState.generation] when it starts and may only
+     * publish its result to the memo if that generation is still current, otherwise a request issued
+     * with the previous account's credentials could silently become the new session's cache.
+     * Collectors arriving after an invalidation refuse to join an attempt from an older generation
+     * and start their own, so a retry genuinely refetches.
+     *
+     * The same gate guards [persistCategoriesQuietly], but only narrows the window there rather than
+     * closing it: an invalidation landing between the check and the write still persists the old
+     * account's categories. That is a symptom of a wider, pre-existing limitation — the Room cache is
+     * keyed by [ContentType] alone, is not partitioned per credentials, and [invalidateCache] does
+     * not purge it. Anything the offline fallback returns may therefore predate the current account.
+     * Making that guarantee real needs the cache scoped to a session in the schema, not more locking
+     * here.
+     *
+     * ## Cancellation
+     * The attempt runs in its owner's coroutine, not in an external scope, so leaving the screen
+     * still cancels the request. Waiters observe the owner's cancellation as a cancelled
+     * [CompletableDeferred] and take the attempt over instead of failing — a waiter that is still
+     * active must not be cancelled by an unrelated collector going away.
+     *
+     * That hand-over only works because the owner resolves the shared [CompletableDeferred] on
+     * *every* exit path, from a [NonCancellable] `finally`. An owner that returned without resolving
+     * it would leave its waiters suspended for the lifetime of the repository, which on screen reads
+     * as a spinner that never stops.
+     */
+    private suspend fun loadCategories(
+        state: CategoryFetchState,
+        contentType: ContentType,
+        readMemo: () -> List<Category>?,
+        writeMemo: (List<Category>) -> Unit,
+        fetch: suspend () -> List<Category>,
+    ): Resource<List<Category>> {
+        while (true) {
+            readMemo()?.let { return Resource.Success(it) }
+
+            var owner = false
+            var generation = 0
+            var attempt: CompletableDeferred<Resource<List<Category>>>? = null
+            state.mutex.withLock {
+                // Re-read under the lock: a concurrent attempt may have filled the memo while we
+                // were queued, in which case there is nothing left to do.
+                readMemo()?.let { return Resource.Success(it) }
+                val current = state.inFlight
+                if (current != null && state.inFlightGeneration == state.generation.get()) {
+                    attempt = current
+                } else {
+                    generation = state.generation.get()
+                    attempt = CompletableDeferred<Resource<List<Category>>>().also {
+                        state.inFlight = it
+                        state.inFlightGeneration = generation
+                    }
+                    owner = true
+                }
+            }
+            val deferred = requireNotNull(attempt)
+
+            if (!owner) {
+                try {
+                    return deferred.await()
+                } catch (cancellation: CancellationException) {
+                    // Our own cancellation must propagate; the owner's must not take us down.
+                    if (!currentCoroutineContext().isActive) throw cancellation
+                    continue
+                }
+            }
+
+            // Once we own [deferred], every exit path must resolve it and retire it from
+            // [CategoryFetchState.inFlight], or the waiters stay suspended for ever. The owner's own
+            // job may already be cancelled by the time we get here, so the cleanup runs in a
+            // [NonCancellable] `finally` — a plain `mutex.withLock` on a cancelled job would throw
+            // before [deferred] is ever resolved.
+            var result: Resource<List<Category>>? = null
+            try {
+                val fresh = fetch()
+                val publishable = state.mutex.withLock {
+                    (state.generation.get() == generation).also { if (it) writeMemo(fresh) }
+                }
+                // Same gate for Room: a result the memo refused is the previous account's and has no
+                // business landing in the offline cache either. See "Invalidation generations".
+                if (publishable) persistCategoriesQuietly(fresh)
+                result = Resource.Success(fresh)
+            } catch (cancellation: CancellationException) {
+                // Leaves [result] null: the `finally` below cancels [deferred], which hands the
+                // attempt over to whichever waiter is still active.
+                throw cancellation
+            } catch (t: Throwable) {
+                // Deliberately not memoized, matching the previous behaviour: a Room fallback or an
+                // error never becomes the session cache.
+                result = fromRoomCacheOrError(t) {
+                    catalogCacheDao.observeCategoriesByType(contentType.name).first().toDomain()
+                }
+            } finally {
+                withContext(NonCancellable) {
+                    state.mutex.withLock { if (state.inFlight === deferred) state.inFlight = null }
+                }
+                // Retired first, resolved second: a collector arriving in between starts a fresh
+                // attempt rather than joining one that is already over.
+                val terminal = result
+                if (terminal != null) deferred.complete(terminal) else deferred.cancel()
+            }
+            return requireNotNull(result)
         }
     }
 
@@ -441,17 +655,34 @@ class CatalogRepositoryImpl @Inject constructor(
         ContentType.entries.forEach { invalidateCache(it) }
     }
 
+    /**
+     * Clearing the memo is not enough on its own: a categories request may be in flight right now
+     * (this is called from the application-scoped credentials observer, which cancels nothing), and
+     * it would otherwise complete afterwards and repopulate the cache it was meant to invalidate —
+     * with the *previous* account's data. Bumping the generation makes that late result
+     * unpublishable and stops any collector arriving from here on from joining that attempt. See
+     * [loadCategories], "Invalidation generations".
+     *
+     * The generation is bumped **before** the memo is cleared, and that order is load-bearing: with
+     * the reverse order an in-flight attempt could slip between the two statements, still read its
+     * own generation as current, and write the stale result back into a memo that has just been
+     * emptied. Bumping first leaves only two outcomes — either the attempt wrote before the bump and
+     * the clear that follows removes it, or it checks after the bump and refuses to write at all.
+     */
     override fun invalidateCache(type: ContentType) {
         when (type) {
             ContentType.LIVE -> {
+                liveCategoriesFetch.generation.incrementAndGet()
                 cachedLiveCategories = null
                 cachedAllChannels = null
             }
             ContentType.MOVIE -> {
+                vodCategoriesFetch.generation.incrementAndGet()
                 cachedVodCategories = null
                 cachedAllMovies = null
             }
             ContentType.SERIES -> {
+                seriesCategoriesFetch.generation.incrementAndGet()
                 cachedSeriesCategories = null
                 cachedAllSeries = null
             }

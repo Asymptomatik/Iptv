@@ -145,4 +145,144 @@ class CategoryLanguageTest {
 
         assertEquals("Sport", category.displayName())
     }
+
+    // ── Space-separated prefix (whitelist-gated fallback) ───────────────────
+
+    @Test
+    fun `extractLanguageTag returns tag for whitelisted space-separated prefix`() {
+        val result = CategoryLanguage.extractLanguageTag("FR Sport")
+
+        assertEquals("FR", result)
+    }
+
+    @Test
+    fun `extractLanguageTag normalizes lowercase space-separated prefix to uppercase tag`() {
+        val result = CategoryLanguage.extractLanguageTag("fr sport")
+
+        assertEquals("FR", result)
+    }
+
+    @Test
+    fun `extractLanguageTag returns six-letter whitelisted space-separated tag`() {
+        val result = CategoryLanguage.extractLanguageTag("VOSTFR Films")
+
+        assertEquals("VOSTFR", result)
+    }
+
+    @Test
+    fun `extractLanguageTag returns tag for another whitelisted space-separated prefix`() {
+        val result = CategoryLanguage.extractLanguageTag("EN Movies")
+
+        assertEquals("EN", result)
+    }
+
+    @Test
+    fun `extractLanguageTag returns null for non-whitelisted space-separated prefix HD`() {
+        val result = CategoryLanguage.extractLanguageTag("HD Movies")
+
+        assertNull(result)
+    }
+
+    @Test
+    fun `extractLanguageTag returns null for non-whitelisted space-separated prefix 4K`() {
+        val result = CategoryLanguage.extractLanguageTag("4K Sport")
+
+        assertNull(result)
+    }
+
+    @Test
+    fun `extractLanguageTag returns null for non-whitelisted space-separated prefix TV`() {
+        val result = CategoryLanguage.extractLanguageTag("TV Shows")
+
+        assertNull(result)
+    }
+
+    @Test
+    fun `extractLanguageTag returns null for country codes behind a plain space`() {
+        // Countries are not languages: behind a mere space the signal is too weak to act on.
+        // "US Sports" must stay "US Sports", not become "Sports" filed under a pseudo-language.
+        listOf(
+            "SP Sports",
+            "UK Entertainment",
+            "US Sports",
+            "BR Movies",
+            "CA Movies",
+            "BE Channels",
+            "CH Channels",
+        ).forEach { name ->
+            assertNull("unexpected tag for \"$name\"", CategoryLanguage.extractLanguageTag(name))
+        }
+    }
+
+    @Test
+    fun `extractDisplayName keeps country codes behind a plain space`() {
+        listOf(
+            "SP Sports",
+            "UK Entertainment",
+            "US Sports",
+            "BR Movies",
+            "CA Movies",
+            "BE Channels",
+            "CH Channels",
+        ).forEach { name ->
+            assertEquals(name, CategoryLanguage.extractDisplayName(name))
+        }
+    }
+
+    @Test
+    fun `extractLanguageTag still returns country codes when an explicit delimiter is present`() {
+        // The delimiter is a deliberate signal from the provider, so it is still honoured.
+        assertEquals("UK", CategoryLanguage.extractLanguageTag("UK | Sports"))
+        assertEquals("US", CategoryLanguage.extractLanguageTag("US - Movies"))
+        assertEquals("BR", CategoryLanguage.extractLanguageTag("BR: Novelas"))
+    }
+
+    @Test
+    fun `extractLanguageTag treats IT behind a space as Italian - knowingly retained ambiguity`() {
+        // Documents an accepted trade-off: "IT Support" is misread as Italian, Italian being far
+        // likelier than an IT-helpdesk category in an IPTV catalogue.
+        assertEquals("IT", CategoryLanguage.extractLanguageTag("IT Support"))
+    }
+
+    @Test
+    fun `extractLanguageTag returns null when whitelisted code is not the leading token`() {
+        val result = CategoryLanguage.extractLanguageTag("Sport FR")
+
+        assertNull(result)
+    }
+
+    @Test
+    fun `extractLanguageTag returns null for whitelisted code alone without a following token`() {
+        val result = CategoryLanguage.extractLanguageTag("FR")
+
+        assertNull(result)
+    }
+
+    @Test
+    fun `extractLanguageTag still returns delimited result unchanged when a space would also match`() {
+        val result = CategoryLanguage.extractLanguageTag("FR | Sport")
+
+        assertEquals("FR", result)
+    }
+
+    @Test
+    fun `extractLanguageTag still returns nested delimited result unchanged when a space would also match`() {
+        val result = CategoryLanguage.extractLanguageTag("SRS | FR - LATEST SERIES")
+
+        assertEquals("FR", result)
+    }
+
+    @Test
+    fun `extractDisplayName removes whitelisted space-separated prefix`() {
+        val result = CategoryLanguage.extractDisplayName("FR Sport")
+
+        assertEquals("Sport", result)
+    }
+
+    @Test
+    fun `extractDisplayName returns name unchanged for non-whitelisted space-separated prefix`() {
+        val result = CategoryLanguage.extractDisplayName("HD Movies")
+
+        assertEquals("HD Movies", result)
+    }
 }

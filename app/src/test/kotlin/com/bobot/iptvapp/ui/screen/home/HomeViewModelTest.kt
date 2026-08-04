@@ -24,8 +24,10 @@ import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
 import io.mockk.verify
+import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -211,6 +213,11 @@ class HomeViewModelTest {
 
         // Task 22: Stub the preferences store to return a test profile ID by default.
         coEvery { appPreferencesStore.getActiveProfileId() } returns "profile-1"
+        // Task 4 (filtre-langue-fr-par-defaut): default stub for the one-shot default language
+        // filter read once in init — null preserves this test class's pre-existing "no filter
+        // applied by default" behavior for every test that does not override it. Tests exercising
+        // the default/fallback behavior explicitly override this with `returns "FR"`.
+        coEvery { appPreferencesStore.getDefaultLanguageFilter() } returns null
         // Task 22: Stub the favorites repository to return the test favorites Flow.
         every { favoritesRepository.observeFavorites("profile-1") } returns favoritesFlow
         // Task 23: Stub the playback progress repository and credentials provider.
@@ -1372,5 +1379,321 @@ class HomeViewModelTest {
         verify(exactly = 0) { catalogRepository.getMovies(any()) }
         verify(exactly = 0) { catalogRepository.getSeriesList(any()) }
         verify(exactly = 0) { catalogRepository.invalidateCaches() }
+    }
+
+    // ── Task 4 (filtre-langue-fr-par-defaut): default language filter from AppPreferencesStore ──
+
+    @Test
+    fun `default language filter FR selects FR rows for the LIVE tab when a matching category is loaded`() {
+        coEvery { appPreferencesStore.getDefaultLanguageFilter() } returns "FR"
+        createViewModel()
+        val frSport = Category(id = "30", name = "FR | Sport", type = ContentType.LIVE)
+        val enNews = Category(id = "31", name = "EN | News", type = ContentType.LIVE)
+        stubLiveChannels("30", listOf(Channel(id = "c30", name = "FRChan", logoUrl = null, categoryId = "30", epgChannelId = null)))
+        stubLiveChannels("31", listOf(Channel(id = "c31", name = "ENChan", logoUrl = null, categoryId = "31", epgChannelId = null)))
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        liveCategoriesFlow.value = Resource.Success(listOf(frSport, enNews))
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals("FR", viewModel.uiState.value.selectedLiveLanguage)
+        assertEquals(listOf("30"), viewModel.uiState.value.liveRows.map { it.categoryId })
+    }
+
+    @Test
+    fun `default language filter FR selects FR rows for the MOVIE tab when a matching category is loaded`() {
+        coEvery { appPreferencesStore.getDefaultLanguageFilter() } returns "FR"
+        createViewModel()
+        val frAction = Category(id = "50", name = "FR | Action", type = ContentType.MOVIE)
+        val enAction = Category(id = "51", name = "EN | Action", type = ContentType.MOVIE)
+        val movieFr = movie1.copy(id = "mfr", categoryId = "50")
+        val movieEn = movie1.copy(id = "men", categoryId = "51")
+        stubMovies("50", listOf(movieFr))
+        stubMovies("51", listOf(movieEn))
+
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        vodCategoriesFlow.value = Resource.Success(listOf(frAction, enAction))
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals("FR", viewModel.uiState.value.selectedMovieLanguage)
+        assertEquals(listOf("mfr"), viewModel.uiState.value.movieRows.single().items.map { it.id })
+    }
+
+    @Test
+    fun `default language filter FR selects FR rows for the SERIES tab when a matching category is loaded`() {
+        coEvery { appPreferencesStore.getDefaultLanguageFilter() } returns "FR"
+        createViewModel()
+        val frDrama = Category(id = "60", name = "FR | Drama", type = ContentType.SERIES)
+        val enDrama = Category(id = "61", name = "EN | Drama", type = ContentType.SERIES)
+        val seriesFr = series1.copy(id = "sfr", categoryId = "60")
+        val seriesEn = series1.copy(id = "sen", categoryId = "61")
+        stubSeries("60", listOf(seriesFr))
+        stubSeries("61", listOf(seriesEn))
+
+        viewModel.onCatalogTabSelected(ContentType.SERIES)
+        seriesCategoriesFlow.value = Resource.Success(listOf(frDrama, enDrama))
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals("FR", viewModel.uiState.value.selectedSeriesLanguage)
+        assertEquals(listOf("sfr"), viewModel.uiState.value.seriesRows.single().items.map { it.id })
+    }
+
+    @Test
+    fun `default language filter FR falls back to Toutes in the same emission when no loaded category matches`() {
+        coEvery { appPreferencesStore.getDefaultLanguageFilter() } returns "FR"
+        createViewModel()
+        stubLiveChannels("1", listOf(chan1))
+        stubLiveChannels("2", emptyList())
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        // Neither category carries a detectable language tag -> the FR default matches nothing.
+        liveCategoriesFlow.value = Resource.Success(listOf(sportCategory, newsCategory))
+        testDispatcher.scheduler.runCurrent()
+
+        // Fallback fires within the very same combine emission: the final state already shows
+        // "Toutes" selected and every category with content visible — never a stale FR-filtered
+        // (here: empty) frame.
+        assertNull(viewModel.uiState.value.selectedLiveLanguage)
+        assertEquals(listOf("1"), viewModel.uiState.value.liveRows.map { it.categoryId })
+    }
+
+    @Test
+    fun `explicit FR choice survives the no-match fallback and a subsequent retry`() {
+        // Base setUp() stub already returns null for getDefaultLanguageFilter() — the default is
+        // irrelevant here, only the explicit choice matters.
+        createViewModel()
+        stubLiveChannels("1", listOf(chan1))
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        // sportCategory has no detectable language tag at all -> selecting "FR" here already
+        // wouldn't match any loaded category.
+        liveCategoriesFlow.value = Resource.Success(listOf(sportCategory))
+        testDispatcher.scheduler.runCurrent()
+
+        viewModel.onLanguageSelected(ContentType.LIVE, "FR")
+        testDispatcher.scheduler.runCurrent()
+        assertEquals("FR", viewModel.uiState.value.selectedLiveLanguage)
+
+        // Retrying re-runs buildRowsFlow's combine and its categories-success side effect again —
+        // the explicit choice must still not be reset to "Toutes".
+        viewModel.onRetry()
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals("FR", viewModel.uiState.value.selectedLiveLanguage)
+    }
+
+    @Test
+    fun `explicit Toutes choice made before opening the tab is not overridden by the FR default`() {
+        coEvery { appPreferencesStore.getDefaultLanguageFilter() } returns "FR"
+        createViewModel()
+
+        // Explicit choice recorded before the tab is even opened.
+        viewModel.onLanguageSelected(ContentType.LIVE, null)
+        assertNull(viewModel.uiState.value.selectedLiveLanguage)
+
+        val frSport = Category(id = "30", name = "FR | Sport", type = ContentType.LIVE)
+        stubLiveChannels("30", listOf(Channel(id = "c30", name = "FRChan", logoUrl = null, categoryId = "30", epgChannelId = null)))
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        liveCategoriesFlow.value = Resource.Success(listOf(frSport))
+        testDispatcher.scheduler.runCurrent()
+
+        // Even though an FR category is loaded and the preference default is "FR", the prior
+        // explicit "Toutes" choice must never be overridden by the default.
+        assertNull(viewModel.uiState.value.selectedLiveLanguage)
+    }
+
+    @Test
+    fun `init throwing while reading the default language filter still lets loadCatalogTab proceed past the await`() {
+        // Simulates a real DataStore failure mode (e.g. a corrupted/unavailable preferences file)
+        // during init's sequential, un-caught reads. Without the init try/finally guarantee that
+        // always completes defaultLanguageFilter (to null on failure), loadCatalogTab's
+        // `defaultLanguageFilter.await()` — called from a *separate* viewModelScope.launch started
+        // by onCatalogTabSelected — would suspend forever, since a SupervisorJob-backed
+        // viewModelScope does not cancel sibling coroutines when this one fails. That would mean
+        // getLiveChannels(categoryId) below is never even called, i.e. the tab never leaves
+        // Resource.Loading.
+        coEvery { appPreferencesStore.getDefaultLanguageFilter() } throws IOException("boom")
+        createViewModel()
+        stubLiveChannels("1", listOf(chan1))
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        liveCategoriesFlow.value = Resource.Success(listOf(sportCategory))
+        testDispatcher.scheduler.runCurrent()
+
+        // The per-category fetch actually ran — proof the await() resolved instead of hanging.
+        verify(exactly = 1) { catalogRepository.getLiveChannels("1") }
+        // Graceful degradation: no default selection applied (null, i.e. "Toutes") — never a
+        // hardcoded "FR" fallback, which belongs to DataStoreAppPreferencesStore, not this ViewModel.
+        assertNull(viewModel.uiState.value.selectedLiveLanguage)
+    }
+
+    @Test
+    fun `init throwing while reading the default language filter still runs the rest of init's five-resource combine`() {
+        // Reinforces the test above: it proves loadCatalogTab's *separate* onCatalogTabSelected
+        // launch is unblocked, but does not by itself prove init's *own* launch body survives past
+        // the try/catch/finally and reaches the Reprendre/Ma liste/catalog `combine` declared right
+        // after it (lines below the try/catch/finally in HomeViewModel.init). Without the catch
+        // absorbing the exception, that combine — and its .collect { ... _uiState.update { ... } } —
+        // would never even be reached, since an uncaught throw would abort the whole launch body
+        // before it gets there. A populated "Reprendre" row is the most direct proof reduceUiState
+        // actually ran with real (non-default-initial) data: continueWatchingRows starts emptyList()
+        // in HomeUiState's default, exactly like a Resource.Success(emptyList()) reduction would
+        // leave it, so an empty assertion here would not distinguish "combine ran" from "combine
+        // never started". A non-empty, exact-content assertion does.
+        coEvery { appPreferencesStore.getDefaultLanguageFilter() } throws IOException("boom")
+        coEvery { catalogRepository.getMovieDetail("m1") } returns Resource.Success(movie1)
+        continueWatchingFlow.value = listOf(
+            PlaybackProgress(
+                contentId = "m1",
+                contentType = ContentType.MOVIE,
+                positionMillis = 30_000L,
+                durationMillis = 100_000L,
+                lastUpdatedMillis = 2000L,
+                profileId = "profile-1",
+            ),
+        )
+
+        createViewModel()
+
+        // The exception from getDefaultLanguageFilter() did not escape init's launch (no crash),
+        // and the five-resource combine below the try/catch/finally did run: the "Reprendre" row is
+        // populated from the continue-watching entry pushed above, resolved via the MOVIE fallback.
+        val state = viewModel.uiState.value
+        assertEquals(1, state.continueWatchingRows.size)
+        val row = state.continueWatchingRows.first()
+        assertEquals("Reprendre", row.title)
+        assertEquals(1, row.items.size)
+        assertEquals("m1", row.items.first().id)
+        assertEquals("Explosion Totale", row.items.first().title)
+        coVerify(exactly = 1) { catalogRepository.getMovieDetail("m1") }
+        // Graceful degradation, same guarantee as the test above: no hardcoded "FR" default.
+        assertNull(viewModel.uiState.value.selectedLiveLanguage)
+    }
+
+    @Test
+    fun `default FR fallback to Toutes is not re-applied by a subsequent retry`() {
+        coEvery { appPreferencesStore.getDefaultLanguageFilter() } returns "FR"
+        createViewModel()
+        stubLiveChannels("1", listOf(chan1))
+        stubLiveChannels("2", emptyList())
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        // Neither category carries a detectable language tag -> the FR default matches nothing,
+        // so the same-emission fallback resets the selection back to null ("Toutes").
+        liveCategoriesFlow.value = Resource.Success(listOf(sportCategory, newsCategory))
+        testDispatcher.scheduler.runCurrent()
+
+        assertNull(viewModel.uiState.value.selectedLiveLanguage)
+
+        // Retrying re-invokes loadCatalogTab and restarts buildRowsFlow's combine, but
+        // defaultAppliedContentTypes/fallbackAppliedContentTypes are ViewModel-scoped MutableSets
+        // whose .add(LIVE) already returned true once — the FR default must not be reapplied and
+        // the fallback must not re-arm either.
+        viewModel.onRetry()
+        testDispatcher.scheduler.runCurrent()
+
+        assertNull(viewModel.uiState.value.selectedLiveLanguage)
+    }
+
+    @Test
+    fun `a cold categories Flow still lets My List resolve from loaded items, with no detail fallback`() {
+        // Same guarantee as `MOVIE favorite already present in a loaded category …`, but against a
+        // COLD categories Flow — the shape the real repository returns, and the one whose timing is
+        // fragile. Deliberately not asserting how many times the Flow is subscribed: that is an
+        // implementation detail, and de-duplicating the resulting network request belongs to
+        // CatalogRepositoryImpl (see its "Concurrent first fetches" section). What must hold is this
+        // timing guarantee — routing the tab's two consumers through a shared StateFlow inside the
+        // ViewModel delays the items load by one dispatch, and My List then misses the loaded items
+        // and issues a getMovieDetail per entry.
+        every { catalogRepository.observeVodCategories() } returns flow {
+            emit(Resource.Loading)
+            emit(Resource.Success(listOf(actionCategory)))
+        }
+        stubMovies("10", listOf(movie1))
+        createViewModel()
+
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        favoritesFlow.value = listOf(
+            FavoriteItem(profileId = "profile-1", contentId = "m1", contentType = ContentType.MOVIE, addedAt = 1000),
+        )
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(1, viewModel.uiState.value.movieRows.size)
+        assertEquals(1, viewModel.uiState.value.myListRows.first().items.size)
+        coVerify(exactly = 0) { catalogRepository.getMovieDetail(any()) }
+    }
+
+    @Test
+    fun `a failing credentials read still lets the default language filter apply`() {
+        // The three init reads used to share one try/catch, so a credentials failure jumped straight
+        // to catch and left the language preference unread — silently degrading every tab to
+        // "Toutes" for a reason unrelated to the language preference.
+        coEvery { credentialsProvider.getCredentials() } throws IOException("DataStore indisponible")
+        coEvery { appPreferencesStore.getDefaultLanguageFilter() } returns "FR"
+        createViewModel()
+        val frSport = Category(id = "30", name = "FR | Sport", type = ContentType.LIVE)
+        stubLiveChannels("30", listOf(Channel(id = "c30", name = "FRChan", logoUrl = null, categoryId = "30", epgChannelId = null)))
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        liveCategoriesFlow.value = Resource.Success(listOf(frSport))
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals("FR", viewModel.uiState.value.selectedLiveLanguage)
+    }
+
+    @Test
+    fun `an automatic FR selection that vanishes from a reloaded catalog still falls back to Toutes`() {
+        coEvery { appPreferencesStore.getDefaultLanguageFilter() } returns "FR"
+        createViewModel()
+        val frSport = Category(id = "30", name = "FR | Sport", type = ContentType.LIVE)
+        stubLiveChannels("30", listOf(Channel(id = "c30", name = "FRChan", logoUrl = null, categoryId = "30", epgChannelId = null)))
+        stubLiveChannels("1", listOf(chan1))
+        stubLiveChannels("2", emptyList())
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        // First load *does* carry FR: the default applies, and the fallback — eligible but with
+        // nothing to correct — must not burn its one-shot guard on this no-op.
+        liveCategoriesFlow.value = Resource.Success(listOf(frSport))
+        testDispatcher.scheduler.runCurrent()
+        assertEquals("FR", viewModel.uiState.value.selectedLiveLanguage)
+
+        // The reloaded catalog has no FR category at all. Swap it in *before* retrying and without
+        // an intervening `runCurrent()`, so the old collector is cancelled without ever seeing it:
+        // the FR-less catalog is then the retry's own first terminal result, matching the cold,
+        // single-shot categories flow the repository actually exposes, rather than a later hot tick.
+        liveCategoriesFlow.value = Resource.Success(listOf(sportCategory, newsCategory))
+        viewModel.onRetry()
+        testDispatcher.scheduler.runCurrent()
+
+        // FR was never an explicit user choice, so leaving it selected would filter every row out
+        // and strand the tab empty with no chip selected — and no way back, FR no longer being
+        // among the offered languages.
+        assertNull(viewModel.uiState.value.selectedLiveLanguage)
+    }
+
+    @Test
+    fun `explicit Toutes choice made while FR categories are loaded survives a retry`() {
+        coEvery { appPreferencesStore.getDefaultLanguageFilter() } returns "FR"
+        createViewModel()
+        val frSport = Category(id = "30", name = "FR | Sport", type = ContentType.LIVE)
+        stubLiveChannels("30", listOf(Channel(id = "c30", name = "FRChan", logoUrl = null, categoryId = "30", epgChannelId = null)))
+
+        viewModel.onCatalogTabSelected(ContentType.LIVE)
+        // A matching FR category is loaded, so the default would otherwise have a reason to apply.
+        liveCategoriesFlow.value = Resource.Success(listOf(frSport))
+        testDispatcher.scheduler.runCurrent()
+        assertEquals("FR", viewModel.uiState.value.selectedLiveLanguage)
+
+        viewModel.onLanguageSelected(ContentType.LIVE, null)
+        testDispatcher.scheduler.runCurrent()
+        assertNull(viewModel.uiState.value.selectedLiveLanguage)
+
+        // explicitSelectionContentTypes records LIVE even for a null (Toutes) choice, so retrying
+        // must not let the FR default (nor the no-match fallback) override it.
+        viewModel.onRetry()
+        testDispatcher.scheduler.runCurrent()
+
+        assertNull(viewModel.uiState.value.selectedLiveLanguage)
     }
 }

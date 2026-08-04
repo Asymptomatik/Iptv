@@ -22,9 +22,14 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -121,6 +126,80 @@ class CatalogRepositoryImplTest {
             }
         }
 
+    // ── observeLiveCategories — concurrent first fetches ─────────────────────
+
+    @Test
+    fun `two concurrent first collections of observeLiveCategories share a single data source fetch`() =
+        runTest(testDispatcher) {
+            // The Flow is cold, so concurrent collectors all read the in-memory memo as null. Home
+            // makes this the normal case, not a rare race: loading one catalog tab collects its
+            // categories Flow twice at once (buildRowsFlow observes it, LoadCategoryScopedCatalogUseCase
+            // awaits its first terminal value), which used to double every categories request.
+            val categories = listOf(Category("1", "News", ContentType.LIVE))
+            val releaseFetch = CompletableDeferred<Unit>()
+            var fetches = 0
+            coEvery { dataSource.getLiveCategories() } coAnswers {
+                fetches++
+                // Keeps the first fetch in flight so the second collector genuinely overlaps it,
+                // instead of arriving after the memo was already filled.
+                releaseFetch.await()
+                categories
+            }
+
+            val first = async { repository.observeLiveCategories().toList() }
+            val second = async { repository.observeLiveCategories().toList() }
+            runCurrent()
+            releaseFetch.complete(Unit)
+
+            val expected = listOf(Resource.Loading, Resource.Success(categories))
+            assertEquals(expected, first.await())
+            // The waiter is served the winner's result rather than refetching.
+            assertEquals(expected, second.await())
+            assertEquals(1, fetches)
+        }
+
+    @Test
+    fun `an invalidation during an in-flight fetch is not undone by that fetch's result`() =
+        runTest(testDispatcher) {
+            // invalidateCache fires from the application-scoped credentials observer, which cancels
+            // nothing — so a request issued with the previous account's credentials can land after
+            // the cache was cleared. It must not become the new session's cache, and a collector
+            // that arrived after the invalidation must get a genuinely fresh fetch rather than the
+            // stale in-flight one.
+            val oldCategories = listOf(Category("1", "Ancien compte", ContentType.LIVE))
+            val newCategories = listOf(Category("2", "Nouveau compte", ContentType.LIVE))
+            val releaseStaleFetch = CompletableDeferred<Unit>()
+            var call = 0
+            coEvery { dataSource.getLiveCategories() } coAnswers {
+                if (++call == 1) {
+                    releaseStaleFetch.await()
+                    oldCategories
+                } else {
+                    newCategories
+                }
+            }
+
+            val stale = async { repository.observeLiveCategories().toList() }
+            runCurrent()
+            repository.invalidateCache(ContentType.LIVE)
+            val afterInvalidation = async { repository.observeLiveCategories().toList() }
+            runCurrent()
+            releaseStaleFetch.complete(Unit)
+
+            assertEquals(listOf(Resource.Loading, Resource.Success(oldCategories)), stale.await())
+            assertEquals(
+                listOf(Resource.Loading, Resource.Success(newCategories)),
+                afterInvalidation.await(),
+            )
+            // The stale result never reached the memo, so a later collection is served the new data.
+            repository.observeLiveCategories().test {
+                assertEquals(Resource.Loading, awaitItem())
+                assertEquals(Resource.Success(newCategories), awaitItem())
+                awaitComplete()
+            }
+            assertEquals(2, call)
+        }
+
     // ── observeLiveCategories — error paths ──────────────────────────────────
 
     @Test
@@ -135,6 +214,116 @@ class CatalogRepositoryImplTest {
                 assertEquals(exception, error.throwable)
                 awaitComplete()
             }
+        }
+
+    @Test
+    fun `two concurrent collections share a single failed attempt instead of retrying serially`() =
+        runTest(testDispatcher) {
+            // A failure fills no memo, so de-duplicating only successes would leave the second
+            // collector to run its own full request — serialized behind the first, roughly doubling
+            // the time to a terminal value on an offline server. Both collectors must share the one
+            // failed attempt.
+            val exception = CatalogException.NetworkError("Connection refused")
+            val releaseFetch = CompletableDeferred<Unit>()
+            var fetches = 0
+            coEvery { dataSource.getLiveCategories() } coAnswers {
+                fetches++
+                releaseFetch.await()
+                throw exception
+            }
+
+            val first = async { repository.observeLiveCategories().toList() }
+            val second = async { repository.observeLiveCategories().toList() }
+            runCurrent()
+            releaseFetch.complete(Unit)
+
+            listOf(first.await(), second.await()).forEach { emissions ->
+                assertEquals(Resource.Loading, emissions.first())
+                assertEquals(exception, (emissions.last() as Resource.Error).throwable)
+            }
+            assertEquals(1, fetches)
+        }
+
+    @Test
+    fun `a waiter takes the attempt over when the collector owning the fetch is cancelled`() =
+        runTest(testDispatcher) {
+            // The request runs in its owner's coroutine, so leaving that screen cancels it. The
+            // waiter left behind is still on screen: it must restart the attempt rather than stay on
+            // Resource.Loading for the lifetime of the repository.
+            val categories = listOf(Category("1", "News", ContentType.LIVE))
+            val releaseTakeover = CompletableDeferred<Unit>()
+            var fetches = 0
+            coEvery { dataSource.getLiveCategories() } coAnswers {
+                if (++fetches == 1) {
+                    awaitCancellation()
+                } else {
+                    releaseTakeover.await()
+                    categories
+                }
+            }
+
+            val owner = async { repository.observeLiveCategories().toList() }
+            runCurrent()
+            val waiter = async { repository.observeLiveCategories().toList() }
+            runCurrent()
+
+            owner.cancel()
+            runCurrent()
+            releaseTakeover.complete(Unit)
+
+            assertEquals(listOf(Resource.Loading, Resource.Success(categories)), waiter.await())
+            assertEquals(2, fetches)
+        }
+
+    @Test
+    fun `cancelling every participant leaves no in-flight attempt behind for the next collection`() =
+        runTest(testDispatcher) {
+            // Cancellation must retire the shared attempt, not park it: a later collection that finds
+            // a leftover in-flight Deferred would join something already dead.
+            val categories = listOf(Category("1", "News", ContentType.LIVE))
+            var fetches = 0
+            coEvery { dataSource.getLiveCategories() } coAnswers {
+                if (++fetches == 1) awaitCancellation() else categories
+            }
+
+            val owner = async { repository.observeLiveCategories().toList() }
+            runCurrent()
+            val waiter = async { repository.observeLiveCategories().toList() }
+            runCurrent()
+            waiter.cancel()
+            owner.cancel()
+            runCurrent()
+
+            repository.observeLiveCategories().test {
+                assertEquals(Resource.Loading, awaitItem())
+                assertEquals(Resource.Success(categories), awaitItem())
+                awaitComplete()
+            }
+            assertEquals(2, fetches)
+        }
+
+    @Test
+    fun `a collection started after a failed attempt retries instead of replaying the failure`() =
+        runTest(testDispatcher) {
+            // The shared attempt is never remembered: only collectors that were already waiting on
+            // it get the failure. A later collection must be able to succeed.
+            val categories = listOf(Category("1", "News", ContentType.LIVE))
+            var call = 0
+            coEvery { dataSource.getLiveCategories() } coAnswers {
+                if (++call == 1) throw CatalogException.NetworkError("Connection refused") else categories
+            }
+
+            repository.observeLiveCategories().test {
+                assertEquals(Resource.Loading, awaitItem())
+                assertTrue(awaitItem() is Resource.Error)
+                awaitComplete()
+            }
+            repository.observeLiveCategories().test {
+                assertEquals(Resource.Loading, awaitItem())
+                assertEquals(Resource.Success(categories), awaitItem())
+                awaitComplete()
+            }
+            assertEquals(2, call)
         }
 
     @Test

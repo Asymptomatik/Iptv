@@ -27,6 +27,7 @@ import org.junit.rules.TemporaryFolder
  *  - setActiveProfileId then getActiveProfileId round-trips correctly
  *  - setActiveProfileId(null) clears the stored id
  *  - observeActiveProfileId emits current value and reacts to changes
+ *  - getDefaultLanguageFilter/observeDefaultLanguageFilter absent-vs-empty semantics
  */
 class DataStoreAppPreferencesStoreTest {
 
@@ -217,4 +218,59 @@ class DataStoreAppPreferencesStoreTest {
             cancel()
         }
     }
+
+    // ── defaultLanguageFilter ────────────────────────────────────────────
+
+    @Test
+    fun `getDefaultLanguageFilter returns FR when nothing stored`() = testScope.runTest {
+        assertEquals("FR", store.getDefaultLanguageFilter())
+    }
+
+    @Test
+    fun `setDefaultLanguageFilter then getDefaultLanguageFilter returns the stored tag`() =
+        testScope.runTest {
+            store.setDefaultLanguageFilter("EN")
+            assertEquals("EN", store.getDefaultLanguageFilter())
+        }
+
+    @Test
+    fun `setDefaultLanguageFilter with null clears the filter to null`() = testScope.runTest {
+        store.setDefaultLanguageFilter("EN")
+        store.setDefaultLanguageFilter(null)
+        assertNull(store.getDefaultLanguageFilter())
+    }
+
+    @Test
+    fun `setDefaultLanguageFilter trims and uppercases the stored tag`() = testScope.runTest {
+        store.setDefaultLanguageFilter("  fr ")
+        assertEquals("FR", store.getDefaultLanguageFilter())
+    }
+
+    @Test
+    fun `observeDefaultLanguageFilter emits FR initially when nothing stored`() =
+        testScope.runTest {
+            store.observeDefaultLanguageFilter().test {
+                assertEquals("FR", awaitItem())
+                cancel()
+            }
+        }
+
+    @Test
+    fun `observeDefaultLanguageFilter emits current value then reacts to changes`() =
+        testScope.runTest {
+            store.observeDefaultLanguageFilter().test {
+                assertEquals("FR", awaitItem()) // initial — nothing stored yet
+
+                store.setDefaultLanguageFilter("EN")
+                assertEquals("EN", awaitItem())
+
+                store.setDefaultLanguageFilter(null)
+                assertNull(awaitItem())
+
+                store.setDefaultLanguageFilter("  fr ")
+                assertEquals("FR", awaitItem())
+
+                cancel()
+            }
+        }
 }

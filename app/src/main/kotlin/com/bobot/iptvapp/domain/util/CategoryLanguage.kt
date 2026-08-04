@@ -39,6 +39,48 @@ object CategoryLanguage {
     private val NESTED_LANGUAGE_TAG_PATTERN = Regex("^([A-Za-z]{2,10})\\s*[|:-]\\s*([A-Za-z]{2,3})\\s*[|:-]\\s*(.+)$")
 
     /**
+     * Matches a leading token followed by one or more plain whitespace characters and a
+     * non-empty rest, e.g. `"FR Sport"`. Tried only as a last-resort fallback, after both
+     * delimited patterns above have failed to match.
+     *
+     * Unlike `|`, `:` or `-`, a plain space is an entirely ordinary word separator, so this
+     * regex shape alone cannot distinguish a real language prefix (`"FR Sport"`) from any other
+     * two-word category name (`"HD Movies"`, `"TV Shows"`). It is therefore deliberately
+     * unconstrained on the first token's length or content beyond "one or more non-space
+     * characters" — [SPACE_PREFIX_WHITELIST] is what does the actual false-positive filtering:
+     * the matched first token is only accepted as a language tag when it exactly equals one of
+     * the known language/region codes in that closed list.
+     */
+    private val SPACE_LANGUAGE_TAG_PATTERN = Regex("^(\\S+)\\s+(.+)$")
+
+    /**
+     * Closed set of language codes recognised by [SPACE_LANGUAGE_TAG_PATTERN]. Compared
+     * case-insensitively against the matched first token (uppercased). Any first token not in
+     * this list is rejected, regardless of its length or shape, which is what prevents ordinary
+     * two-word category names such as `"HD Movies"` or `"TV Shows"` from being misread as
+     * carrying a language prefix.
+     *
+     * Deliberately **languages only** — the country/region codes `SP`, `UK`, `US`, `BR`, `CA`,
+     * `BE` and `CH` are excluded here. A country is not a language, and behind a mere space the
+     * signal is too weak to act on: `"US Sports"` would be shown as `"Sports"` filed under a
+     * pseudo-language `US`, and every `"CA …"` category would collapse into one row on the
+     * Films/Séries tabs, whose row key *is* the language tag. `SP` is not even the code for
+     * Spanish (`ES` is) and just as plausibly abbreviates Sport or Special. The delimited
+     * patterns are unaffected: `"UK | Sports"`, `"US - Movies"` and `"BR: Novelas"` are still
+     * recognised, the explicit delimiter being a deliberate signal from the provider.
+     *
+     * `VF`, `VO` and `VOSTFR` are not ISO codes but are kept: they are strong French
+     * audiovisual conventions that genuinely describe a version's language.
+     *
+     * `IT` is the one knowingly retained ambiguity (`"IT Support"` would be misread), Italian
+     * being far likelier than an IT-helpdesk category in an IPTV catalogue.
+     */
+    private val SPACE_PREFIX_WHITELIST = setOf(
+        "FR", "FRA", "EN", "ENG", "AR", "ES", "DE", "IT", "PT", "NL", "TR", "RU", "PL",
+        "VF", "VO", "VOSTFR",
+    )
+
+    /**
      * Extracts the language tag from [name], or `null` when no recognised pattern is found.
      *
      * The match is case-insensitive on the input, but the returned tag is always normalized
@@ -54,6 +96,11 @@ object CategoryLanguage {
 
         DIRECT_LANGUAGE_TAG_PATTERN.matchEntire(trimmed)?.let { match ->
             return match.groupValues[1].uppercase()
+        }
+
+        SPACE_LANGUAGE_TAG_PATTERN.matchEntire(trimmed)?.let { match ->
+            val candidate = match.groupValues[1].uppercase()
+            if (candidate in SPACE_PREFIX_WHITELIST) return candidate
         }
 
         return null
@@ -77,6 +124,11 @@ object CategoryLanguage {
 
         DIRECT_LANGUAGE_TAG_PATTERN.matchEntire(trimmed)?.let { match ->
             return match.groupValues[2].trim()
+        }
+
+        SPACE_LANGUAGE_TAG_PATTERN.matchEntire(trimmed)?.let { match ->
+            val candidate = match.groupValues[1].uppercase()
+            if (candidate in SPACE_PREFIX_WHITELIST) return match.groupValues[2].trim()
         }
 
         return trimmed

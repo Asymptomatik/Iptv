@@ -849,6 +849,17 @@ class SearchViewModelTest {
     }
 
     @Test
+    fun `selectedLanguage stays null at initialization — Search has no default language filter, unlike Home`() {
+        // SearchViewModel does not depend on AppPreferencesStore at all: selectedLanguageState is a
+        // standalone MutableStateFlow<String?>(null), entirely separate from HomeViewModel's
+        // per-tab LanguageFilterState and its FR-by-default preference (Task 4,
+        // filtre-langue-fr-par-defaut). Nothing in init should ever populate it.
+        createViewModel()
+
+        assertNull(viewModel.uiState.value.selectedLanguage)
+    }
+
+    @Test
     fun `onLanguageSelected triggers no additional repository fetch of any kind`() {
         createViewModel()
         stubLiveChannels("30", listOf(frChannel))
