@@ -2,6 +2,7 @@ package com.bobot.iptvapp.data.repository
 
 import app.cash.turbine.test
 import com.bobot.iptvapp.data.local.dao.CatalogCacheDao
+import com.bobot.iptvapp.data.local.dao.EpgDao
 import com.bobot.iptvapp.data.local.entity.ChannelEntity
 import com.bobot.iptvapp.data.local.entity.EpisodeEntity
 import com.bobot.iptvapp.data.local.entity.SeriesEntity
@@ -69,6 +70,7 @@ class CatalogRepositoryImplTest {
 
     private lateinit var dataSource: CatalogDataSource
     private lateinit var catalogCacheDao: CatalogCacheDao
+    private lateinit var epgDao: EpgDao
     private lateinit var repository: CatalogRepositoryImpl
     private val testDispatcher = StandardTestDispatcher()
 
@@ -90,6 +92,10 @@ class CatalogRepositoryImplTest {
         // throwing, since most tests in this file are not concerned with the
         // offline-first Room cache write-through behaviour.
         catalogCacheDao = mockk(relaxed = true)
+        // Relaxed: this suite never logs out (no test switches credentials to null), so
+        // epgDao.clearAll() is never expected to be called — see
+        // CatalogRepositoryAccountPartitionTest for the logout-purge tests (Task 4).
+        epgDao = mockk(relaxed = true)
         // Explicit default stubs for every Room-cache *read* method — deterministically
         // "cache empty" — so that, unless a test overrides them, a data-source failure
         // falls through to Resource.Error exactly like before this cache was wired in.
@@ -110,6 +116,7 @@ class CatalogRepositoryImplTest {
         repository = CatalogRepositoryImpl(
             dataSource = dataSource,
             catalogCacheDao = catalogCacheDao,
+            epgDao = epgDao,
             ioDispatcher = testDispatcher,
             credentialsProvider = credentialsProvider,
             applicationScope = testCoroutineScope,

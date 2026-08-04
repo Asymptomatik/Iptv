@@ -27,8 +27,20 @@ import kotlinx.coroutines.flow.flowOf
  * in-memory state at call time — not a live query — which is sufficient here since every
  * caller in [com.bobot.iptvapp.data.repository.CatalogRepositoryImpl] collects with
  * `.first()` immediately after invoking the method.
+ *
+ * ## Simulating a failing purge (Task 4 carry-forward)
+ * [onGlobalClear] is an optional hook invoked at the start of every global (unpartitioned)
+ * `clearAll*`/`clearChannels`/`clearMovies`/`clearSeries` method — the ones
+ * [com.bobot.iptvapp.data.repository.CatalogRepositoryImpl.purgeAllCachePartitionsQuietly]
+ * calls on logout. Set it to a lambda that throws to make every such call fail, without
+ * touching the targeted per-account `clear*ByType`/`clear*BySeriesId` methods used
+ * elsewhere. Left `null` (default) it is a no-op, preserving the existing six tests'
+ * behaviour.
  */
 class FakeCatalogCacheDao : CatalogCacheDao {
+
+    /** See class KDoc "Simulating a failing purge". */
+    var onGlobalClear: (() -> Unit)? = null
 
     private val categories = mutableMapOf<Pair<String, String>, CategoryEntity>()
     private val channels = mutableMapOf<Pair<String, String>, ChannelEntity>()
@@ -55,6 +67,7 @@ class FakeCatalogCacheDao : CatalogCacheDao {
     }
 
     override suspend fun clearAllCategories() {
+        onGlobalClear?.invoke()
         categories.clear()
     }
 
@@ -75,6 +88,7 @@ class FakeCatalogCacheDao : CatalogCacheDao {
         )
 
     override suspend fun clearChannels() {
+        onGlobalClear?.invoke()
         channels.clear()
     }
 
@@ -97,6 +111,7 @@ class FakeCatalogCacheDao : CatalogCacheDao {
     override suspend fun getMovieById(accountKey: String, id: String): MovieEntity? = movies[accountKey to id]
 
     override suspend fun clearMovies() {
+        onGlobalClear?.invoke()
         movies.clear()
     }
 
@@ -119,6 +134,7 @@ class FakeCatalogCacheDao : CatalogCacheDao {
     override suspend fun getSeriesById(accountKey: String, id: String): SeriesEntity? = series[accountKey to id]
 
     override suspend fun clearSeries() {
+        onGlobalClear?.invoke()
         series.clear()
     }
 
@@ -140,6 +156,7 @@ class FakeCatalogCacheDao : CatalogCacheDao {
     }
 
     override suspend fun clearAllSeasons() {
+        onGlobalClear?.invoke()
         seasons.clear()
     }
 
@@ -174,6 +191,7 @@ class FakeCatalogCacheDao : CatalogCacheDao {
     }
 
     override suspend fun clearAllEpisodes() {
+        onGlobalClear?.invoke()
         episodes.clear()
     }
 }

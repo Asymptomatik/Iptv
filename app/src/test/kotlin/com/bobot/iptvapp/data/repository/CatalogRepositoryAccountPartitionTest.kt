@@ -1,7 +1,9 @@
 package com.bobot.iptvapp.data.repository
 
 import app.cash.turbine.test
+import com.bobot.iptvapp.data.local.dao.EpgDao
 import com.bobot.iptvapp.data.local.dao.FakeCatalogCacheDao
+import com.bobot.iptvapp.data.local.mapper.toDomain
 import com.bobot.iptvapp.data.source.CatalogDataSource
 import com.bobot.iptvapp.data.source.InMemoryCredentialsProvider
 import com.bobot.iptvapp.domain.model.ContentType
@@ -11,10 +13,12 @@ import com.bobot.iptvapp.domain.model.Season
 import com.bobot.iptvapp.domain.model.Series
 import com.bobot.iptvapp.domain.model.XtreamCredentials
 import com.bobot.iptvapp.domain.util.Resource
+import com.bobot.iptvapp.domain.util.accountKeyOf
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -63,6 +67,7 @@ class CatalogRepositoryAccountPartitionTest {
 
     private lateinit var dataSource: CatalogDataSource
     private lateinit var catalogCacheDao: FakeCatalogCacheDao
+    private lateinit var epgDao: EpgDao
     private lateinit var repository: CatalogRepositoryImpl
     private val testDispatcher = StandardTestDispatcher()
 
@@ -76,13 +81,30 @@ class CatalogRepositoryAccountPartitionTest {
     fun setUp() {
         dataSource = mockk()
         catalogCacheDao = FakeCatalogCacheDao()
+        // Task 4: getEpg never touches Room (pure network pass-through) — epgDao is injected
+        // into CatalogRepositoryImpl solely for the logout purge, so a plain relaxed mock
+        // (coVerify-checked in the logout tests below) is enough; no real store is needed.
+        epgDao = mockk(relaxed = true)
         repository = CatalogRepositoryImpl(
             dataSource = dataSource,
             catalogCacheDao = catalogCacheDao,
+            epgDao = epgDao,
             ioDispatcher = testDispatcher,
             credentialsProvider = credentialsProvider,
             applicationScope = testCoroutineScope,
         )
+    }
+
+    /**
+     * Sets [credentialsProvider] to `null` (logout), letting the application-scoped
+     * credentials observer in [CatalogRepositoryImpl.init] run to completion. This is what
+     * triggers [CatalogRepositoryImpl.purgeAllCachePartitionsQuietly] (Task 4) — the full,
+     * cross-account Room purge — in addition to the usual in-memory [CatalogRepositoryImpl
+     * .invalidateCaches].
+     */
+    private suspend fun logout() {
+        credentialsProvider.clearCredentials()
+        testDispatcher.scheduler.advanceUntilIdle()
     }
 
     /**
@@ -305,6 +327,115 @@ class CatalogRepositoryAccountPartitionTest {
             // Nothing was ever written for this id either, but the point being verified here is
             // that no read is attempted at all — a stronger guarantee than "the cache was empty".
             coVerify(exactly = 0) { dataSource.getSeriesInfo(any()) }
+        }
+
+    // ── Task 4: logout purges every Room partition; an account switch purges nothing ──
+
+    @Test
+    fun `switching from account A to account B triggers no Room purge and leaves A's partition intact`() =
+        runTest(testDispatcher) {
+            credentialsProvider.setCredentials(accountA)
+            testDispatcher.scheduler.advanceUntilIdle()
+
+            val movieA = buildMovie("movieA")
+            coEvery { dataSource.getMovies(null) } returns listOf(movieA)
+            repository.getMovies(null).test {
+                assertTrue(awaitItem() == Resource.Loading)
+                assertTrue(awaitItem() == Resource.Success(listOf(movieA)))
+                awaitComplete()
+            }
+
+            // Account switch only (non-null -> non-null) — must not purge Room at all.
+            switchToAccountB()
+
+            val accountKeyA = accountKeyOf(accountA)
+            assertEquals(
+                "Account A's Room partition must survive a switch to account B — an account " +
+                    "switch is isolated by accountKey and must never purge Room (only a logout does).",
+                listOf(movieA),
+                catalogCacheDao.observeAllMovies(accountKeyA).first().toDomain(),
+            )
+            coVerify(exactly = 0) { epgDao.clearAll() }
+        }
+
+    @Test
+    fun `logging out purges every Room partition, including an account that was never the last active one`() =
+        runTest(testDispatcher) {
+            // Populate account A's partition, then switch to and populate account B's partition.
+            credentialsProvider.setCredentials(accountA)
+            testDispatcher.scheduler.advanceUntilIdle()
+            val movieA = buildMovie("movieA")
+            coEvery { dataSource.getMovies(null) } returns listOf(movieA)
+            repository.getMovies(null).test {
+                assertTrue(awaitItem() == Resource.Loading)
+                assertTrue(awaitItem() == Resource.Success(listOf(movieA)))
+                awaitComplete()
+            }
+
+            switchToAccountB()
+            val movieB = buildMovie("movieB")
+            coEvery { dataSource.getMovies(null) } returns listOf(movieB)
+            repository.getMovies(null).test {
+                assertTrue(awaitItem() == Resource.Loading)
+                assertTrue(awaitItem() == Resource.Success(listOf(movieB)))
+                awaitComplete()
+            }
+
+            // Logout: credentials go to null. B was the last active account, but the purge must
+            // clear every partition, not just the last one.
+            logout()
+
+            val accountKeyA = accountKeyOf(accountA)
+            val accountKeyB = accountKeyOf(accountB)
+            assertTrue(
+                "Account A's partition must be empty after logout, even though B was the last " +
+                    "active account.",
+                catalogCacheDao.observeAllMovies(accountKeyA).first().isEmpty(),
+            )
+            assertTrue(
+                "Account B's partition must be empty after logout.",
+                catalogCacheDao.observeAllMovies(accountKeyB).first().isEmpty(),
+            )
+            // The 7th table (epg_programs) is owned by EpgDao, not CatalogCacheDao — see
+            // CatalogRepositoryImpl.purgeAllCachePartitionsQuietly.
+            coVerify(exactly = 1) { epgDao.clearAll() }
+        }
+
+    @Test
+    fun `a failing Room purge on logout does not crash the observer and a later operation still works`() =
+        runTest(testDispatcher) {
+            credentialsProvider.setCredentials(accountA)
+            testDispatcher.scheduler.advanceUntilIdle()
+
+            val movieA = buildMovie("movieA")
+            coEvery { dataSource.getMovies(null) } returns listOf(movieA)
+            repository.getMovies(null).test {
+                assertTrue(awaitItem() == Resource.Loading)
+                assertTrue(awaitItem() == Resource.Success(listOf(movieA)))
+                awaitComplete()
+            }
+
+            // Every global clearAll* call on the fake DAO now fails, simulating a Room I/O error
+            // during the logout purge.
+            catalogCacheDao.onGlobalClear = { throw RuntimeException("simulated Room purge failure") }
+
+            // Logout — the purge fails for every table, but this must not crash the
+            // application-scoped credentials-observer coroutine, nor the invalidateCaches() call
+            // that precedes the purge in the same collect{} block.
+            logout()
+
+            // A normal operation afterwards must still work: the observer's coroutine (and thus
+            // future credential-change collections) survived the purge failure. Stub a fresh
+            // result under the now-null-credentials state (currentAccountKey() resolves to null,
+            // so Room is skipped for this call regardless — the point here is only that the
+            // repository is still functional at all).
+            val movieAfterFailedPurge = buildMovie("movieAfterFailedPurge")
+            coEvery { dataSource.getMovies(null) } returns listOf(movieAfterFailedPurge)
+            repository.getMovies(null).test {
+                assertTrue(awaitItem() == Resource.Loading)
+                assertEquals(Resource.Success(listOf(movieAfterFailedPurge)), awaitItem())
+                awaitComplete()
+            }
         }
 
     // ── Fixtures ───────────────────────────────────────────────────────────────

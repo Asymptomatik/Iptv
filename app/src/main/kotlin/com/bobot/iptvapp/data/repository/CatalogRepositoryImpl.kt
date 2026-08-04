@@ -1,6 +1,7 @@
 package com.bobot.iptvapp.data.repository
 
 import com.bobot.iptvapp.data.local.dao.CatalogCacheDao
+import com.bobot.iptvapp.data.local.dao.EpgDao
 import com.bobot.iptvapp.data.local.mapper.toDomain
 import com.bobot.iptvapp.data.local.mapper.toEntity
 import com.bobot.iptvapp.data.source.CatalogDataSource
@@ -97,6 +98,15 @@ import javax.inject.Inject
  * after logout), Room is not touched at all: reads behave as an empty cache (preserving
  * [Resource.Error] on the fallback path) and writes are silently skipped.
  *
+ * ## Full cache purge on logout (Task 4 carry-forward)
+ * The `init {}` credentials observer distinguishes an account switch (non-null →
+ * non-null) from a logout (→ `null`). Both invalidate the in-memory session cache via
+ * [invalidateCaches], but only a logout additionally purges *every* Room partition
+ * (see [purgeAllCachePartitionsQuietly]) — an account switch leaves other partitions
+ * untouched, which per-account isolation already makes safe and which
+ * [com.bobot.iptvapp.ui.screen.settings.SettingsViewModel.onSaveServer]'s
+ * credentials-rollback relies on.
+ *
  * ## Dispatcher
  * All data source calls run on [ioDispatcher] (default: [kotlinx.coroutines.Dispatchers.IO])
  * via [flowOn] for Flows and direct suspension for one-shot methods.
@@ -104,6 +114,8 @@ import javax.inject.Inject
  *
  * @param dataSource           The catalog data source (mock or remote).
  * @param catalogCacheDao      Room DAO backing the offline-first catalog cache.
+ * @param epgDao               Room DAO for the EPG cache. Used *only* to purge `epg_programs`
+ *                             on logout (Task 4 carry-forward) — [getEpg] never reads/writes it.
  * @param ioDispatcher         The IO dispatcher; injected for testability.
  * @param credentialsProvider  Observed for credential changes to trigger cache invalidation.
  * @param applicationScope     Application-scoped [CoroutineScope] for the cache-observer coroutine.
@@ -111,6 +123,7 @@ import javax.inject.Inject
 class CatalogRepositoryImpl @Inject constructor(
     private val dataSource: CatalogDataSource,
     private val catalogCacheDao: CatalogCacheDao,
+    private val epgDao: EpgDao,
     @IoDispatcher private val ioDispatcher: CoroutineDispatcher,
     private val credentialsProvider: CredentialsProvider,
     @ApplicationScope private val applicationScope: CoroutineScope,
@@ -185,7 +198,15 @@ class CatalogRepositoryImpl @Inject constructor(
             credentialsProvider.observeCredentials()
                 .drop(1)
                 .distinctUntilChanged()
-                .collect { invalidateCaches() }
+                .collect { credentials ->
+                    // Both an account switch and a logout invalidate the in-memory session
+                    // cache. Only a logout (credentials == null) additionally purges Room —
+                    // see [purgeAllCachePartitionsQuietly] for why a switch must not (Task 4).
+                    invalidateCaches()
+                    if (credentials == null) {
+                        purgeAllCachePartitionsQuietly()
+                    }
+                }
         }
     }
 
@@ -521,6 +542,43 @@ class CatalogRepositoryImpl @Inject constructor(
             // Best-effort cache write — a failure here does not affect the caller's
             // already-successful network/mock result.
         }
+    }
+
+    /**
+     * Purges every Room cache partition, across *every* account, on logout (Task 4
+     * carry-forward).
+     *
+     * Called only from the `init {}` credentials observer when [CredentialsProvider
+     * .observeCredentials] emits `null` — never on an account switch (non-null →
+     * non-null). Deliberately not merged into [invalidateCaches]: an account switch is
+     * isolated by `accountKey` alone (see class-level KDoc "Account partitioning") and
+     * must leave every partition intact, including the account being switched away
+     * from — this is what lets [com.bobot.iptvapp.ui.screen.settings.SettingsViewModel
+     * .onSaveServer] roll back to the previous credentials after a failed
+     * authentication and still find that account's offline cache usable. A logout has
+     * no "previous account" to protect, so every partition — not just the one active at
+     * logout time — is cleared using the DAOs' unparameterised `clearAll*` methods.
+     *
+     * Uses the seven global (unpartitioned) clears documented on [CatalogCacheDao] and
+     * [EpgDao.clearAll] — the seventh table, `epg_programs`, is owned by [EpgDao] rather
+     * than [CatalogCacheDao] since [getEpg] is a pure network pass-through that never
+     * touches Room; [epgDao] is injected into this class solely for this purge.
+     *
+     * Each table is purged through its own [persistQuietly] call rather than one call
+     * wrapping all seven: a failure purging one table (Room I/O error) must not abort
+     * the remaining purges, and must not crash this application-scoped observer, whose
+     * next collection (a future logout or account switch) still needs to run normally.
+     * [persistQuietly] relays [CancellationException] and swallows everything else,
+     * exactly as it does for cache writes elsewhere in this class.
+     */
+    private suspend fun purgeAllCachePartitionsQuietly() {
+        persistQuietly { catalogCacheDao.clearAllCategories() }
+        persistQuietly { catalogCacheDao.clearChannels() }
+        persistQuietly { catalogCacheDao.clearMovies() }
+        persistQuietly { catalogCacheDao.clearSeries() }
+        persistQuietly { catalogCacheDao.clearAllSeasons() }
+        persistQuietly { catalogCacheDao.clearAllEpisodes() }
+        persistQuietly { epgDao.clearAll() }
     }
 
     /**
