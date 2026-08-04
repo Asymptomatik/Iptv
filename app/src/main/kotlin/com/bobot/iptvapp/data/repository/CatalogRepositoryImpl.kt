@@ -233,6 +233,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 persistQuietly { catalogCacheDao.upsertChannels(result.toEntity()) }
                 emit(Resource.Success(result))
             } catch (t: Throwable) {
+                rethrowIfCancellation(t)
                 emitFromRoomCacheOrError(t) { catalogCacheDao.observeAllChannels().first().toDomain() }
             }
         } else {
@@ -247,6 +248,7 @@ class CatalogRepositoryImpl @Inject constructor(
                     persistQuietly { catalogCacheDao.upsertChannels(result.toEntity()) }
                     emit(Resource.Success(result))
                 } catch (t: Throwable) {
+                    rethrowIfCancellation(t)
                     emitFromRoomCacheOrError(t) {
                         catalogCacheDao.observeChannelsByCategory(categoryId).first().toDomain()
                     }
@@ -265,6 +267,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 persistQuietly { catalogCacheDao.upsertMovies(result.toEntity()) }
                 emit(Resource.Success(result))
             } catch (t: Throwable) {
+                rethrowIfCancellation(t)
                 emitFromRoomCacheOrError(t) { catalogCacheDao.observeAllMovies().first().toDomain() }
             }
         } else {
@@ -277,6 +280,7 @@ class CatalogRepositoryImpl @Inject constructor(
                     persistQuietly { catalogCacheDao.upsertMovies(result.toEntity()) }
                     emit(Resource.Success(result))
                 } catch (t: Throwable) {
+                    rethrowIfCancellation(t)
                     emitFromRoomCacheOrError(t) {
                         catalogCacheDao.observeMoviesByCategory(categoryId).first().toDomain()
                     }
@@ -295,6 +299,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 persistQuietly { catalogCacheDao.upsertSeries(result.toEntity()) }
                 emit(Resource.Success(result))
             } catch (t: Throwable) {
+                rethrowIfCancellation(t)
                 emitFromRoomCacheOrError(t) { catalogCacheDao.observeAllSeries().first().toDomain() }
             }
         } else {
@@ -307,6 +312,7 @@ class CatalogRepositoryImpl @Inject constructor(
                     persistQuietly { catalogCacheDao.upsertSeries(result.toEntity()) }
                     emit(Resource.Success(result))
                 } catch (t: Throwable) {
+                    rethrowIfCancellation(t)
                     emitFromRoomCacheOrError(t) {
                         catalogCacheDao.observeSeriesByCategory(categoryId).first().toDomain()
                     }
@@ -328,6 +334,7 @@ class CatalogRepositoryImpl @Inject constructor(
             try {
                 Resource.Success(dataSource.getMovieInfo(movieId))
             } catch (t: Throwable) {
+                rethrowIfCancellation(t)
                 Resource.Error(throwable = t)
             }
         }
@@ -349,6 +356,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 persistSeriesDetailQuietly(result)
                 Resource.Success(result)
             } catch (t: Throwable) {
+                rethrowIfCancellation(t)
                 Resource.Error(throwable = t)
             }
         }
@@ -363,6 +371,7 @@ class CatalogRepositoryImpl @Inject constructor(
             try {
                 Resource.Success(dataSource.getShortEpg(channelId, limit))
             } catch (t: Throwable) {
+                rethrowIfCancellation(t)
                 Resource.Error(throwable = t)
             }
         }
@@ -386,6 +395,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 val seriesEntity = catalogCacheDao.getSeriesById(episodeEntity.seriesId) ?: return@withContext null
                 seriesEntity.toDomain() to episodeEntity.toDomain()
             } catch (t: Throwable) {
+                rethrowIfCancellation(t)
                 null
             }
         }
@@ -405,6 +415,7 @@ class CatalogRepositoryImpl @Inject constructor(
                     onFailure = { t -> Resource.Error(throwable = t) },
                 )
             } catch (t: Throwable) {
+                rethrowIfCancellation(t)
                 // Guard against data sources that throw instead of returning Result.failure.
                 Resource.Error(throwable = t)
             }
@@ -444,11 +455,26 @@ class CatalogRepositoryImpl @Inject constructor(
     }
 
     /**
+     * Rethrows [t] when it is this coroutine's own cancellation.
+     *
+     * Every public method here funnels failures into a [Resource.Error] (or a Room fallback) through
+     * a broad `catch (Throwable)`. Left alone, those blocks also swallow the cancellation raised when
+     * the caller's job goes away — a screen that navigates back would get a plausible-looking error
+     * state instead of simply stopping. Called first in each such block so cancellation stays
+     * cancellation.
+     */
+    private fun rethrowIfCancellation(t: Throwable) {
+        if (t is CancellationException) throw t
+    }
+
+    /**
      * Runs a Room write [block], silently ignoring any failure (best-effort cache).
      *
      * Cancellation is deliberately *not* absorbed: swallowing it would leave the caller running with
      * an already-cancelled context, so the next suspension point would throw somewhere far less
-     * expected — see [loadCategories], whose owner must reach its cleanup in a known state.
+     * expected — see [loadCategories], whose owner must reach its cleanup in a known state. It is
+     * relayed to the immediate caller only; the callers that need it to travel further guard their
+     * own `catch (Throwable)` with [rethrowIfCancellation].
      */
     private suspend fun persistQuietly(block: suspend () -> Unit) {
         try {
@@ -510,8 +536,11 @@ class CatalogRepositoryImpl @Inject constructor(
      * attempt's result instead covers every terminal alike: a network [Resource.Success], a Room
      * cache fallback, or a [Resource.Error].
      *
-     * The shared attempt is not remembered: [CategoryFetchState.inFlight] is cleared as soon as it
-     * resolves, so a *later* collection retries rather than being served a stale failure.
+     * The shared attempt is not remembered: the owner retires [CategoryFetchState.inFlight] as soon
+     * as it reaches its terminal value, *just before* publishing that value to the waiters, so a
+     * *later* collection retries rather than being served a stale failure. That order is deliberate
+     * — clearing after publishing would let a collector arriving in between rejoin an attempt that
+     * is already over, and on a cancelled attempt rejoin it again and again.
      *
      * ## Invalidation generations
      * [invalidateCache] can fire at any moment from the application-scoped credentials observer,
