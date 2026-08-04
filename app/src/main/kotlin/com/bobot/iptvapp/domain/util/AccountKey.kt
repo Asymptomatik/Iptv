@@ -35,6 +35,13 @@ import java.security.MessageDigest
  * 6. Drop default ports: `:80` for `http`, `:443` for `https`. Non-default ports are preserved.
  * 7. **Preserve query parameters** — if present, included as-is (e.g. `?param=value`).
  * 8. **Preserve fragment** — if present, included as-is (e.g. `#section`).
+ * 9. **Preserve userInfo** — if the URL embeds credentials (e.g. `http://user:pass@host`),
+ *    the `userInfo` substring is reinjected as-is (no lowercasing, no trimming) into the
+ *    reconstructed URL. A `baseUrl` with embedded credentials therefore yields a different
+ *    account key than the same server without them. In practice, [XtreamCredentials.baseUrl]
+ *    is not expected to carry embedded credentials (username/password are supplied as
+ *    separate fields), so this mostly matters if a user pastes a URL with embedded
+ *    credentials into the base URL field.
  *
  * Examples of normalisation:
  * - `" http://EXAMPLE.com:8080 "` → `"http://example.com:8080"`
@@ -61,10 +68,17 @@ import java.security.MessageDigest
  * Input is the concatenation `"<normalized-base-url>|<trimmed-username>"`.
  *
  * ## Edge cases — Hostnames with underscores
- * `java.net.URI` parsing adheres to RFC 2396, which forbids underscores in hostnames. If a
- * server hostname contains an underscore (e.g. `http://my_server:8080`), URI parsing fails,
- * and the normaliser falls back to the raw `trim().trimEnd('/')` string. In this fallback
- * mode, **scheme/host lowercasing is not applied**, so the case is preserved as typed.
+ * An underscore is a valid `reg-name` character per RFC 3986, but it violates the stricter
+ * *server-based* authority grammar that [java.net.URI] uses to populate [java.net.URI.getHost].
+ * As a result, `URI(...)` does **not** throw for a hostname containing an underscore (e.g.
+ * `http://my_server:8080`); it silently falls back to parsing the authority as
+ * *registry-based* (RFC 3986), leaving `uri.host` `null` and `uri.port` `-1`. With an empty
+ * `host`, the `if (scheme.isNotEmpty() && host.isNotEmpty())` check below is false, so the
+ * normaliser takes the same `trimmed.trimEnd('/')` fallback branch **from within the `try`
+ * block** as any other URL whose scheme/host cannot be reconstructed — the `catch` block is
+ * never reached for this case. In this fallback mode, **scheme/host lowercasing is not
+ * applied**, so the case is preserved as typed. (Verified empirically in
+ * `AccountKeyTest` — see the `java.net.URI` platform-behaviour lock tests.)
  *
  * **Risk and mitigation**: If the same account is accessed via `HTTP://my_server` (uppercase)
  * and later `http://my_server` (lowercase), this creates a partition scission — the cache
@@ -130,13 +144,14 @@ private fun normalizeBaseUrl(baseUrl: String): String {
 
         reconstructed
     } catch (e: Exception) {
-        // If URI parsing fails (e.g. underscore in hostname, which violates RFC 2396),
-        // fall back to trimming trailing slashes. In this case, scheme/host lowercasing
-        // is not applied — the URL is used as-is (trimmed). This may cause partition
-        // scission if the same account is accessed via both "HTTP://..." and "http://..."
-        // (e.g., user types "HTTP" then manually switches to "http" for the same server).
-        // This remains safe: scission causes a re-fetch (benign, auto-repairing), never fusion
-        // of distinct accounts, and is rare in practice.
+        // Reached only for baseUrl strings that URI truly cannot parse (e.g. "not a valid
+        // url//"), not for underscore hostnames — those are handled above, inside the `try`
+        // block, because URI silently resolves them to a registry-based authority (host
+        // null) instead of throwing. Here, fall back to trimming trailing slashes. In this
+        // case, scheme/host lowercasing is not applied — the URL is used as-is (trimmed).
+        // This may cause partition scission if the same unparsable string is accessed with
+        // different casing across calls. This remains safe: scission causes a re-fetch
+        // (benign, auto-repairing), never fusion of distinct accounts, and is rare in practice.
         trimmed.trimEnd('/')
     }
 

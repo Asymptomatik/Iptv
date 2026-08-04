@@ -1,6 +1,7 @@
 package com.bobot.iptvapp.domain.util
 
 import com.bobot.iptvapp.domain.model.XtreamCredentials
+import java.net.URI
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Test
@@ -239,5 +240,53 @@ class AccountKeyTest {
 
         assertNotEquals("Different usernames on same server should produce different keys",
             key1, key2)
+    }
+
+    // ── Platform behaviour lock: java.net.URI with an underscore in the host ──
+    //
+    // These tests exist to establish (and lock) the *actual* behaviour of
+    // `java.net.URI` for hostnames containing an underscore, which the
+    // normalisation logic and its documentation depend on. An underscore is a
+    // valid `reg-name` character per RFC 3986 but violates the stricter
+    // server-based authority grammar, so `URI` does NOT throw for such input:
+    // it silently falls back to a registry-based authority, leaving `host`
+    // null and `port` -1. This is verified empirically below (via
+    // `runCatching`, so the test reveals the outcome rather than presupposing
+    // it) so that any future JDK behaviour change is caught by a test failure
+    // instead of stale prose.
+
+    @Test
+    fun `java net URI does not throw for a hostname with an underscore`() {
+        val result = runCatching { URI("http://my_server:8080") }
+
+        assertEquals("URI construction should not throw for an underscore host",
+            true, result.isSuccess)
+    }
+
+    @Test
+    fun `java net URI leaves host null and port -1 for a hostname with an underscore`() {
+        val uri = URI("http://my_server:8080")
+
+        assertEquals("host should be null (registry-based authority, RFC 3986)", null, uri.host)
+        assertEquals("port should be -1 (unparsed)", -1, uri.port)
+    }
+
+    @Test
+    fun `accountKeyOf does not lowercase an underscore host and splits on case difference`() {
+        // End-to-end consequence: since URI parsing does not throw and host
+        // resolves empty, normalizeBaseUrl falls back to the raw trimmed
+        // string from within the `try` block (not the `catch` block) for
+        // this input, so scheme/host case is preserved as typed. Two
+        // differently-cased variants of the same underscore host therefore
+        // produce two distinct account keys (a benign split), never a fusion.
+        val credsUppercase = XtreamCredentials("HTTP://my_server:8080", "user", "pass")
+        val credsLowercase = XtreamCredentials("http://my_server:8080", "user", "pass")
+
+        val keyUppercase = accountKeyOf(credsUppercase)
+        val keyLowercase = accountKeyOf(credsLowercase)
+
+        assertNotEquals(
+            "differently-cased underscore hosts should split into distinct keys, not merge",
+            keyUppercase, keyLowercase)
     }
 }
