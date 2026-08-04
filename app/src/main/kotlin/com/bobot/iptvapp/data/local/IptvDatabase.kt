@@ -28,8 +28,10 @@ import com.bobot.iptvapp.data.local.entity.SeriesEntity
  * **Version 3** — cache tables are now partitioned by account.
  *
  * ### Migration history
- * - `MIGRATION_1_2`: adds `accountKey` column to cache tables (not a partitioning yet).
- * - `MIGRATION_2_3`: recreates cache tables with `accountKey` as part of composite primary keys.
+ * - `MIGRATION_1_2`: adds the `downloads` table (Media3-projected download index); does not
+ *   touch any existing table.
+ * - `MIGRATION_2_3`: recreates the seven catalog cache tables with `accountKey` as the leading
+ *   column of their composite primary key, partitioning them by account.
  *
  * **No `fallbackToDestructiveMigration()` is registered at the database level.**
  *

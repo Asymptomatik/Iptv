@@ -681,6 +681,11 @@ class CatalogRepositoryImpl @Inject constructor(
      * in-flight window safe: even if an invalidation lands between the check and the write, the
      * persisted categories remain scoped to their account. The offline fallback can return data
      * only for the account currently in [CredentialsProvider] — never from a switched-away account.
+     * Notably, this safety does **not** depend on an invalidation event ever firing: the `drop(1)`
+     * on [CredentialsProvider.observeCredentials] (see class-level KDoc "Cache invalidation on
+     * credential change") means the account active at process start never triggers one, yet that
+     * is harmless here — a write from a previous account simply lands in that account's own
+     * partition, which the current account's reads never touch.
      *
      * ## Cancellation
      * The attempt runs in its owner's coroutine, not in an external scope, so leaving the screen
