@@ -259,9 +259,12 @@ class CatalogRepositoryImpl @Inject constructor(
 
     override fun getLiveChannels(categoryId: String?): Flow<Resource<List<Channel>>> = flow {
         emit(Resource.Loading)
-        val accountKey = currentAccountKey()
         if (categoryId == null) {
             cachedAllChannels?.let { emit(Resource.Success(it)); return@flow }
+            // Resolved past the in-memory short-circuit, not before it: currentAccountKey()
+            // reads DataStore and hashes, and once the catalog is loaded most collections are
+            // served entirely from memory and would never use the key.
+            val accountKey = currentAccountKey()
             try {
                 val result = dataSource.getLiveChannels(null)
                 cachedAllChannels = result
@@ -280,6 +283,7 @@ class CatalogRepositoryImpl @Inject constructor(
             if (fromCache != null) {
                 emit(Resource.Success(fromCache))
             } else {
+                val accountKey = currentAccountKey()
                 try {
                     val result = dataSource.getLiveChannels(categoryId)
                     persistQuietly(accountKey) { key -> catalogCacheDao.upsertChannels(result.toEntity(key)) }
@@ -296,9 +300,9 @@ class CatalogRepositoryImpl @Inject constructor(
 
     override fun getMovies(categoryId: String?): Flow<Resource<List<Movie>>> = flow {
         emit(Resource.Loading)
-        val accountKey = currentAccountKey()
         if (categoryId == null) {
             cachedAllMovies?.let { emit(Resource.Success(it)); return@flow }
+            val accountKey = currentAccountKey()
             try {
                 val result = dataSource.getMovies(null)
                 cachedAllMovies = result
@@ -315,6 +319,7 @@ class CatalogRepositoryImpl @Inject constructor(
             if (fromCache != null) {
                 emit(Resource.Success(fromCache))
             } else {
+                val accountKey = currentAccountKey()
                 try {
                     val result = dataSource.getMovies(categoryId)
                     persistQuietly(accountKey) { key -> catalogCacheDao.upsertMovies(result.toEntity(key)) }
@@ -331,9 +336,9 @@ class CatalogRepositoryImpl @Inject constructor(
 
     override fun getSeriesList(categoryId: String?): Flow<Resource<List<Series>>> = flow {
         emit(Resource.Loading)
-        val accountKey = currentAccountKey()
         if (categoryId == null) {
             cachedAllSeries?.let { emit(Resource.Success(it)); return@flow }
+            val accountKey = currentAccountKey()
             try {
                 val result = dataSource.getSeriesList(null)
                 cachedAllSeries = result
@@ -350,6 +355,7 @@ class CatalogRepositoryImpl @Inject constructor(
             if (fromCache != null) {
                 emit(Resource.Success(fromCache))
             } else {
+                val accountKey = currentAccountKey()
                 try {
                     val result = dataSource.getSeriesList(categoryId)
                     persistQuietly(accountKey) { key -> catalogCacheDao.upsertSeries(result.toEntity(key)) }
@@ -627,6 +633,22 @@ class CatalogRepositoryImpl @Inject constructor(
      * [Resource] without being inside a [FlowCollector] — see [loadCategories], which resolves the
      * terminal value first and only emits it afterwards.
      */
+    /**
+     * Account-aware variant of [fromRoomCacheOrError], mirroring the [emitFromRoomCacheOrError]
+     * overload above so the "no account ⇒ never touch Room" rule stays expressed in one place
+     * rather than being re-opened at each call site.
+     */
+    private suspend fun <T> fromRoomCacheOrError(
+        accountKey: String?,
+        error: Throwable,
+        fetchFromCache: suspend (String) -> List<T>,
+    ): Resource<List<T>> =
+        if (accountKey == null) {
+            Resource.Error(throwable = error)
+        } else {
+            fromRoomCacheOrError(error) { fetchFromCache(accountKey) }
+        }
+
     private suspend fun <T> fromRoomCacheOrError(
         error: Throwable,
         fetchFromCache: suspend () -> List<T>,
@@ -766,12 +788,8 @@ class CatalogRepositoryImpl @Inject constructor(
             } catch (t: Throwable) {
                 // Deliberately not memoized, matching the previous behaviour: a Room fallback or an
                 // error never becomes the session cache.
-                result = if (accountKey == null) {
-                    Resource.Error(throwable = t)
-                } else {
-                    fromRoomCacheOrError(t) {
-                        catalogCacheDao.observeCategoriesByType(accountKey, contentType.name).first().toDomain()
-                    }
+                result = fromRoomCacheOrError(accountKey, t) { key ->
+                    catalogCacheDao.observeCategoriesByType(key, contentType.name).first().toDomain()
                 }
             } finally {
                 withContext(NonCancellable) {

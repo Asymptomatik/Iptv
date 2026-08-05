@@ -30,7 +30,12 @@ import java.security.MessageDigest
  * 2. Parse with [java.net.URI] if possible; if parsing fails, fall back to trimming
  *    trailing slashes from the raw string.
  * 3. Lowercase the scheme and host (case-insensitive per RFC 3986).
- * 4. Preserve the path exactly as-is (case-sensitive; `"http://x/Path"` ≠ `"http://x/path"`).
+ * 4. Preserve the path exactly as-is (case-sensitive; `"http://x/Path"` ≠ `"http://x/path"`), and
+ *    **percent-encoding intact** — `"http://x/a%2Fb"` ≠ `"http://x/a/b"`, because an encoded slash
+ *    and a segment separator address two different server paths. This is why the reconstruction
+ *    below reads `rawPath`/`rawQuery`/`rawFragment`/`rawUserInfo` rather than the decoding
+ *    accessors: decoding would *fuse* two distinct accounts onto one key, the one outcome this
+ *    key exists to prevent (contrast with a scission, which merely costs a refetch).
  * 5. Remove trailing slashes from the path only.
  * 6. Drop default ports: `:80` for `http`, `:443` for `https`. Non-default ports are preserved.
  * 7. **Preserve query parameters** — if present, included as-is (e.g. `?param=value`).
@@ -94,10 +99,19 @@ fun accountKeyOf(credentials: XtreamCredentials): String {
     val digest = MessageDigest.getInstance("SHA-256")
     val hashBytes = digest.digest(input.toByteArray(Charsets.UTF_8))
 
-    return hashBytes.joinToString("") { byte ->
-        String.format("%02x", byte)
+    // Hand-rolled hex rather than `joinToString { String.format("%02x", it) }`: the latter
+    // instantiates a Formatter and parses the format string once per byte — 32 times per key —
+    // on a path taken once per catalog operation (see CatalogRepositoryImpl.currentAccountKey).
+    val hex = CharArray(hashBytes.size * 2)
+    for (i in hashBytes.indices) {
+        val byte = hashBytes[i].toInt() and 0xFF
+        hex[i * 2] = HEX_DIGITS[byte ushr 4]
+        hex[i * 2 + 1] = HEX_DIGITS[byte and 0x0F]
     }
+    return String(hex)
 }
+
+private val HEX_DIGITS = "0123456789abcdef".toCharArray()
 
 /**
  * Normalises a baseUrl for use in account key derivation.
@@ -114,7 +128,11 @@ private fun normalizeBaseUrl(baseUrl: String): String {
         // Reconstruct the URL with lowercase scheme and host
         val scheme = uri.scheme?.lowercase() ?: ""
         val host = uri.host?.lowercase() ?: ""
-        val userInfo = uri.userInfo?.let { "$it@" } ?: ""
+        // `raw*` accessors throughout: the non-raw ones return the *percent-decoded* form,
+        // which would collapse `http://x/a%2Fb` and `http://x/a/b` onto the same key even
+        // though they address two distinct server paths. Decoding here would therefore
+        // *fuse* two partitions — the one failure mode this key exists to prevent.
+        val userInfo = uri.rawUserInfo?.let { "$it@" } ?: ""
 
         // Determine default port based on scheme
         val defaultPort = when (scheme) {
@@ -130,10 +148,10 @@ private fun normalizeBaseUrl(baseUrl: String): String {
             ":${uri.port}"
         }
 
-        // Preserve path as-is (case-sensitive), but remove trailing slash
-        val path = (uri.path ?: "").trimEnd('/')
-        val query = uri.query?.let { "?$it" } ?: ""
-        val fragment = uri.fragment?.let { "#$it" } ?: ""
+        // Preserve path as-is (case-sensitive, percent-encoding intact), but remove trailing slash
+        val path = (uri.rawPath ?: "").trimEnd('/')
+        val query = uri.rawQuery?.let { "?$it" } ?: ""
+        val fragment = uri.rawFragment?.let { "#$it" } ?: ""
 
         // Reconstruct: scheme + "://" + userinfo + host + port + path (no trailing slash) + query + fragment
         val reconstructed = if (scheme.isNotEmpty() && host.isNotEmpty()) {

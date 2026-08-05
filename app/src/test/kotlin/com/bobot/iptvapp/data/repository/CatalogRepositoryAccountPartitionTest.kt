@@ -28,14 +28,14 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * Reproducer tests for the cross-account Room catalog cache bleed bug.
+ * Regression tests for the cross-account Room catalog cache bleed bug.
  *
- * [CatalogRepositoryImpl]'s offline-first Room cache (see its class-level KDoc,
- * "Offline-first Room cache") is keyed only by content type / category / series id — never by
- * account. [CatalogRepositoryImpl.invalidateCaches] (triggered by a credentials change, see its
- * `init {}` block) only clears the **in-memory** session cache; it never purges Room. So once a
- * fetch made under account A has been written to Room, that data survives a switch to account B
- * and can resurface through the offline fallback as if it belonged to B.
+ * The bug they lock out: [CatalogRepositoryImpl]'s offline-first Room cache used to be keyed only
+ * by content type / category / series id — never by account — while
+ * [CatalogRepositoryImpl.invalidateCaches] (triggered by a credentials change, see its `init {}`
+ * block) cleared only the **in-memory** session cache and never purged Room. Once a fetch made
+ * under account A had been written to Room, that data survived a switch to account B and could
+ * resurface through the offline fallback as if it belonged to B.
  *
  * These tests are intentionally **not** merged into [CatalogRepositoryImplTest] — that ~850-line
  * suite is green today and its relaxed MockK [com.bobot.iptvapp.data.local.dao.CatalogCacheDao]
@@ -43,13 +43,11 @@ import org.junit.Test
  * that actually persists and replays data across the credentials switch — the behaviour a mocked
  * DAO cannot exercise.
  *
- * ## Task 3 status
- * The two reproducer tests below (`getMovies falls back to account A's Room cache after
- * switching to account B`, `getCachedEpisodeWithSeries resolves account A's cached episode
- * after switching to account B`) now pass — [CatalogRepositoryImpl] partitions every Room
- * access by `accountKey` (see [CatalogRepositoryImpl.currentAccountKey]) and [FakeCatalogCacheDao]
- * enforces that partition in-memory. Their assertions are unchanged from when they were written
- * to lock in the bug; only the underlying production code changed to satisfy them.
+ * The first two tests below were written red, against the buggy behaviour described above, and
+ * now pass: [CatalogRepositoryImpl] partitions every Room access by `accountKey` (see
+ * [CatalogRepositoryImpl.currentAccountKey]) and [FakeCatalogCacheDao] enforces that partition
+ * in-memory. Their assertions are unchanged from when they were written to lock in the bug; only
+ * the underlying production code changed to satisfy them.
  *
  * The tests below them close two gaps a partition-vs-flush ambiguity and a missing-credentials
  * path would otherwise leave open:
@@ -122,7 +120,7 @@ class CatalogRepositoryAccountPartitionTest {
     // ── getMovies(null) — cross-account Room fallback bleed ──────────────────
 
     @Test
-    fun `getMovies falls back to account A's Room cache after switching to account B`() =
+    fun `getMovies does not fall back to account A's Room cache after switching to account B`() =
         runTest(testDispatcher) {
             // Establish account A as the current account before any content is fetched, so the
             // credentials-observer's drop(1) skips this startup emission — matching how a
@@ -140,8 +138,8 @@ class CatalogRepositoryAccountPartitionTest {
                 awaitComplete()
             }
 
-            // Switching to account B invalidates the in-memory cache (but not Room — that is the
-            // bug), and the source now fails, forcing the Room fallback path.
+            // Switching to account B invalidates the in-memory cache, and the source now fails,
+            // forcing the Room fallback path.
             switchToAccountB()
             coEvery { dataSource.getMovies(null) } throws RuntimeException("account B: network down")
 
@@ -154,10 +152,9 @@ class CatalogRepositoryAccountPartitionTest {
                 awaitComplete()
             }
 
-            // Expected (post-fix) behaviour: account B's Room partition is empty, so the fallback
-            // has nothing to serve and the source failure surfaces as Resource.Error. Today, the
-            // Room cache is not partitioned by account, so the fallback instead replays account
-            // A's movie and this assertion fails — the bug this test locks in.
+            // Account B's Room partition is empty, so the fallback has nothing to serve and the
+            // source failure surfaces as Resource.Error. Before the fix the fallback replayed
+            // account A's movie here instead — the bug this test locks out.
             assertTrue(
                 "Expected Resource.Error after switching accounts with a failing source, " +
                     "but got $result — this means the Room fallback resurfaced account A's " +
@@ -284,7 +281,7 @@ class CatalogRepositoryAccountPartitionTest {
     // ── getCachedEpisodeWithSeries — cross-account Room fallback bleed ────────
 
     @Test
-    fun `getCachedEpisodeWithSeries resolves account A's cached episode after switching to account B`() =
+    fun `getCachedEpisodeWithSeries returns null for account A's cached episode after switching to account B`() =
         runTest(testDispatcher) {
             credentialsProvider.setCredentials(accountA)
             testDispatcher.scheduler.advanceUntilIdle()

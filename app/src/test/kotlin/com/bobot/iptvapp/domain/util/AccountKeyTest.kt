@@ -107,6 +107,39 @@ class AccountKeyTest {
         assertEquals(keyWithTrailingSlash, keyWithoutTrailingSlash)
     }
 
+    /**
+     * Regression lock for partition *fusion* — the only failure mode this key cannot tolerate.
+     *
+     * `java.net.URI.getPath()` returns the percent-**decoded** path, so reconstructing from it
+     * would turn `/a%2Fb` into `/a/b` and hand two distinct server paths the same account key,
+     * silently merging their caches. The implementation reads `rawPath` for this reason; the
+     * same applies to `rawQuery`/`rawFragment`/`rawUserInfo`.
+     */
+    @Test
+    fun `accountKeyOf returns different keys for encoded slash and path separator`() {
+        val credsEncodedSlash = XtreamCredentials("http://x/a%2Fb", "user", "pass")
+        val credsRealSeparator = XtreamCredentials("http://x/a/b", "user", "pass")
+
+        val keyEncodedSlash = accountKeyOf(credsEncodedSlash)
+        val keyRealSeparator = accountKeyOf(credsRealSeparator)
+
+        assertNotEquals(
+            "an encoded slash addresses a different server path than a segment separator, " +
+                "so the two must never share a cache partition",
+            keyEncodedSlash, keyRealSeparator)
+    }
+
+    @Test
+    fun `accountKeyOf returns different keys for encoded and decoded query values`() {
+        val credsEncoded = XtreamCredentials("http://x/api?v=a%26b", "user", "pass")
+        val credsDecoded = XtreamCredentials("http://x/api?v=a&b", "user", "pass")
+
+        val keyEncoded = accountKeyOf(credsEncoded)
+        val keyDecoded = accountKeyOf(credsDecoded)
+
+        assertNotEquals(keyEncoded, keyDecoded)
+    }
+
     // ── Username case sensitivity ────────────────────────────────────────────
 
     @Test
