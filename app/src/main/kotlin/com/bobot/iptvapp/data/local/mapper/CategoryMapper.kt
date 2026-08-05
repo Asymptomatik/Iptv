@@ -2,6 +2,7 @@ package com.bobot.iptvapp.data.local.mapper
 
 import com.bobot.iptvapp.data.local.entity.CategoryEntity
 import com.bobot.iptvapp.domain.model.Category
+import com.bobot.iptvapp.domain.util.AccountKey
 
 /**
  * Mapping functions between [CategoryEntity] (Room cache) and [Category] (domain).
@@ -28,8 +29,8 @@ fun CategoryEntity.toDomain(): Category = Category(
  *   [com.bobot.iptvapp.domain.util.accountKeyOf]), part of the entity's composite
  *   primary key.
  */
-fun Category.toEntity(accountKey: String): CategoryEntity = CategoryEntity(
-    accountKey = accountKey,
+fun Category.toEntity(accountKey: AccountKey): CategoryEntity = CategoryEntity(
+    accountKey = accountKey.value,
     id = id,
     name = name,
     contentType = type,
@@ -39,4 +40,4 @@ fun Category.toEntity(accountKey: String): CategoryEntity = CategoryEntity(
 fun List<CategoryEntity>.toDomain(): List<Category> = map { it.toDomain() }
 
 /** Convenience extension to map a list of [Category]s. */
-fun List<Category>.toEntity(accountKey: String): List<CategoryEntity> = map { it.toEntity(accountKey) }
+fun List<Category>.toEntity(accountKey: AccountKey): List<CategoryEntity> = map { it.toEntity(accountKey) }

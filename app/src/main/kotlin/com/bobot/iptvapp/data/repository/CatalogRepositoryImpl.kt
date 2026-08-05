@@ -17,6 +17,7 @@ import com.bobot.iptvapp.domain.model.Movie
 import com.bobot.iptvapp.domain.model.Season
 import com.bobot.iptvapp.domain.model.Series
 import com.bobot.iptvapp.domain.repository.CatalogRepository
+import com.bobot.iptvapp.domain.util.AccountKey
 import com.bobot.iptvapp.domain.util.Resource
 import com.bobot.iptvapp.domain.util.accountKeyOf
 import kotlinx.coroutines.CancellationException
@@ -273,7 +274,7 @@ class CatalogRepositoryImpl @Inject constructor(
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
                 emitFromRoomCacheOrError(accountKey, t) { key ->
-                    catalogCacheDao.observeAllChannels(key).first().toDomain()
+                    catalogCacheDao.observeAllChannels(key.value).first().toDomain()
                 }
             }
         } else {
@@ -291,7 +292,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 } catch (t: Throwable) {
                     rethrowIfCancellation(t)
                     emitFromRoomCacheOrError(accountKey, t) { key ->
-                        catalogCacheDao.observeChannelsByCategory(key, categoryId).first().toDomain()
+                        catalogCacheDao.observeChannelsByCategory(key.value, categoryId).first().toDomain()
                     }
                 }
             }
@@ -311,7 +312,7 @@ class CatalogRepositoryImpl @Inject constructor(
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
                 emitFromRoomCacheOrError(accountKey, t) { key ->
-                    catalogCacheDao.observeAllMovies(key).first().toDomain()
+                    catalogCacheDao.observeAllMovies(key.value).first().toDomain()
                 }
             }
         } else {
@@ -327,7 +328,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 } catch (t: Throwable) {
                     rethrowIfCancellation(t)
                     emitFromRoomCacheOrError(accountKey, t) { key ->
-                        catalogCacheDao.observeMoviesByCategory(key, categoryId).first().toDomain()
+                        catalogCacheDao.observeMoviesByCategory(key.value, categoryId).first().toDomain()
                     }
                 }
             }
@@ -347,7 +348,7 @@ class CatalogRepositoryImpl @Inject constructor(
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
                 emitFromRoomCacheOrError(accountKey, t) { key ->
-                    catalogCacheDao.observeAllSeries(key).first().toDomain()
+                    catalogCacheDao.observeAllSeries(key.value).first().toDomain()
                 }
             }
         } else {
@@ -363,7 +364,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 } catch (t: Throwable) {
                     rethrowIfCancellation(t)
                     emitFromRoomCacheOrError(accountKey, t) { key ->
-                        catalogCacheDao.observeSeriesByCategory(key, categoryId).first().toDomain()
+                        catalogCacheDao.observeSeriesByCategory(key.value, categoryId).first().toDomain()
                     }
                 }
             }
@@ -442,9 +443,9 @@ class CatalogRepositoryImpl @Inject constructor(
             try {
                 val accountKey = currentAccountKey() ?: return@withContext null
                 val episodeEntity =
-                    catalogCacheDao.getEpisodeById(accountKey, episodeId) ?: return@withContext null
+                    catalogCacheDao.getEpisodeById(accountKey.value, episodeId) ?: return@withContext null
                 val seriesEntity =
-                    catalogCacheDao.getSeriesById(accountKey, episodeEntity.seriesId) ?: return@withContext null
+                    catalogCacheDao.getSeriesById(accountKey.value, episodeEntity.seriesId) ?: return@withContext null
                 seriesEntity.toDomain() to episodeEntity.toDomain()
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
@@ -482,7 +483,7 @@ class CatalogRepositoryImpl @Inject constructor(
      * Resolved fresh on every call — see class-level KDoc "Account partitioning" for why
      * this is deliberately not cached in a field.
      */
-    private suspend fun currentAccountKey(): String? =
+    private suspend fun currentAccountKey(): AccountKey? =
         credentialsProvider.getCredentials()?.let { accountKeyOf(it) }
 
     /**
@@ -492,7 +493,7 @@ class CatalogRepositoryImpl @Inject constructor(
      * Caching is a side-effect of a successful fetch — a Room write error must not
      * downgrade an otherwise successful [Resource.Success] emission to an error.
      */
-    private suspend fun persistCategoriesQuietly(accountKey: String, categories: List<Category>) {
+    private suspend fun persistCategoriesQuietly(accountKey: AccountKey, categories: List<Category>) {
         persistQuietly { catalogCacheDao.upsertCategories(categories.toEntity(accountKey)) }
     }
 
@@ -507,7 +508,7 @@ class CatalogRepositoryImpl @Inject constructor(
      * injected explicitly since it is denormalised at the entity layer (not present on
      * the domain models).
      */
-    private suspend fun persistSeriesDetailQuietly(accountKey: String, series: Series) {
+    private suspend fun persistSeriesDetailQuietly(accountKey: AccountKey, series: Series) {
         persistQuietly {
             catalogCacheDao.upsertSeries(listOf(series).toEntity(accountKey))
             catalogCacheDao.upsertSeasons(series.seasons.map { it.toEntity(series.id, accountKey) })
@@ -606,9 +607,9 @@ class CatalogRepositoryImpl @Inject constructor(
      * path without ever touching the DAO.
      */
     private suspend fun <T> FlowCollector<Resource<List<T>>>.emitFromRoomCacheOrError(
-        accountKey: String?,
+        accountKey: AccountKey?,
         error: Throwable,
-        fetchFromCache: suspend (String) -> List<T>,
+        fetchFromCache: suspend (AccountKey) -> List<T>,
     ) {
         if (accountKey == null) {
             emit(Resource.Error(throwable = error))
@@ -622,7 +623,7 @@ class CatalogRepositoryImpl @Inject constructor(
      * When [accountKey] is `null` (no credentials configured — see [currentAccountKey]),
      * the write is skipped entirely rather than persisted under a missing partition.
      */
-    private suspend fun persistQuietly(accountKey: String?, block: suspend (String) -> Unit) {
+    private suspend fun persistQuietly(accountKey: AccountKey?, block: suspend (AccountKey) -> Unit) {
         if (accountKey != null) {
             persistQuietly { block(accountKey) }
         }
@@ -639,9 +640,9 @@ class CatalogRepositoryImpl @Inject constructor(
      * rather than being re-opened at each call site.
      */
     private suspend fun <T> fromRoomCacheOrError(
-        accountKey: String?,
+        accountKey: AccountKey?,
         error: Throwable,
-        fetchFromCache: suspend (String) -> List<T>,
+        fetchFromCache: suspend (AccountKey) -> List<T>,
     ): Resource<List<T>> =
         if (accountKey == null) {
             Resource.Error(throwable = error)
@@ -789,7 +790,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 // Deliberately not memoized, matching the previous behaviour: a Room fallback or an
                 // error never becomes the session cache.
                 result = fromRoomCacheOrError(accountKey, t) { key ->
-                    catalogCacheDao.observeCategoriesByType(key, contentType.name).first().toDomain()
+                    catalogCacheDao.observeCategoriesByType(key.value, contentType.name).first().toDomain()
                 }
             } finally {
                 withContext(NonCancellable) {

@@ -2,6 +2,7 @@ package com.bobot.iptvapp.data.local.mapper
 
 import com.bobot.iptvapp.data.local.entity.EpgProgramEntity
 import com.bobot.iptvapp.domain.model.EpgProgram
+import com.bobot.iptvapp.domain.util.AccountKey
 
 /**
  * Mapping functions between [EpgProgramEntity] (Room cache) and [EpgProgram] (domain).
@@ -26,8 +27,8 @@ fun EpgProgramEntity.toDomain(): EpgProgram = EpgProgram(
  *   [com.bobot.iptvapp.domain.util.accountKeyOf]), part of the entity's composite
  *   primary key.
  */
-fun EpgProgram.toEntity(accountKey: String): EpgProgramEntity = EpgProgramEntity(
-    accountKey = accountKey,
+fun EpgProgram.toEntity(accountKey: AccountKey): EpgProgramEntity = EpgProgramEntity(
+    accountKey = accountKey.value,
     channelId = channelId,
     title = title,
     description = description,
@@ -39,4 +40,4 @@ fun EpgProgram.toEntity(accountKey: String): EpgProgramEntity = EpgProgramEntity
 fun List<EpgProgramEntity>.toDomain(): List<EpgProgram> = map { it.toDomain() }
 
 /** Convenience extension to map a list of [EpgProgram]s. */
-fun List<EpgProgram>.toEntity(accountKey: String): List<EpgProgramEntity> = map { it.toEntity(accountKey) }
+fun List<EpgProgram>.toEntity(accountKey: AccountKey): List<EpgProgramEntity> = map { it.toEntity(accountKey) }

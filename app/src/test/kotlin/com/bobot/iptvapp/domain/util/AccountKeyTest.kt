@@ -186,11 +186,12 @@ class AccountKeyTest {
         val key = accountKeyOf(creds)
 
         // Should match lowercase hex pattern and be exactly 64 characters (SHA-256)
-        assertEquals("Key should be 64 characters", 64, key.length)
+        val hex = key.value
+        assertEquals("Key should be 64 characters", 64, hex.length)
         assertEquals("Key should be lowercase hexadecimal",
-            key, key.lowercase())
+            hex, hex.lowercase())
         assertEquals("Key should only contain hex digits",
-            key, key.filter { it in '0'..'9' || it in 'a'..'f' }.take(key.length))
+            hex, hex.filter { it in '0'..'9' || it in 'a'..'f' }.take(hex.length))
     }
 
     @Test
@@ -247,9 +248,10 @@ class AccountKeyTest {
         val key = accountKeyOf(credsInvalidUrl)
 
         // Should not throw, and should produce a valid 64-char hex hash
-        assertEquals("Key should be 64 characters even for invalid URLs", 64, key.length)
+        val hex = key.value
+        assertEquals("Key should be 64 characters even for invalid URLs", 64, hex.length)
         assertEquals("Key should be lowercase hexadecimal",
-            key, key.filter { it in '0'..'9' || it in 'a'..'f' }.take(key.length))
+            hex, hex.filter { it in '0'..'9' || it in 'a'..'f' }.take(hex.length))
     }
 
     @Test

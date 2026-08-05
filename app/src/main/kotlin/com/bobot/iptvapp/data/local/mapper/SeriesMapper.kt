@@ -6,6 +6,7 @@ import com.bobot.iptvapp.data.local.entity.SeriesEntity
 import com.bobot.iptvapp.domain.model.Episode
 import com.bobot.iptvapp.domain.model.Season
 import com.bobot.iptvapp.domain.model.Series
+import com.bobot.iptvapp.domain.util.AccountKey
 
 /**
  * Mapping functions for the Series → Season → Episode entity hierarchy.
@@ -55,8 +56,8 @@ fun SeriesEntity.toDomain(seasons: List<Season> = emptyList()): Series = Series(
  *   [com.bobot.iptvapp.domain.util.accountKeyOf]), part of the entity's composite
  *   primary key.
  */
-fun Series.toEntity(accountKey: String): SeriesEntity = SeriesEntity(
-    accountKey = accountKey,
+fun Series.toEntity(accountKey: AccountKey): SeriesEntity = SeriesEntity(
+    accountKey = accountKey.value,
     id = id,
     title = title,
     coverUrl = coverUrl,
@@ -90,8 +91,8 @@ fun SeasonEntity.toDomain(episodes: List<Episode> = emptyList()): Season = Seaso
  *   [com.bobot.iptvapp.domain.util.accountKeyOf]), part of the entity's composite
  *   primary key.
  */
-fun Season.toEntity(seriesId: String, accountKey: String): SeasonEntity = SeasonEntity(
-    accountKey = accountKey,
+fun Season.toEntity(seriesId: String, accountKey: AccountKey): SeasonEntity = SeasonEntity(
+    accountKey = accountKey.value,
     seriesId = seriesId,
     seasonNumber = seasonNumber,
     name = name,
@@ -121,8 +122,8 @@ fun EpisodeEntity.toDomain(): Episode = Episode(
  *   [com.bobot.iptvapp.domain.util.accountKeyOf]), part of the entity's composite
  *   primary key.
  */
-fun Episode.toEntity(seriesId: String, accountKey: String): EpisodeEntity = EpisodeEntity(
-    accountKey = accountKey,
+fun Episode.toEntity(seriesId: String, accountKey: AccountKey): EpisodeEntity = EpisodeEntity(
+    accountKey = accountKey.value,
     id = id,
     seriesId = seriesId,
     seasonNumber = seasonNumber,
@@ -138,7 +139,7 @@ fun Episode.toEntity(seriesId: String, accountKey: String): EpisodeEntity = Epis
 
 @JvmName("episodeEntitiesToDomain")
 fun List<EpisodeEntity>.toDomain(): List<Episode> = map { it.toDomain() }
-fun List<Episode>.toEntity(seriesId: String, accountKey: String): List<EpisodeEntity> =
+fun List<Episode>.toEntity(seriesId: String, accountKey: AccountKey): List<EpisodeEntity> =
     map { it.toEntity(seriesId, accountKey) }
 @JvmName("seriesEntitiesToDomain")
 fun List<SeriesEntity>.toDomain(): List<Series> = map { it.toDomain() }
@@ -152,4 +153,4 @@ fun List<SeriesEntity>.toDomain(): List<Series> = map { it.toDomain() }
  *   [com.bobot.iptvapp.domain.util.accountKeyOf]), part of each entity's composite
  *   primary key.
  */
-fun List<Series>.toEntity(accountKey: String): List<SeriesEntity> = map { it.toEntity(accountKey) }
+fun List<Series>.toEntity(accountKey: AccountKey): List<SeriesEntity> = map { it.toEntity(accountKey) }

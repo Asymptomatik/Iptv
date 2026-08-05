@@ -350,7 +350,7 @@ class CatalogRepositoryAccountPartitionTest {
                 "Account A's Room partition must survive a switch to account B — an account " +
                     "switch is isolated by accountKey and must never purge Room (only a logout does).",
                 listOf(movieA),
-                catalogCacheDao.observeAllMovies(accountKeyA).first().toDomain(),
+                catalogCacheDao.observeAllMovies(accountKeyA.value).first().toDomain(),
             )
             coVerify(exactly = 0) { epgDao.clearAll() }
         }
@@ -387,11 +387,11 @@ class CatalogRepositoryAccountPartitionTest {
             assertTrue(
                 "Account A's partition must be empty after logout, even though B was the last " +
                     "active account.",
-                catalogCacheDao.observeAllMovies(accountKeyA).first().isEmpty(),
+                catalogCacheDao.observeAllMovies(accountKeyA.value).first().isEmpty(),
             )
             assertTrue(
                 "Account B's partition must be empty after logout.",
-                catalogCacheDao.observeAllMovies(accountKeyB).first().isEmpty(),
+                catalogCacheDao.observeAllMovies(accountKeyB.value).first().isEmpty(),
             )
             // The 7th table (epg_programs) is owned by EpgDao, not CatalogCacheDao — see
             // CatalogRepositoryImpl.purgeAllCachePartitionsQuietly.

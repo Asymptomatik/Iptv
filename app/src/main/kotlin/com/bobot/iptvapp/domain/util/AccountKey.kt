@@ -91,7 +91,44 @@ import java.security.MessageDigest
  * and once data is fetched, the scission is resolved. This is a **recoverable race condition**,
  * never a **fusion** of two distinct accounts, and remains within the assumed risk model.
  */
-fun accountKeyOf(credentials: XtreamCredentials): String {
+/**
+ * The cache partition key of one Xtream account — see [accountKeyOf] for how it is derived.
+ *
+ * This is a [JvmInline] value class rather than a bare `String` for one reason: `accountKey` and
+ * the various content ids threaded alongside it are all opaque strings, so a bare `String` lets
+ * `toEntity(seriesId, accountKey)` be called with its arguments inverted and still compile. That
+ * mistake writes rows into a partition no query ever reads and no targeted delete ever purges —
+ * a cache that silently stops filling, with no error anywhere. Wrapping the key makes every such
+ * inversion a compile error, at zero runtime cost (the wrapper is erased to its [value]).
+ *
+ * ## Where the wrapper stops: the Room boundary
+ * The seven cache entities declare `accountKey` as a plain `String` column, and the
+ * [com.bobot.iptvapp.data.local.dao.CatalogCacheDao] / [com.bobot.iptvapp.data.local.dao.EpgDao]
+ * query methods take a plain `String` too. Callers unwrap with [value] at the DAO call site.
+ *
+ * This is a hard constraint, not a preference. **Room 2.6.1 cannot bind a value class as a
+ * `@Query` parameter.** Kotlin mangles the JVM name of any function taking one
+ * (`clearEpisodesBySeriesId` becomes `clearEpisodesBySeriesId-GRyQvLA`), and Room's processor
+ * neither handles the mangled name nor reports an error: it *silently omits* every affected
+ * method from the generated `_Impl`, which then fails to compile as an incomplete implementation
+ * of the DAO interface. A database-level `@TypeConverter` does not help — the omission happens
+ * before conversion is ever considered. Should a future Room version add support, moving the
+ * boundary down to the DAO is a mechanical change.
+ *
+ * Keeping the entity columns as raw `String` has a second benefit worth preserving regardless:
+ * it guarantees this wrapper cannot perturb the exported schema or the identity hash that
+ * [com.bobot.iptvapp.data.local.DatabaseMigrations.MIGRATION_2_3] is verified against.
+ *
+ * The protection that matters is still in force: the mappers
+ * ([com.bobot.iptvapp.data.local.mapper.toEntity]) take an [AccountKey], so the argument-inversion
+ * failure described above — the one that silently corrupts *writes* — is a compile error. A DAO
+ * call site can still transpose two strings, but that failure mode is a read miss, which merely
+ * costs a refetch.
+ */
+@JvmInline
+value class AccountKey(val value: String)
+
+fun accountKeyOf(credentials: XtreamCredentials): AccountKey {
     val normalised = normalizeBaseUrl(credentials.baseUrl)
     val trimmedUsername = credentials.username.trim()
     val input = "$normalised|$trimmedUsername"
@@ -108,7 +145,7 @@ fun accountKeyOf(credentials: XtreamCredentials): String {
         hex[i * 2] = HEX_DIGITS[byte ushr 4]
         hex[i * 2 + 1] = HEX_DIGITS[byte and 0x0F]
     }
-    return String(hex)
+    return AccountKey(String(hex))
 }
 
 private val HEX_DIGITS = "0123456789abcdef".toCharArray()

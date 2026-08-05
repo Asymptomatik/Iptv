@@ -2,6 +2,7 @@ package com.bobot.iptvapp.data.local.mapper
 
 import com.bobot.iptvapp.data.local.entity.ChannelEntity
 import com.bobot.iptvapp.domain.model.Channel
+import com.bobot.iptvapp.domain.util.AccountKey
 
 /**
  * Mapping functions between [ChannelEntity] (Room cache) and [Channel] (domain).
@@ -26,8 +27,8 @@ fun ChannelEntity.toDomain(): Channel = Channel(
  *   [com.bobot.iptvapp.domain.util.accountKeyOf]), part of the entity's composite
  *   primary key.
  */
-fun Channel.toEntity(accountKey: String): ChannelEntity = ChannelEntity(
-    accountKey = accountKey,
+fun Channel.toEntity(accountKey: AccountKey): ChannelEntity = ChannelEntity(
+    accountKey = accountKey.value,
     id = id,
     name = name,
     logoUrl = logoUrl,
@@ -39,4 +40,4 @@ fun Channel.toEntity(accountKey: String): ChannelEntity = ChannelEntity(
 fun List<ChannelEntity>.toDomain(): List<Channel> = map { it.toDomain() }
 
 /** Convenience extension to map a list of [Channel]s. */
-fun List<Channel>.toEntity(accountKey: String): List<ChannelEntity> = map { it.toEntity(accountKey) }
+fun List<Channel>.toEntity(accountKey: AccountKey): List<ChannelEntity> = map { it.toEntity(accountKey) }
