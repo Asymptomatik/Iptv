@@ -61,3 +61,7 @@ Thumbs.db
 
 # ── Scratch/debug artifacts (may contain leaked credentials) ──────────────
 C:\\Users\\bobot\\AppData\\Local\\Temp\\adb_scratch\\phone_logcat.txt
+
+# ── Local agent tooling (per-machine state, never shared) ─────────────────
+.codex/
+.tokensave/
