@@ -1,7 +1,6 @@
 package com.bobot.iptvapp.data.local.entity
 
 import androidx.room.Entity
-import androidx.room.PrimaryKey
 import com.bobot.iptvapp.domain.model.ContentType
 
 /**
@@ -15,13 +14,20 @@ import com.bobot.iptvapp.domain.model.ContentType
  * Corresponds to domain model [com.bobot.iptvapp.domain.model.Category].
  * Entity-to-domain mapping is handled in Task 11 local repositories.
  *
+ * ## Account partitioning (schema v3)
+ * [accountKey] (see [com.bobot.iptvapp.domain.util.accountKeyOf]) is part of the
+ * composite primary key so that the cache is isolated per Xtream account — rows from
+ * one account are never visible when reading under another. [contentType] is a plain
+ * column and does not participate in the primary key.
+ *
  * ## Migration policy
  * Catalog cache — destructive fallback is acceptable. The next app launch
  * re-fetches and rebuilds the cache from the Xtream Codes API.
  */
-@Entity(tableName = "categories")
+@Entity(tableName = "categories", primaryKeys = ["accountKey", "id"])
 data class CategoryEntity(
-    @PrimaryKey val id: String,
+    val accountKey: String,
+    val id: String,
     val name: String,
     /**
      * Stored as [ContentType] enum name via [com.bobot.iptvapp.data.local.Converters].

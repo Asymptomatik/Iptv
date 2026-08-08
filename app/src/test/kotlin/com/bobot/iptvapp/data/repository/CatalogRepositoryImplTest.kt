@@ -2,6 +2,7 @@ package com.bobot.iptvapp.data.repository
 
 import app.cash.turbine.test
 import com.bobot.iptvapp.data.local.dao.CatalogCacheDao
+import com.bobot.iptvapp.data.local.dao.EpgDao
 import com.bobot.iptvapp.data.local.entity.ChannelEntity
 import com.bobot.iptvapp.data.local.entity.EpisodeEntity
 import com.bobot.iptvapp.data.local.entity.SeriesEntity
@@ -28,6 +29,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -54,11 +56,21 @@ import org.junit.Test
  *  - verify that successful fetches persist to the Room catalog cache (Task 11b),
  *  - verify that a data source failure falls back to the Room cache when available,
  *    otherwise still emits [Resource.Error] (Task 11b).
+ *
+ * ## Account partitioning (Task 3 carry-forward)
+ * All Room reads/writes are now scoped by `accountKey`, resolved per-operation from
+ * [credentialsProvider] (see [CatalogRepositoryImpl.currentAccountKey]). [setUp] configures
+ * [credentialsProvider] with [testCredentials] *before* constructing [repository] so every
+ * test in this file resolves a non-null account key — matching how a real session behaves —
+ * and the DAO stubs below accept `any()` for that parameter since its exact hash value is
+ * not under test here (see [com.bobot.iptvapp.data.repository.CatalogRepositoryAccountPartitionTest]
+ * for tests that exercise the partitioning itself).
  */
 class CatalogRepositoryImplTest {
 
     private lateinit var dataSource: CatalogDataSource
     private lateinit var catalogCacheDao: CatalogCacheDao
+    private lateinit var epgDao: EpgDao
     private lateinit var repository: CatalogRepositoryImpl
     private val testDispatcher = StandardTestDispatcher()
 
@@ -71,6 +83,8 @@ class CatalogRepositoryImplTest {
     // launched in CatalogRepositoryImpl.init{} runs within the test dispatcher.
     private val testCoroutineScope = CoroutineScope(testDispatcher)
 
+    private val testCredentials = XtreamCredentials("http://test-server.example.com", "testuser", "testpass")
+
     @Before
     fun setUp() {
         dataSource = mockk()
@@ -78,22 +92,31 @@ class CatalogRepositoryImplTest {
         // throwing, since most tests in this file are not concerned with the
         // offline-first Room cache write-through behaviour.
         catalogCacheDao = mockk(relaxed = true)
+        // Relaxed: this suite never logs out (no test switches credentials to null), so
+        // epgDao.clearAll() is never expected to be called — see
+        // CatalogRepositoryAccountPartitionTest for the logout-purge tests (Task 4).
+        epgDao = mockk(relaxed = true)
         // Explicit default stubs for every Room-cache *read* method — deterministically
         // "cache empty" — so that, unless a test overrides them, a data-source failure
         // falls through to Resource.Error exactly like before this cache was wired in.
         // (Relying on MockK's relaxed-mock defaulting for Flow-returning methods would be
-        // implementation-defined; explicit stubs keep this deterministic.)
-        every { catalogCacheDao.observeCategoriesByType(any()) } returns flowOf(emptyList())
-        every { catalogCacheDao.observeAllChannels() } returns flowOf(emptyList())
-        every { catalogCacheDao.observeChannelsByCategory(any()) } returns flowOf(emptyList())
-        every { catalogCacheDao.observeAllMovies() } returns flowOf(emptyList())
-        every { catalogCacheDao.observeMoviesByCategory(any()) } returns flowOf(emptyList())
-        every { catalogCacheDao.observeAllSeries() } returns flowOf(emptyList())
-        every { catalogCacheDao.observeSeriesByCategory(any()) } returns flowOf(emptyList())
+        // implementation-defined; explicit stubs keep this deterministic.) The accountKey
+        // parameter is stubbed with any() — see class-level KDoc "Account partitioning".
+        every { catalogCacheDao.observeCategoriesByType(any(), any()) } returns flowOf(emptyList())
+        every { catalogCacheDao.observeAllChannels(any()) } returns flowOf(emptyList())
+        every { catalogCacheDao.observeChannelsByCategory(any(), any()) } returns flowOf(emptyList())
+        every { catalogCacheDao.observeAllMovies(any()) } returns flowOf(emptyList())
+        every { catalogCacheDao.observeMoviesByCategory(any(), any()) } returns flowOf(emptyList())
+        every { catalogCacheDao.observeAllSeries(any()) } returns flowOf(emptyList())
+        every { catalogCacheDao.observeSeriesByCategory(any(), any()) } returns flowOf(emptyList())
+        // Configured before the repository is constructed so its init{} credentials
+        // observer (drop(1)) skips this startup value, exactly like a restored session.
+        runBlocking { credentialsProvider.setCredentials(testCredentials) }
         // A fresh repository instance per test ensures no cached state bleeds between tests.
         repository = CatalogRepositoryImpl(
             dataSource = dataSource,
             catalogCacheDao = catalogCacheDao,
+            epgDao = epgDao,
             ioDispatcher = testDispatcher,
             credentialsProvider = credentialsProvider,
             applicationScope = testCoroutineScope,
@@ -440,10 +463,17 @@ class CatalogRepositoryImplTest {
     fun `getLiveChannels falls back to the Room cache when the data source fails and cache has data`() =
         runTest(testDispatcher) {
             val cachedEntities = listOf(
-                ChannelEntity(id = "101", name = "BBC", logoUrl = null, categoryId = "cat1", epgChannelId = "bbc.world"),
+                ChannelEntity(
+                    accountKey = "irrelevant-account-key",
+                    id = "101",
+                    name = "BBC",
+                    logoUrl = null,
+                    categoryId = "cat1",
+                    epgChannelId = "bbc.world",
+                ),
             )
             coEvery { dataSource.getLiveChannels(null) } throws CatalogException.NetworkError("Offline")
-            every { catalogCacheDao.observeAllChannels() } returns flowOf(cachedEntities)
+            every { catalogCacheDao.observeAllChannels(any()) } returns flowOf(cachedEntities)
 
             repository.getLiveChannels(null).test {
                 awaitItem() // Loading
@@ -459,7 +489,7 @@ class CatalogRepositoryImplTest {
         runTest(testDispatcher) {
             val exception = CatalogException.NetworkError("Offline")
             coEvery { dataSource.getLiveChannels(null) } throws exception
-            every { catalogCacheDao.observeAllChannels() } returns flowOf(emptyList())
+            every { catalogCacheDao.observeAllChannels(any()) } returns flowOf(emptyList())
 
             repository.getLiveChannels(null).test {
                 awaitItem() // Loading
@@ -823,8 +853,8 @@ class CatalogRepositoryImplTest {
         runTest(testDispatcher) {
             val episodeEntity = buildEpisodeEntity("e1", seriesId = "s1")
             val seriesEntity = buildSeriesEntity("s1")
-            coEvery { catalogCacheDao.getEpisodeById("e1") } returns episodeEntity
-            coEvery { catalogCacheDao.getSeriesById("s1") } returns seriesEntity
+            coEvery { catalogCacheDao.getEpisodeById(any(), "e1") } returns episodeEntity
+            coEvery { catalogCacheDao.getSeriesById(any(), "s1") } returns seriesEntity
 
             val result = repository.getCachedEpisodeWithSeries("e1")
 
@@ -839,20 +869,20 @@ class CatalogRepositoryImplTest {
     @Test
     fun `getCachedEpisodeWithSeries returns null when the episode is not cached`() =
         runTest(testDispatcher) {
-            coEvery { catalogCacheDao.getEpisodeById("missing") } returns null
+            coEvery { catalogCacheDao.getEpisodeById(any(), "missing") } returns null
 
             val result = repository.getCachedEpisodeWithSeries("missing")
 
             assertEquals(null, result)
-            coVerify(exactly = 0) { catalogCacheDao.getSeriesById(any()) }
+            coVerify(exactly = 0) { catalogCacheDao.getSeriesById(any(), any()) }
         }
 
     @Test
     fun `getCachedEpisodeWithSeries returns null when the parent series is not cached`() =
         runTest(testDispatcher) {
             val episodeEntity = buildEpisodeEntity("e1", seriesId = "s1")
-            coEvery { catalogCacheDao.getEpisodeById("e1") } returns episodeEntity
-            coEvery { catalogCacheDao.getSeriesById("s1") } returns null
+            coEvery { catalogCacheDao.getEpisodeById(any(), "e1") } returns episodeEntity
+            coEvery { catalogCacheDao.getSeriesById(any(), "s1") } returns null
 
             val result = repository.getCachedEpisodeWithSeries("e1")
 
@@ -862,7 +892,7 @@ class CatalogRepositoryImplTest {
     @Test
     fun `getCachedEpisodeWithSeries returns null instead of throwing when a Room read fails`() =
         runTest(testDispatcher) {
-            coEvery { catalogCacheDao.getEpisodeById("e1") } throws RuntimeException("Disk error")
+            coEvery { catalogCacheDao.getEpisodeById(any(), "e1") } throws RuntimeException("Disk error")
 
             val result = repository.getCachedEpisodeWithSeries("e1")
 
@@ -992,6 +1022,7 @@ class CatalogRepositoryImplTest {
     )
 
     private fun buildEpisodeEntity(id: String, seriesId: String, seasonNumber: Int = 1) = EpisodeEntity(
+        accountKey = "irrelevant-account-key",
         id = id,
         seriesId = seriesId,
         seasonNumber = seasonNumber,
@@ -1004,6 +1035,7 @@ class CatalogRepositoryImplTest {
     )
 
     private fun buildSeriesEntity(id: String) = SeriesEntity(
+        accountKey = "irrelevant-account-key",
         id = id,
         title = "Series $id",
         coverUrl = null,

@@ -1,7 +1,6 @@
 package com.bobot.iptvapp.data.local.entity
 
 import androidx.room.Entity
-import androidx.room.PrimaryKey
 
 /**
  * Room entity caching an Xtream Codes VOD movie.
@@ -11,13 +10,18 @@ import androidx.room.PrimaryKey
  *
  * [categoryId] is a logical foreign key to [CategoryEntity.id] (no DB-level constraint).
  *
+ * ## Account partitioning (schema v3)
+ * [accountKey] (see [com.bobot.iptvapp.domain.util.accountKeyOf]) is part of the
+ * composite primary key so that the cache is isolated per Xtream account.
+ *
  * ## Migration policy
  * Catalog cache — destructive fallback is acceptable. The next app launch
  * re-fetches and rebuilds the cache from the Xtream Codes API.
  */
-@Entity(tableName = "movies")
+@Entity(tableName = "movies", primaryKeys = ["accountKey", "id"])
 data class MovieEntity(
-    @PrimaryKey val id: String,
+    val accountKey: String,
+    val id: String,
     val title: String,
     val posterUrl: String?,
     val plot: String?,

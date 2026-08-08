@@ -355,6 +355,12 @@ data class HomeUiState(
  * unless configured otherwise, or `null` for "Toutes") — not a live-updating preference, so it is
  * read exactly once in [init] and memoized in [defaultLanguageFilter], a [CompletableDeferred]
  * rather than an observed `Flow`.
+ *
+ * There are in fact **two** such defaults, read and memoized identically: [defaultLanguageFilter]
+ * for Films/Series and [defaultLiveLanguageFilter] (`"EU"` by default) for Chaines, since providers
+ * tag live categories by region and VOD ones by language — see
+ * [AppPreferencesStore.observeDefaultLiveLanguageFilter]. [defaultFilterFor] picks the right one per
+ * tab; everything below applies to whichever was picked, unchanged.
  *  - [loadCatalogTab] `await()`s [defaultLanguageFilter] *before* launching the coroutine that
  *    collects [buildRowsFlow] for that tab — this ordering is required: without it, [buildRowsFlow]'s
  *    combine could process the tab's first categories emission before the default is known,
@@ -496,6 +502,31 @@ class HomeViewModel @Inject constructor(
     private val defaultLanguageFilter = CompletableDeferred<String?>()
 
     /**
+     * [defaultLanguageFilter]'s counterpart for [ContentType.LIVE], read from
+     * [AppPreferencesStore.getDefaultLiveLanguageFilter]. Every guarantee documented on
+     * [defaultLanguageFilter] applies here identically — same one-shot read in [init], same
+     * [readOrNull] isolation, same `finally` completion, same "`null` means Toutes, never a
+     * hardcoded tag" rule.
+     *
+     * It exists because live and VOD categories are tagged on different axes by real providers
+     * (regions vs. languages), so one shared default cannot serve both — see
+     * [AppPreferencesStore.observeDefaultLiveLanguageFilter] for the catalogue evidence.
+     * [defaultFilterFor] is what picks between the two.
+     */
+    private val defaultLiveLanguageFilter = CompletableDeferred<String?>()
+
+    /**
+     * The default filter tag applying to [contentType]: [defaultLiveLanguageFilter] for
+     * [ContentType.LIVE], [defaultLanguageFilter] for Films/Series. Suspends until the
+     * corresponding one-shot read has completed (both are guaranteed to complete — see their KDoc).
+     */
+    private suspend fun defaultFilterFor(contentType: ContentType): String? =
+        when (contentType) {
+            ContentType.LIVE -> defaultLiveLanguageFilter.await()
+            else -> defaultLanguageFilter.await()
+        }
+
+    /**
      * Content types for which the [defaultLanguageFilter] default has already been applied (or
      * deliberately skipped due to an explicit choice), for this ViewModel instance — guarantees the
      * default is applied at most once per tab, surviving [onRetry] re-invoking [loadCatalogTab] for
@@ -548,13 +579,21 @@ class HomeViewModel @Inject constructor(
                 // one-shot fallback". Read once here (same lifecycle as the two fields above), never
                 // observed reactively.
                 defaultLanguageFilter.complete(readOrNull { appPreferencesStore.getDefaultLanguageFilter() })
+                // Same, for the Chaines tab — a separate preference because live categories are
+                // tagged by region and VOD ones by language (see defaultLiveLanguageFilter).
+                defaultLiveLanguageFilter.complete(
+                    readOrNull { appPreferencesStore.getDefaultLiveLanguageFilter() },
+                )
             } finally {
-                // Guarantee (see [defaultLanguageFilter] KDoc): this deferred must ALWAYS complete,
-                // even if any of the three reads above throws. `null` means "no default / Toutes",
-                // never a hardcoded "FR" (that fallback belongs to DataStoreAppPreferencesStore, not
-                // here).
+                // Guarantee (see [defaultLanguageFilter] KDoc): these deferreds must ALWAYS complete,
+                // even if any of the reads above throws. `null` means "no default / Toutes",
+                // never a hardcoded "FR"/"EU" (those fallbacks belong to DataStoreAppPreferencesStore,
+                // not here).
                 if (!defaultLanguageFilter.isCompleted) {
                     defaultLanguageFilter.complete(null)
+                }
+                if (!defaultLiveLanguageFilter.isCompleted) {
+                    defaultLiveLanguageFilter.complete(null)
                 }
             }
 
@@ -777,7 +816,7 @@ class HomeViewModel @Inject constructor(
         // once per tab/instance (defaultAppliedContentTypes), and skipped entirely once the user has
         // made an explicit choice for this tab (explicitSelectionContentTypes) — including across
         // onRetry() re-invoking this function for an already-requested content type.
-        val defaultLanguage = defaultLanguageFilter.await()
+        val defaultLanguage = defaultFilterFor(contentType)
         if (defaultAppliedContentTypes.add(contentType) &&
             contentType !in explicitSelectionContentTypes &&
             defaultLanguage != null

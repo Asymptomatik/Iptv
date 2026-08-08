@@ -6,6 +6,7 @@ import com.bobot.iptvapp.data.local.entity.SeriesEntity
 import com.bobot.iptvapp.domain.model.Episode
 import com.bobot.iptvapp.domain.model.Season
 import com.bobot.iptvapp.domain.model.Series
+import com.bobot.iptvapp.domain.util.AccountKey
 
 /**
  * Mapping functions for the Series → Season → Episode entity hierarchy.
@@ -48,8 +49,15 @@ fun SeriesEntity.toDomain(seasons: List<Season> = emptyList()): Series = Series(
     seasons = seasons,
 )
 
-/** Maps a domain [Series] to [SeriesEntity], stripping the seasons (stored separately). */
-fun Series.toEntity(): SeriesEntity = SeriesEntity(
+/**
+ * Maps a domain [Series] to [SeriesEntity], stripping the seasons (stored separately).
+ *
+ * @param accountKey The owning account's cache partition key (see
+ *   [com.bobot.iptvapp.domain.util.accountKeyOf]), part of the entity's composite
+ *   primary key.
+ */
+fun Series.toEntity(accountKey: AccountKey): SeriesEntity = SeriesEntity(
+    accountKey = accountKey.value,
     id = id,
     title = title,
     coverUrl = coverUrl,
@@ -79,8 +87,12 @@ fun SeasonEntity.toDomain(episodes: List<Episode> = emptyList()): Season = Seaso
  *
  * @param seriesId The parent series identifier — required because [Season] does not
  *   carry it (it is a denormalised FK injected at the entity layer).
+ * @param accountKey The owning account's cache partition key (see
+ *   [com.bobot.iptvapp.domain.util.accountKeyOf]), part of the entity's composite
+ *   primary key.
  */
-fun Season.toEntity(seriesId: String): SeasonEntity = SeasonEntity(
+fun Season.toEntity(seriesId: String, accountKey: AccountKey): SeasonEntity = SeasonEntity(
+    accountKey = accountKey.value,
     seriesId = seriesId,
     seasonNumber = seasonNumber,
     name = name,
@@ -106,8 +118,12 @@ fun EpisodeEntity.toDomain(): Episode = Episode(
  *
  * @param seriesId The parent series identifier — required because [Episode] does not
  *   carry it (it is a denormalised FK injected at the entity layer).
+ * @param accountKey The owning account's cache partition key (see
+ *   [com.bobot.iptvapp.domain.util.accountKeyOf]), part of the entity's composite
+ *   primary key.
  */
-fun Episode.toEntity(seriesId: String): EpisodeEntity = EpisodeEntity(
+fun Episode.toEntity(seriesId: String, accountKey: AccountKey): EpisodeEntity = EpisodeEntity(
+    accountKey = accountKey.value,
     id = id,
     seriesId = seriesId,
     seasonNumber = seasonNumber,
@@ -123,7 +139,8 @@ fun Episode.toEntity(seriesId: String): EpisodeEntity = EpisodeEntity(
 
 @JvmName("episodeEntitiesToDomain")
 fun List<EpisodeEntity>.toDomain(): List<Episode> = map { it.toDomain() }
-fun List<Episode>.toEntity(seriesId: String): List<EpisodeEntity> = map { it.toEntity(seriesId) }
+fun List<Episode>.toEntity(seriesId: String, accountKey: AccountKey): List<EpisodeEntity> =
+    map { it.toEntity(seriesId, accountKey) }
 @JvmName("seriesEntitiesToDomain")
 fun List<SeriesEntity>.toDomain(): List<Series> = map { it.toDomain() }
 
@@ -131,5 +148,9 @@ fun List<SeriesEntity>.toDomain(): List<Series> = map { it.toDomain() }
  * Maps a list of domain [Series] to [SeriesEntity] list, stripping seasons from each
  * (stored separately). Used by the offline-first catalog cache write-through in
  * [com.bobot.iptvapp.data.repository.CatalogRepositoryImpl].
+ *
+ * @param accountKey The owning account's cache partition key (see
+ *   [com.bobot.iptvapp.domain.util.accountKeyOf]), part of each entity's composite
+ *   primary key.
  */
-fun List<Series>.toEntity(): List<SeriesEntity> = map { it.toEntity() }
+fun List<Series>.toEntity(accountKey: AccountKey): List<SeriesEntity> = map { it.toEntity(accountKey) }

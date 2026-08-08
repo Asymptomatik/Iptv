@@ -34,6 +34,16 @@ android {
         }
     }
 
+    // Exposes the KSP-exported Room schemas (app/schemas/) as an androidTest asset so
+    // androidx.room.testing.MigrationTestHelper can locate them by database class name at
+    // instrumentation runtime. Without this, MigrationTest (androidTest) fails to find the
+    // schema JSON files on-device even though they exist in the source tree.
+    sourceSets {
+        getByName("androidTest") {
+            assets.srcDirs("$projectDir/schemas")
+        }
+    }
+
     signingConfigs {
         // Explicit, portable declaration of the standard AGP-managed debug keystore.
         // These values (path, alias, passwords) are Android's own well-known, publicly
@@ -203,7 +213,8 @@ dependencies {
     androidTestImplementation(libs.mockk.android)
     androidTestImplementation(libs.coroutines.test)
     androidTestImplementation(libs.turbine)
-    // Room migration testing (MigrationTestHelper) — no migrations exist yet (schema
-    // version = 1), but the dependency is added ahead of time for Lot 2 follow-up work.
+    // Room migration testing (MigrationTestHelper) — used by
+    // app/src/androidTest/kotlin/com/bobot/iptvapp/data/local/MigrationTest.kt to validate
+    // MIGRATION_1_2 / MIGRATION_2_3 against the exported schemas (see sourceSets above).
     androidTestImplementation(libs.room.testing)
 }

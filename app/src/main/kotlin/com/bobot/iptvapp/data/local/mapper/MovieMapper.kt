@@ -2,6 +2,7 @@ package com.bobot.iptvapp.data.local.mapper
 
 import com.bobot.iptvapp.data.local.entity.MovieEntity
 import com.bobot.iptvapp.domain.model.Movie
+import com.bobot.iptvapp.domain.util.AccountKey
 
 /**
  * Mapping functions between [MovieEntity] (Room cache) and [Movie] (domain).
@@ -25,8 +26,15 @@ fun MovieEntity.toDomain(): Movie = Movie(
     containerExtension = containerExtension,
 )
 
-/** Maps a domain [Movie] to the [MovieEntity] for Room cache persistence. */
-fun Movie.toEntity(): MovieEntity = MovieEntity(
+/**
+ * Maps a domain [Movie] to the [MovieEntity] for Room cache persistence.
+ *
+ * @param accountKey The owning account's cache partition key (see
+ *   [com.bobot.iptvapp.domain.util.accountKeyOf]), part of the entity's composite
+ *   primary key.
+ */
+fun Movie.toEntity(accountKey: AccountKey): MovieEntity = MovieEntity(
+    accountKey = accountKey.value,
     id = id,
     title = title,
     posterUrl = posterUrl,
@@ -43,4 +51,4 @@ fun Movie.toEntity(): MovieEntity = MovieEntity(
 fun List<MovieEntity>.toDomain(): List<Movie> = map { it.toDomain() }
 
 /** Convenience extension to map a list of [Movie]s. */
-fun List<Movie>.toEntity(): List<MovieEntity> = map { it.toEntity() }
+fun List<Movie>.toEntity(accountKey: AccountKey): List<MovieEntity> = map { it.toEntity(accountKey) }

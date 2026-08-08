@@ -15,15 +15,20 @@ import androidx.room.Entity
  *
  * Entity-to-domain mapping is handled in Task 11 local repositories.
  *
+ * ## Account partitioning (schema v3)
+ * [accountKey] (see [com.bobot.iptvapp.domain.util.accountKeyOf]) is part of the
+ * composite primary key so that the cache is isolated per Xtream account.
+ *
  * ## Migration policy
  * Catalog cache — destructive fallback is acceptable. The next app launch
  * re-fetches and rebuilds the cache from the Xtream Codes API.
  */
 @Entity(
     tableName = "seasons",
-    primaryKeys = ["seriesId", "seasonNumber"],
+    primaryKeys = ["accountKey", "seriesId", "seasonNumber"],
 )
 data class SeasonEntity(
+    val accountKey: String,
     /** Logical FK to [SeriesEntity.id]. Part of composite primary key. */
     val seriesId: String,
     val seasonNumber: Int,

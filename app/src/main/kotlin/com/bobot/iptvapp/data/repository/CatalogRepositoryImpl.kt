@@ -1,6 +1,7 @@
 package com.bobot.iptvapp.data.repository
 
 import com.bobot.iptvapp.data.local.dao.CatalogCacheDao
+import com.bobot.iptvapp.data.local.dao.EpgDao
 import com.bobot.iptvapp.data.local.mapper.toDomain
 import com.bobot.iptvapp.data.local.mapper.toEntity
 import com.bobot.iptvapp.data.source.CatalogDataSource
@@ -16,7 +17,9 @@ import com.bobot.iptvapp.domain.model.Movie
 import com.bobot.iptvapp.domain.model.Season
 import com.bobot.iptvapp.domain.model.Series
 import com.bobot.iptvapp.domain.repository.CatalogRepository
+import com.bobot.iptvapp.domain.util.AccountKey
 import com.bobot.iptvapp.domain.util.Resource
+import com.bobot.iptvapp.domain.util.accountKeyOf
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
@@ -84,6 +87,27 @@ import javax.inject.Inject
  * to. [getCachedEpisodeWithSeries] reads this data back to resolve a "Continue Watching"
  * entry for series content without a network round-trip.
  *
+ * ## Account partitioning (Task 3 carry-forward)
+ * Every Room read and write in this class is scoped to the currently configured Xtream
+ * account via [currentAccountKey], resolved fresh on each operation from
+ * [credentialsProvider]`.getCredentials()`. This is a deliberate choice over caching the
+ * account key in a field: resolving per-operation avoids any initialization-order race
+ * with the `init {}` block's credentials observer, and sidesteps the `drop(1)` on
+ * [CredentialsProvider.observeCredentials] entirely (that flow is only used for
+ * *invalidating* the in-memory session cache, never for resolving the account key). When
+ * [currentAccountKey] returns `null` (no credentials yet, e.g. before onboarding or right
+ * after logout), Room is not touched at all: reads behave as an empty cache (preserving
+ * [Resource.Error] on the fallback path) and writes are silently skipped.
+ *
+ * ## Full cache purge on logout (Task 4 carry-forward)
+ * The `init {}` credentials observer distinguishes an account switch (non-null →
+ * non-null) from a logout (→ `null`). Both invalidate the in-memory session cache via
+ * [invalidateCaches], but only a logout additionally purges *every* Room partition
+ * (see [purgeAllCachePartitionsQuietly]) — an account switch leaves other partitions
+ * untouched, which per-account isolation already makes safe and which
+ * [com.bobot.iptvapp.ui.screen.settings.SettingsViewModel.onSaveServer]'s
+ * credentials-rollback relies on.
+ *
  * ## Dispatcher
  * All data source calls run on [ioDispatcher] (default: [kotlinx.coroutines.Dispatchers.IO])
  * via [flowOn] for Flows and direct suspension for one-shot methods.
@@ -91,6 +115,8 @@ import javax.inject.Inject
  *
  * @param dataSource           The catalog data source (mock or remote).
  * @param catalogCacheDao      Room DAO backing the offline-first catalog cache.
+ * @param epgDao               Room DAO for the EPG cache. Used *only* to purge `epg_programs`
+ *                             on logout (Task 4 carry-forward) — [getEpg] never reads/writes it.
  * @param ioDispatcher         The IO dispatcher; injected for testability.
  * @param credentialsProvider  Observed for credential changes to trigger cache invalidation.
  * @param applicationScope     Application-scoped [CoroutineScope] for the cache-observer coroutine.
@@ -98,6 +124,7 @@ import javax.inject.Inject
 class CatalogRepositoryImpl @Inject constructor(
     private val dataSource: CatalogDataSource,
     private val catalogCacheDao: CatalogCacheDao,
+    private val epgDao: EpgDao,
     @IoDispatcher private val ioDispatcher: CoroutineDispatcher,
     private val credentialsProvider: CredentialsProvider,
     @ApplicationScope private val applicationScope: CoroutineScope,
@@ -172,7 +199,15 @@ class CatalogRepositoryImpl @Inject constructor(
             credentialsProvider.observeCredentials()
                 .drop(1)
                 .distinctUntilChanged()
-                .collect { invalidateCaches() }
+                .collect { credentials ->
+                    // Both an account switch and a logout invalidate the in-memory session
+                    // cache. Only a logout (credentials == null) additionally purges Room —
+                    // see [purgeAllCachePartitionsQuietly] for why a switch must not (Task 4).
+                    invalidateCaches()
+                    if (credentials == null) {
+                        purgeAllCachePartitionsQuietly()
+                    }
+                }
         }
     }
 
@@ -227,14 +262,20 @@ class CatalogRepositoryImpl @Inject constructor(
         emit(Resource.Loading)
         if (categoryId == null) {
             cachedAllChannels?.let { emit(Resource.Success(it)); return@flow }
+            // Resolved past the in-memory short-circuit, not before it: currentAccountKey()
+            // reads DataStore and hashes, and once the catalog is loaded most collections are
+            // served entirely from memory and would never use the key.
+            val accountKey = currentAccountKey()
             try {
                 val result = dataSource.getLiveChannels(null)
                 cachedAllChannels = result
-                persistQuietly { catalogCacheDao.upsertChannels(result.toEntity()) }
+                persistQuietly(accountKey) { key -> catalogCacheDao.upsertChannels(result.toEntity(key)) }
                 emit(Resource.Success(result))
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
-                emitFromRoomCacheOrError(t) { catalogCacheDao.observeAllChannels().first().toDomain() }
+                emitFromRoomCacheOrError(accountKey, t) { key ->
+                    catalogCacheDao.observeAllChannels(key.value).first().toDomain()
+                }
             }
         } else {
             // Derive from the cached full list when available to avoid a redundant
@@ -243,14 +284,15 @@ class CatalogRepositoryImpl @Inject constructor(
             if (fromCache != null) {
                 emit(Resource.Success(fromCache))
             } else {
+                val accountKey = currentAccountKey()
                 try {
                     val result = dataSource.getLiveChannels(categoryId)
-                    persistQuietly { catalogCacheDao.upsertChannels(result.toEntity()) }
+                    persistQuietly(accountKey) { key -> catalogCacheDao.upsertChannels(result.toEntity(key)) }
                     emit(Resource.Success(result))
                 } catch (t: Throwable) {
                     rethrowIfCancellation(t)
-                    emitFromRoomCacheOrError(t) {
-                        catalogCacheDao.observeChannelsByCategory(categoryId).first().toDomain()
+                    emitFromRoomCacheOrError(accountKey, t) { key ->
+                        catalogCacheDao.observeChannelsByCategory(key.value, categoryId).first().toDomain()
                     }
                 }
             }
@@ -261,28 +303,32 @@ class CatalogRepositoryImpl @Inject constructor(
         emit(Resource.Loading)
         if (categoryId == null) {
             cachedAllMovies?.let { emit(Resource.Success(it)); return@flow }
+            val accountKey = currentAccountKey()
             try {
                 val result = dataSource.getMovies(null)
                 cachedAllMovies = result
-                persistQuietly { catalogCacheDao.upsertMovies(result.toEntity()) }
+                persistQuietly(accountKey) { key -> catalogCacheDao.upsertMovies(result.toEntity(key)) }
                 emit(Resource.Success(result))
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
-                emitFromRoomCacheOrError(t) { catalogCacheDao.observeAllMovies().first().toDomain() }
+                emitFromRoomCacheOrError(accountKey, t) { key ->
+                    catalogCacheDao.observeAllMovies(key.value).first().toDomain()
+                }
             }
         } else {
             val fromCache = cachedAllMovies?.filter { it.categoryId == categoryId }
             if (fromCache != null) {
                 emit(Resource.Success(fromCache))
             } else {
+                val accountKey = currentAccountKey()
                 try {
                     val result = dataSource.getMovies(categoryId)
-                    persistQuietly { catalogCacheDao.upsertMovies(result.toEntity()) }
+                    persistQuietly(accountKey) { key -> catalogCacheDao.upsertMovies(result.toEntity(key)) }
                     emit(Resource.Success(result))
                 } catch (t: Throwable) {
                     rethrowIfCancellation(t)
-                    emitFromRoomCacheOrError(t) {
-                        catalogCacheDao.observeMoviesByCategory(categoryId).first().toDomain()
+                    emitFromRoomCacheOrError(accountKey, t) { key ->
+                        catalogCacheDao.observeMoviesByCategory(key.value, categoryId).first().toDomain()
                     }
                 }
             }
@@ -293,28 +339,32 @@ class CatalogRepositoryImpl @Inject constructor(
         emit(Resource.Loading)
         if (categoryId == null) {
             cachedAllSeries?.let { emit(Resource.Success(it)); return@flow }
+            val accountKey = currentAccountKey()
             try {
                 val result = dataSource.getSeriesList(null)
                 cachedAllSeries = result
-                persistQuietly { catalogCacheDao.upsertSeries(result.toEntity()) }
+                persistQuietly(accountKey) { key -> catalogCacheDao.upsertSeries(result.toEntity(key)) }
                 emit(Resource.Success(result))
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
-                emitFromRoomCacheOrError(t) { catalogCacheDao.observeAllSeries().first().toDomain() }
+                emitFromRoomCacheOrError(accountKey, t) { key ->
+                    catalogCacheDao.observeAllSeries(key.value).first().toDomain()
+                }
             }
         } else {
             val fromCache = cachedAllSeries?.filter { it.categoryId == categoryId }
             if (fromCache != null) {
                 emit(Resource.Success(fromCache))
             } else {
+                val accountKey = currentAccountKey()
                 try {
                     val result = dataSource.getSeriesList(categoryId)
-                    persistQuietly { catalogCacheDao.upsertSeries(result.toEntity()) }
+                    persistQuietly(accountKey) { key -> catalogCacheDao.upsertSeries(result.toEntity(key)) }
                     emit(Resource.Success(result))
                 } catch (t: Throwable) {
                     rethrowIfCancellation(t)
-                    emitFromRoomCacheOrError(t) {
-                        catalogCacheDao.observeSeriesByCategory(categoryId).first().toDomain()
+                    emitFromRoomCacheOrError(accountKey, t) { key ->
+                        catalogCacheDao.observeSeriesByCategory(key.value, categoryId).first().toDomain()
                     }
                 }
             }
@@ -353,7 +403,7 @@ class CatalogRepositoryImpl @Inject constructor(
         withContext(ioDispatcher) {
             try {
                 val result = dataSource.getSeriesInfo(seriesId)
-                persistSeriesDetailQuietly(result)
+                currentAccountKey()?.let { accountKey -> persistSeriesDetailQuietly(accountKey, result) }
                 Resource.Success(result)
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
@@ -391,8 +441,11 @@ class CatalogRepositoryImpl @Inject constructor(
     override suspend fun getCachedEpisodeWithSeries(episodeId: String): Pair<Series, Episode>? =
         withContext(ioDispatcher) {
             try {
-                val episodeEntity = catalogCacheDao.getEpisodeById(episodeId) ?: return@withContext null
-                val seriesEntity = catalogCacheDao.getSeriesById(episodeEntity.seriesId) ?: return@withContext null
+                val accountKey = currentAccountKey() ?: return@withContext null
+                val episodeEntity =
+                    catalogCacheDao.getEpisodeById(accountKey.value, episodeId) ?: return@withContext null
+                val seriesEntity =
+                    catalogCacheDao.getSeriesById(accountKey.value, episodeEntity.seriesId) ?: return@withContext null
                 seriesEntity.toDomain() to episodeEntity.toDomain()
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
@@ -424,19 +477,30 @@ class CatalogRepositoryImpl @Inject constructor(
     // ── Offline-first Room cache helpers (Task 11b carry-forward) ────────────
 
     /**
-     * Persists a freshly fetched category list to the Room cache, ignoring write failures.
+     * Resolves the cache partition key for the currently configured Xtream account, or
+     * `null` when no credentials are configured (before onboarding, or after logout).
+     *
+     * Resolved fresh on every call — see class-level KDoc "Account partitioning" for why
+     * this is deliberately not cached in a field.
+     */
+    private suspend fun currentAccountKey(): AccountKey? =
+        credentialsProvider.getCredentials()?.let { accountKeyOf(it) }
+
+    /**
+     * Persists a freshly fetched category list to the Room cache under [accountKey],
+     * ignoring write failures.
      *
      * Caching is a side-effect of a successful fetch — a Room write error must not
      * downgrade an otherwise successful [Resource.Success] emission to an error.
      */
-    private suspend fun persistCategoriesQuietly(categories: List<Category>) {
-        persistQuietly { catalogCacheDao.upsertCategories(categories.toEntity()) }
+    private suspend fun persistCategoriesQuietly(accountKey: AccountKey, categories: List<Category>) {
+        persistQuietly { catalogCacheDao.upsertCategories(categories.toEntity(accountKey)) }
     }
 
     /**
      * Persists a freshly fetched series detail — the series metadata plus its flattened
-     * season/episode tree — to the Room cache, ignoring write failures (Task 11b/25
-     * carry-forward; see class-level KDoc "Series detail write-through").
+     * season/episode tree — to the Room cache under [accountKey], ignoring write failures
+     * (Task 11b/25 carry-forward; see class-level KDoc "Series detail write-through").
      *
      * [series] is expected to have [Series.seasons] populated (each [Season] with its
      * [Season.episodes] populated), as returned by a successful `getSeriesInfo` call.
@@ -444,12 +508,12 @@ class CatalogRepositoryImpl @Inject constructor(
      * injected explicitly since it is denormalised at the entity layer (not present on
      * the domain models).
      */
-    private suspend fun persistSeriesDetailQuietly(series: Series) {
+    private suspend fun persistSeriesDetailQuietly(accountKey: AccountKey, series: Series) {
         persistQuietly {
-            catalogCacheDao.upsertSeries(listOf(series).toEntity())
-            catalogCacheDao.upsertSeasons(series.seasons.map { it.toEntity(series.id) })
+            catalogCacheDao.upsertSeries(listOf(series).toEntity(accountKey))
+            catalogCacheDao.upsertSeasons(series.seasons.map { it.toEntity(series.id, accountKey) })
             catalogCacheDao.upsertEpisodes(
-                series.seasons.flatMap { season -> season.episodes.toEntity(series.id) },
+                series.seasons.flatMap { season -> season.episodes.toEntity(series.id, accountKey) },
             )
         }
     }
@@ -488,6 +552,43 @@ class CatalogRepositoryImpl @Inject constructor(
     }
 
     /**
+     * Purges every Room cache partition, across *every* account, on logout (Task 4
+     * carry-forward).
+     *
+     * Called only from the `init {}` credentials observer when [CredentialsProvider
+     * .observeCredentials] emits `null` — never on an account switch (non-null →
+     * non-null). Deliberately not merged into [invalidateCaches]: an account switch is
+     * isolated by `accountKey` alone (see class-level KDoc "Account partitioning") and
+     * must leave every partition intact, including the account being switched away
+     * from — this is what lets [com.bobot.iptvapp.ui.screen.settings.SettingsViewModel
+     * .onSaveServer] roll back to the previous credentials after a failed
+     * authentication and still find that account's offline cache usable. A logout has
+     * no "previous account" to protect, so every partition — not just the one active at
+     * logout time — is cleared using the DAOs' unparameterised `clearAll*` methods.
+     *
+     * Uses the seven global (unpartitioned) clears documented on [CatalogCacheDao] and
+     * [EpgDao.clearAll] — the seventh table, `epg_programs`, is owned by [EpgDao] rather
+     * than [CatalogCacheDao] since [getEpg] is a pure network pass-through that never
+     * touches Room; [epgDao] is injected into this class solely for this purge.
+     *
+     * Each table is purged through its own [persistQuietly] call rather than one call
+     * wrapping all seven: a failure purging one table (Room I/O error) must not abort
+     * the remaining purges, and must not crash this application-scoped observer, whose
+     * next collection (a future logout or account switch) still needs to run normally.
+     * [persistQuietly] relays [CancellationException] and swallows everything else,
+     * exactly as it does for cache writes elsewhere in this class.
+     */
+    private suspend fun purgeAllCachePartitionsQuietly() {
+        persistQuietly { catalogCacheDao.clearAllCategories() }
+        persistQuietly { catalogCacheDao.clearChannels() }
+        persistQuietly { catalogCacheDao.clearMovies() }
+        persistQuietly { catalogCacheDao.clearSeries() }
+        persistQuietly { catalogCacheDao.clearAllSeasons() }
+        persistQuietly { catalogCacheDao.clearAllEpisodes() }
+        persistQuietly { epgDao.clearAll() }
+    }
+
+    /**
      * Reads a Room cache fallback via [fetchFromCache] and emits it as [Resource.Success]
      * when non-empty. Falls back to [Resource.Error] wrapping [error] when the cache is
      * empty or the cache read itself fails.
@@ -500,10 +601,55 @@ class CatalogRepositoryImpl @Inject constructor(
     }
 
     /**
+     * Account-aware variant of [emitFromRoomCacheOrError]. When [accountKey] is `null`
+     * (no credentials configured — see [currentAccountKey]), Room is not read at all and
+     * [error] is emitted directly, matching the "empty cache" outcome of the accounted
+     * path without ever touching the DAO.
+     */
+    private suspend fun <T> FlowCollector<Resource<List<T>>>.emitFromRoomCacheOrError(
+        accountKey: AccountKey?,
+        error: Throwable,
+        fetchFromCache: suspend (AccountKey) -> List<T>,
+    ) {
+        if (accountKey == null) {
+            emit(Resource.Error(throwable = error))
+        } else {
+            emitFromRoomCacheOrError(error) { fetchFromCache(accountKey) }
+        }
+    }
+
+    /**
+     * Account-aware variant of [persistQuietly] for the offline-first Room cache writes.
+     * When [accountKey] is `null` (no credentials configured — see [currentAccountKey]),
+     * the write is skipped entirely rather than persisted under a missing partition.
+     */
+    private suspend fun persistQuietly(accountKey: AccountKey?, block: suspend (AccountKey) -> Unit) {
+        if (accountKey != null) {
+            persistQuietly { block(accountKey) }
+        }
+    }
+
+    /**
      * Value-returning form of [emitFromRoomCacheOrError], for callers that must obtain the terminal
      * [Resource] without being inside a [FlowCollector] — see [loadCategories], which resolves the
      * terminal value first and only emits it afterwards.
      */
+    /**
+     * Account-aware variant of [fromRoomCacheOrError], mirroring the [emitFromRoomCacheOrError]
+     * overload above so the "no account ⇒ never touch Room" rule stays expressed in one place
+     * rather than being re-opened at each call site.
+     */
+    private suspend fun <T> fromRoomCacheOrError(
+        accountKey: AccountKey?,
+        error: Throwable,
+        fetchFromCache: suspend (AccountKey) -> List<T>,
+    ): Resource<List<T>> =
+        if (accountKey == null) {
+            Resource.Error(throwable = error)
+        } else {
+            fromRoomCacheOrError(error) { fetchFromCache(accountKey) }
+        }
+
     private suspend fun <T> fromRoomCacheOrError(
         error: Throwable,
         fetchFromCache: suspend () -> List<T>,
@@ -551,13 +697,18 @@ class CatalogRepositoryImpl @Inject constructor(
      * Collectors arriving after an invalidation refuse to join an attempt from an older generation
      * and start their own, so a retry genuinely refetches.
      *
-     * The same gate guards [persistCategoriesQuietly], but only narrows the window there rather than
-     * closing it: an invalidation landing between the check and the write still persists the old
-     * account's categories. That is a symptom of a wider, pre-existing limitation — the Room cache is
-     * keyed by [ContentType] alone, is not partitioned per credentials, and [invalidateCache] does
-     * not purge it. Anything the offline fallback returns may therefore predate the current account.
-     * Making that guarantee real needs the cache scoped to a session in the schema, not more locking
-     * here.
+     * The same gate guards [persistCategoriesQuietly]. Unlike the in-memory session cache
+     * (which has no credential awareness), the Room cache is now **partitioned by account** via
+     * `accountKey` in the composite primary key. Each persistent write targets the current account's
+     * partition, resolved per-operation via [currentAccountKey]. This partition isolation makes the
+     * in-flight window safe: even if an invalidation lands between the check and the write, the
+     * persisted categories remain scoped to their account. The offline fallback can return data
+     * only for the account currently in [CredentialsProvider] — never from a switched-away account.
+     * Notably, this safety does **not** depend on an invalidation event ever firing: the `drop(1)`
+     * on [CredentialsProvider.observeCredentials] (see class-level KDoc "Cache invalidation on
+     * credential change") means the account active at process start never triggers one, yet that
+     * is harmless here — a write from a previous account simply lands in that account's own
+     * partition, which the current account's reads never touch.
      *
      * ## Cancellation
      * The attempt runs in its owner's coroutine, not in an external scope, so leaving the screen
@@ -577,6 +728,11 @@ class CatalogRepositoryImpl @Inject constructor(
         writeMemo: (List<Category>) -> Unit,
         fetch: suspend () -> List<Category>,
     ): Resource<List<Category>> {
+        // Resolved once per call (i.e. once per flow collection triggering this attempt),
+        // not cached in a field — see class-level KDoc "Account partitioning". A `null`
+        // here (no credentials) simply means the owner below skips the Room write and the
+        // Room fallback degrades to Resource.Error, exactly like an empty cache would.
+        val accountKey = currentAccountKey()
         while (true) {
             readMemo()?.let { return Resource.Success(it) }
 
@@ -624,7 +780,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 }
                 // Same gate for Room: a result the memo refused is the previous account's and has no
                 // business landing in the offline cache either. See "Invalidation generations".
-                if (publishable) persistCategoriesQuietly(fresh)
+                if (publishable && accountKey != null) persistCategoriesQuietly(accountKey, fresh)
                 result = Resource.Success(fresh)
             } catch (cancellation: CancellationException) {
                 // Leaves [result] null: the `finally` below cancels [deferred], which hands the
@@ -633,8 +789,8 @@ class CatalogRepositoryImpl @Inject constructor(
             } catch (t: Throwable) {
                 // Deliberately not memoized, matching the previous behaviour: a Room fallback or an
                 // error never becomes the session cache.
-                result = fromRoomCacheOrError(t) {
-                    catalogCacheDao.observeCategoriesByType(contentType.name).first().toDomain()
+                result = fromRoomCacheOrError(accountKey, t) { key ->
+                    catalogCacheDao.observeCategoriesByType(key.value, contentType.name).first().toDomain()
                 }
             } finally {
                 withContext(NonCancellable) {

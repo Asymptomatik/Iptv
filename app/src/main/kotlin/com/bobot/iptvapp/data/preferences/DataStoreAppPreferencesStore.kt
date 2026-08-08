@@ -30,14 +30,26 @@ class DataStoreAppPreferencesStore @Inject constructor(
         private val KEY_ACTIVE_PROFILE_ID = stringPreferencesKey("pref_active_profile_id")
         private val KEY_WIFI_ONLY_DOWNLOADS = booleanPreferencesKey("pref_wifi_only_downloads")
         private val KEY_DEFAULT_LANGUAGE_FILTER = stringPreferencesKey("pref_default_language_filter")
+        private val KEY_DEFAULT_LIVE_LANGUAGE_FILTER =
+            stringPreferencesKey("pref_default_live_language_filter")
+
+        /** Product default for the Films/Series tabs, whose provider tags really are languages. */
+        private const val DEFAULT_VOD_TAG = "FR"
+
+        /** Product default for the Chaines tab, whose provider tags are regions. */
+        private const val DEFAULT_LIVE_TAG = "EU"
 
         /**
          * Maps the raw stored value (or `null` if the key is absent) to the public semantics of
-         * [observeDefaultLanguageFilter] / [getDefaultLanguageFilter]: absent -> "FR", empty -> null.
+         * [observeDefaultLanguageFilter] / [getDefaultLanguageFilter]: absent -> [fallback],
+         * empty -> null.
+         *
+         * [fallback] differs per tab — see [AppPreferencesStore.observeDefaultLiveLanguageFilter]
+         * for why the Chaines tab defaults to a region tag rather than a language one.
          */
-        private fun mapDefaultLanguageFilter(raw: String?): String? =
+        private fun mapDefaultLanguageFilter(raw: String?, fallback: String): String? =
             when (raw) {
-                null -> "FR"
+                null -> fallback
                 "" -> null
                 else -> raw
             }
@@ -69,14 +81,30 @@ class DataStoreAppPreferencesStore @Inject constructor(
     }
 
     override fun observeDefaultLanguageFilter(): Flow<String?> =
-        dataStore.data.map { prefs -> mapDefaultLanguageFilter(prefs[KEY_DEFAULT_LANGUAGE_FILTER]) }
+        dataStore.data.map { prefs ->
+            mapDefaultLanguageFilter(prefs[KEY_DEFAULT_LANGUAGE_FILTER], DEFAULT_VOD_TAG)
+        }
 
     override suspend fun getDefaultLanguageFilter(): String? =
-        dataStore.data.map { prefs -> mapDefaultLanguageFilter(prefs[KEY_DEFAULT_LANGUAGE_FILTER]) }.first()
+        observeDefaultLanguageFilter().first()
 
     override suspend fun setDefaultLanguageFilter(tag: String?) {
         dataStore.edit { prefs ->
             prefs[KEY_DEFAULT_LANGUAGE_FILTER] = tag?.trim()?.uppercase() ?: ""
+        }
+    }
+
+    override fun observeDefaultLiveLanguageFilter(): Flow<String?> =
+        dataStore.data.map { prefs ->
+            mapDefaultLanguageFilter(prefs[KEY_DEFAULT_LIVE_LANGUAGE_FILTER], DEFAULT_LIVE_TAG)
+        }
+
+    override suspend fun getDefaultLiveLanguageFilter(): String? =
+        observeDefaultLiveLanguageFilter().first()
+
+    override suspend fun setDefaultLiveLanguageFilter(tag: String?) {
+        dataStore.edit { prefs ->
+            prefs[KEY_DEFAULT_LIVE_LANGUAGE_FILTER] = tag?.trim()?.uppercase() ?: ""
         }
     }
 }

@@ -23,6 +23,25 @@ import com.bobot.iptvapp.domain.model.Category
 object CategoryLanguage {
 
     /**
+     * Character class standing for "one whitespace character", used everywhere below in place of
+     * the regex shorthand `\s`.
+     *
+     * Java's `\s` is ASCII-only (`[ \t\n\f\r]`) — unlike Python's, it does **not** match the
+     * non-breaking space `U+00A0`, and neither does [Char.isWhitespace]. Real providers do emit
+     * them: this project's reference catalogue contains `"EU<U+00A0>| FRANCE GENERAL"` categories,
+     * which lost their tag entirely *and* had the raw `"EU<U+00A0>|"` prefix shown to users, because
+     * every pattern below failed to match on that one character.
+     *
+     * `\p{Zs}` is the Unicode "space separator" category (`U+00A0`, `U+2000`–`U+200A`, `U+202F`,
+     * `U+205F`, `U+3000`); the union with `\s` keeps the ASCII control whitespace (tab, newline, …)
+     * that `\p{Zs}` does not itself include.
+     */
+    private const val WS = "[\\s\\p{Zs}]"
+
+    /** Negation of [WS] — the Unicode-aware counterpart of the ASCII-only `\S`. */
+    private const val NON_WS = "[^\\s\\p{Zs}]"
+
+    /**
      * Matches a leading 2-3 letter alphabetic tag followed by one of the common delimiters
      * (`|`, `-`, `:`), with optional whitespace around the delimiter.
      *
@@ -35,8 +54,9 @@ object CategoryLanguage {
      * non-delimiter, non-whitespace character right after any 2- or 3-letter prefix, so the
      * whole match fails rather than truncating to `"SPO"`.
      */
-    private val DIRECT_LANGUAGE_TAG_PATTERN = Regex("^([A-Za-z]{2,3})\\s*[|:-]\\s*(.+)$")
-    private val NESTED_LANGUAGE_TAG_PATTERN = Regex("^([A-Za-z]{2,10})\\s*[|:-]\\s*([A-Za-z]{2,3})\\s*[|:-]\\s*(.+)$")
+    private val DIRECT_LANGUAGE_TAG_PATTERN = Regex("^([A-Za-z]{2,3})$WS*[|:-]$WS*(.+)$")
+    private val NESTED_LANGUAGE_TAG_PATTERN =
+        Regex("^([A-Za-z]{2,10})$WS*[|:-]$WS*([A-Za-z]{2,3})$WS*[|:-]$WS*(.+)$")
 
     /**
      * Matches a leading token followed by one or more plain whitespace characters and a
@@ -51,7 +71,7 @@ object CategoryLanguage {
      * the matched first token is only accepted as a language tag when it exactly equals one of
      * the known language/region codes in that closed list.
      */
-    private val SPACE_LANGUAGE_TAG_PATTERN = Regex("^(\\S+)\\s+(.+)$")
+    private val SPACE_LANGUAGE_TAG_PATTERN = Regex("^($NON_WS+)$WS+(.+)$")
 
     /**
      * Closed set of language codes recognised by [SPACE_LANGUAGE_TAG_PATTERN]. Compared
@@ -81,13 +101,22 @@ object CategoryLanguage {
     )
 
     /**
+     * [String.trim] widened to the Unicode space separators, for the same reason [WS] exists:
+     * Kotlin's [String.trim] delegates to [Char.isWhitespace], which — like Java's `\s` — reports
+     * `false` for the non-breaking spaces. Without this, a name such as `"<U+00A0>FR | Sport"` would
+     * keep its leading `U+00A0`, and the `^` anchor of every pattern above would fail to match.
+     */
+    private fun String.trimSpaces(): String =
+        trim { it.isWhitespace() || it.category == CharCategory.SPACE_SEPARATOR }
+
+    /**
      * Extracts the language tag from [name], or `null` when no recognised pattern is found.
      *
      * The match is case-insensitive on the input, but the returned tag is always normalized
      * to uppercase (e.g. `"fr | sport"` and `"FR | Sport"` both return `"FR"`).
      */
     fun extractLanguageTag(name: String): String? {
-        val trimmed = name.trim()
+        val trimmed = name.trimSpaces()
         if (trimmed.isBlank()) return null
 
         NESTED_LANGUAGE_TAG_PATTERN.matchEntire(trimmed)?.let { match ->
@@ -115,20 +144,20 @@ object CategoryLanguage {
      *  - unrecognised names are returned trimmed as-is.
      */
     fun extractDisplayName(name: String): String {
-        val trimmed = name.trim()
+        val trimmed = name.trimSpaces()
         if (trimmed.isBlank()) return trimmed
 
         NESTED_LANGUAGE_TAG_PATTERN.matchEntire(trimmed)?.let { match ->
-            return match.groupValues[3].trim()
+            return match.groupValues[3].trimSpaces()
         }
 
         DIRECT_LANGUAGE_TAG_PATTERN.matchEntire(trimmed)?.let { match ->
-            return match.groupValues[2].trim()
+            return match.groupValues[2].trimSpaces()
         }
 
         SPACE_LANGUAGE_TAG_PATTERN.matchEntire(trimmed)?.let { match ->
             val candidate = match.groupValues[1].uppercase()
-            if (candidate in SPACE_PREFIX_WHITELIST) return match.groupValues[2].trim()
+            if (candidate in SPACE_PREFIX_WHITELIST) return match.groupValues[2].trimSpaces()
         }
 
         return trimmed
