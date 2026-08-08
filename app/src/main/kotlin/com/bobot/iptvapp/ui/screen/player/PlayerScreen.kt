@@ -3,10 +3,12 @@ package com.bobot.iptvapp.ui.screen.player
 import android.app.Activity
 import android.content.pm.PackageManager
 import android.view.WindowManager
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,6 +40,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -45,6 +50,7 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
@@ -166,8 +172,37 @@ fun PlayerScreen(
         interactionTrigger++
     }
 
-    LaunchedEffect(uiState.isPlaying, uiState.isBuffering, uiState.hasError, interactionTrigger) {
-        if (uiState.isPlaying && !uiState.isBuffering && !uiState.hasError) {
+    // Remote-friendly way back to the hidden controls. Tapping the video is the only other way
+    // to reveal them (see the root Box below) and a TV remote has no tap: once the auto-hide
+    // fires, every D-pad key would land on nothing and the player would be stuck playing with
+    // no reachable pause, seek or track button. This node therefore claims the focus while the
+    // controls are hidden and turns the next directional/OK press into a reveal. It is
+    // deliberately *not* focusable while they are visible, so it never inserts an extra focus
+    // stop into the overlay's own D-pad order.
+    val revealFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(controlsVisible) {
+        if (!controlsVisible) revealFocusRequester.requestFocus()
+    }
+
+    // Audio/subtitle selector. Kept here rather than inside PlayerControlsOverlay because it
+    // renders over the whole screen (scrim included) and because it has to suppress the
+    // auto-hide below: a panel that vanished mid-choice would be unusable.
+    var trackSelectorVisible by remember { mutableStateOf(false) }
+
+    BackHandler(enabled = trackSelectorVisible) {
+        trackSelectorVisible = false
+    }
+
+    // Reading `trackSelectorVisible` as a key (not just in the condition) is what makes closing
+    // the panel restart the timer instead of leaving the controls pinned open.
+    LaunchedEffect(
+        uiState.isPlaying,
+        uiState.isBuffering,
+        uiState.hasError,
+        trackSelectorVisible,
+        interactionTrigger,
+    ) {
+        if (uiState.isPlaying && !uiState.isBuffering && !uiState.hasError && !trackSelectorVisible) {
             delay(CONTROLS_AUTO_HIDE_DELAY_MS)
             controlsVisible = false
         }
@@ -182,6 +217,31 @@ fun PlayerScreen(
             // controls' buttons and slider.
             .pointerInput(Unit) {
                 detectTapGestures(onTap = { onUserInteracted() })
+            }
+            .focusRequester(revealFocusRequester)
+            .focusProperties { canFocus = !controlsVisible }
+            .focusable()
+            .onPreviewKeyEvent { event ->
+                // Only the keys that would otherwise do nothing reveal the controls; BACK is
+                // left alone so it still leaves the player, and the press is consumed so the
+                // reveal never doubles as a seek or a play/pause on a control the user could
+                // not see when they pressed it.
+                if (controlsVisible || event.type != KeyEventType.KeyDown) {
+                    return@onPreviewKeyEvent false
+                }
+                when (event.key) {
+                    Key.DirectionUp,
+                    Key.DirectionDown,
+                    Key.DirectionLeft,
+                    Key.DirectionRight,
+                    Key.DirectionCenter,
+                    Key.Enter,
+                    -> {
+                        onUserInteracted()
+                        true
+                    }
+                    else -> false
+                }
             },
     ) {
         AndroidView(
@@ -209,8 +269,12 @@ fun PlayerScreen(
         if (!uiState.hasError) {
             // Floating, transparent seek/play/seek cluster. Visible only while not buffering so
             // it never overlaps the centered buffering spinner above (mutually exclusive).
+            // Both control clusters step aside while the track selector is open. The scrim
+            // already hides them, but leaving them composed would leave their buttons focusable
+            // underneath it — the D-pad would walk straight out of the panel onto invisible
+            // controls, which is the very trap the selector is meant to avoid.
             AnimatedVisibility(
-                visible = controlsVisible && !uiState.isBuffering,
+                visible = controlsVisible && !uiState.isBuffering && !trackSelectorVisible,
                 modifier = Modifier.align(Alignment.Center),
             ) {
                 PlayerCenterControls(
@@ -223,7 +287,7 @@ fun PlayerScreen(
             }
 
             AnimatedVisibility(
-                visible = controlsVisible,
+                visible = controlsVisible && !trackSelectorVisible,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth(),
@@ -240,7 +304,45 @@ fun PlayerScreen(
                         onUserInteracted()
                         portraitLocked = nextPortraitLocked(portraitLocked)
                     },
+                    onOpenTrackSelector = {
+                        onUserInteracted()
+                        trackSelectorVisible = true
+                    },
                     modifier = Modifier.fillMaxWidth(),
+                )
+            }
+
+            if (trackSelectorVisible) {
+                // Dismiss scrim. Tap-detection rather than `clickable` for the same reason as the
+                // root surface above: a focusable full-screen node would swallow the D-pad before
+                // the panel ever saw it.
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .pointerInput(Unit) {
+                            detectTapGestures(onTap = { trackSelectorVisible = false })
+                        },
+                )
+
+                PlayerTrackSelectorPanel(
+                    audioTracks = uiState.audioTracks,
+                    subtitleTracks = uiState.subtitleTracks,
+                    onSelectAudio = { trackId ->
+                        onUserInteracted()
+                        viewModel.selectAudioTrack(trackId)
+                    },
+                    onSelectSubtitle = { trackId ->
+                        onUserInteracted()
+                        viewModel.selectSubtitleTrack(trackId)
+                    },
+                    onDisableSubtitles = {
+                        onUserInteracted()
+                        viewModel.disableSubtitles()
+                    },
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(Spacing.lg),
                 )
             }
         }
@@ -258,8 +360,8 @@ fun PlayerScreen(
 /**
  * "Cinematic Glass" bottom control overlay:
  *  - Scrub bar: rgba-white track, AccentSolid active track, round knob. Time labels TextSecondary.
- *  - Controls: current time (and, on phone, the orientation toggle) pinned left, CC/settings zone
- *    reserved on the right. The seek/play/seek cluster is NOT part of this bar anymore — it is
+ *  - Controls: current time (and, on phone, the orientation toggle) pinned left, the audio/subtitle
+ *    ("CC") button on the right. The seek/play/seek cluster is NOT part of this bar anymore — it is
  *    floated separately, centered and transparent over the video (see [PlayerCenterControls] and
  *    its call site in [PlayerScreen]), so this bar's left zone gets its full natural width instead
  *    of being starved by a non-weighted center cluster in narrow (portrait) layouts.
@@ -272,6 +374,9 @@ fun PlayerScreen(
  * @param portraitLocked Current orientation toggle state, used to pick the button's label and
  * content description (see [PlayerOrientationToggleButton]).
  * @param onToggleOrientation Invoked when the orientation button is pressed.
+ * @param onOpenTrackSelector Invoked when the "CC" button is pressed. That button only renders
+ * when [hasSelectableTracks] holds for [uiState]'s tracks, so this is never called for a stream
+ * with nothing to choose from.
  */
 @Composable
 private fun PlayerControlsOverlay(
@@ -283,6 +388,7 @@ private fun PlayerControlsOverlay(
     showOrientationButton: Boolean,
     portraitLocked: Boolean,
     onToggleOrientation: () -> Unit,
+    onOpenTrackSelector: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var dragPositionMs by remember { mutableStateOf<Long?>(null) }
@@ -377,8 +483,13 @@ private fun PlayerControlsOverlay(
                     }
                 }
 
-                // Right zone — reserved for a future CC/pistes button (chantier #2); empty for now.
-                Box(modifier = Modifier)
+                // Right zone — audio/subtitle selector, shown only when the stream actually
+                // offers a choice (see hasSelectableTracks).
+                Box(modifier = Modifier) {
+                    if (hasSelectableTracks(uiState.audioTracks, uiState.subtitleTracks)) {
+                        PlayerTracksButton(onClick = onOpenTrackSelector)
+                    }
+                }
             }
 
             // Duration label below the controls row
@@ -668,6 +779,7 @@ private fun PlayerControlsOverlayPlayingPreview() {
             showOrientationButton = false,
             portraitLocked = false,
             onToggleOrientation = {},
+            onOpenTrackSelector = {},
         )
     }
 }
@@ -690,6 +802,7 @@ private fun PlayerControlsOverlayPausedPreview() {
             showOrientationButton = false,
             portraitLocked = false,
             onToggleOrientation = {},
+            onOpenTrackSelector = {},
         )
     }
 }
@@ -716,6 +829,7 @@ private fun PlayerControlsOverlayOrientationButtonPreview() {
             showOrientationButton = true,
             portraitLocked = false,
             onToggleOrientation = {},
+            onOpenTrackSelector = {},
         )
     }
 }
