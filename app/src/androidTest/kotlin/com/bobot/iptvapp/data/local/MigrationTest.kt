@@ -19,21 +19,22 @@ import org.junit.runner.RunWith
  * Instrumented tests for [DatabaseMigrations.MIGRATION_2_3] using [MigrationTestHelper] against
  * the schemas exported under `app/schemas/com.bobot.iptvapp.data.local.IptvDatabase/`.
  *
- * ## ⚠️ NOT RUNNABLE IN THIS (WSL) ENVIRONMENT — VALIDATION IS AN OPEN POINT ⚠️
+ * ## Execution status — green, both tests, on 2026-08-08
  *
- * This file lives under `androidTest`, which requires a connected Android device or emulator
- * (`./gradlew connectedAndroidTest` / `connectedDebugAndroidTest`). The environment this test
- * was authored in (WSL, no device/emulator attached) can only *compile* this file — it CANNOT
- * execute it. **Nobody has run these tests successfully yet.** Whoever reads this comment must
- * run them from Android Studio on Windows (or any machine with a connected device/emulator)
- * before treating [DatabaseMigrations.MIGRATION_2_3] as verified end-to-end:
+ * These tests were authored in an environment with no device attached, and this KDoc used to warn
+ * that nobody had ever run them. That is no longer true: both were executed on a `Pixel_7`
+ * emulator (API 35) and passed, alongside the rest of the instrumented suite (33 tests). Migration
+ * 2→3 is verified by execution, not only by static review of the `CREATE TABLE` SQL in
+ * [DatabaseMigrations] against `app/schemas/.../3.json`.
+ *
+ * Running them does **not** require Android Studio, and `connectedDebugAndroidTest` is not the
+ * easiest route (it needs Gradle and `adb` to agree on one server). Build under WSL, then drive
+ * the emulator with the *Windows* `adb`:
  * ```
- * ./gradlew connectedDebugAndroidTest --tests "com.bobot.iptvapp.data.local.MigrationTest"
+ * adb.exe shell am instrument -w \
+ *   -e class com.bobot.iptvapp.data.local.MigrationTest \
+ *   com.bobot.iptvapp.debug.test/androidx.test.runner.AndroidJUnitRunner
  * ```
- * or via the Android Studio test runner gutter icon on this class. Until that has actually been
- * done and reported green, migration 2→3 has only been verified by static review of the
- * `CREATE TABLE` SQL in [DatabaseMigrations] against `app/schemas/.../3.json` — not by an
- * executed test.
  *
  * ## What is covered
  *  - [migrate2To3_preservesAllFourUserDataTables_columnByColumn]: seeds `profiles`, `favorites`,
