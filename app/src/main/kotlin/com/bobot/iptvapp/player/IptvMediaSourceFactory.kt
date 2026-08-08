@@ -17,6 +17,7 @@ import androidx.media3.exoplayer.source.SingleSampleMediaSource
 import com.bobot.iptvapp.domain.model.ExternalSubtitle
 import okhttp3.OkHttpClient
 import com.bobot.iptvapp.di.DownloadModule.DownloadCache
+import com.bobot.iptvapp.di.StreamingHttpClient
 import javax.inject.Inject
 
 /**
@@ -35,10 +36,11 @@ import javax.inject.Inject
  *   used internally by [ProgressiveMediaSource.Factory]) will pick the right extractor.
  *
  * ## Networking
- * Uses the app's shared [OkHttpClient] (see `NetworkModule`) via [OkHttpDataSource.Factory]
- * so that player HTTP traffic shares the same timeouts/logging configuration as the
- * Retrofit-based Xtream Codes client, instead of instantiating a second, differently
- * configured HTTP stack.
+ * Uses the [StreamingHttpClient]-qualified [OkHttpClient] (see `NetworkModule`) via
+ * [OkHttpDataSource.Factory], so player traffic keeps the API client's timeouts and shares its
+ * connection pool instead of standing up a second HTTP stack — but *without* its body-logging
+ * interceptor, which would buffer each whole film into the heap. See
+ * [com.bobot.iptvapp.di.NetworkModule.provideStreamingOkHttpClient].
  *
  * ## External subtitle side-loading (Task 3)
  * [create] optionally side-loads [ExternalSubtitle]s (e.g. Xtream `get_vod_info`'s best-effort
@@ -76,7 +78,7 @@ import javax.inject.Inject
  * either — see [buildSubtitleMediaSources].
  */
 class IptvMediaSourceFactory @Inject constructor(
-    okHttpClient: OkHttpClient,
+    @StreamingHttpClient okHttpClient: OkHttpClient,
     @DownloadCache downloadCache: Cache,
 ) {
 

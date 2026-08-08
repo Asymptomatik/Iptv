@@ -9,7 +9,21 @@ import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import java.util.concurrent.TimeUnit
+import javax.inject.Qualifier
 import javax.inject.Singleton
+
+/**
+ * Qualifies the [OkHttpClient] used to fetch **media bytes** (video, audio, subtitles) rather
+ * than Xtream API JSON.
+ *
+ * A media response body is a whole movie — hundreds of megabytes streamed lazily. Any OkHttp
+ * interceptor that materialises the body (notably [HttpLoggingInterceptor] at
+ * [HttpLoggingInterceptor.Level.BODY]) would buffer that entire file into the heap, so the
+ * streaming client must never carry one. See [NetworkModule.provideStreamingOkHttpClient].
+ */
+@Qualifier
+@Retention(AnnotationRetention.BINARY)
+annotation class StreamingHttpClient
 
 /**
  * Hilt module providing network-layer singletons for the Xtream Codes client.
@@ -58,7 +72,9 @@ object NetworkModule {
     }
 
     /**
-     * Provides the shared [OkHttpClient] for all HTTP calls in the app.
+     * Provides the shared [OkHttpClient] for the app's **Xtream API** calls.
+     *
+     * Not for media bytes — see [StreamingHttpClient] and [provideStreamingOkHttpClient].
      *
      * Configuration:
      * - **Logging**: A [HttpLoggingInterceptor] at [HttpLoggingInterceptor.Level.BODY]
@@ -87,5 +103,33 @@ object NetworkModule {
                     )
                 }
             }
+            .build()
+
+    /**
+     * Provides the [OkHttpClient] that fetches media bytes, for Media3's
+     * `OkHttpDataSource` (see [com.bobot.iptvapp.player.IptvMediaSourceFactory]).
+     *
+     * It is [provideOkHttpClient]'s client minus every [HttpLoggingInterceptor], derived via
+     * `newBuilder()` so both clients keep sharing one connection pool and dispatcher rather
+     * than standing up a second HTTP stack.
+     *
+     * ## Why the logging interceptor must go
+     * At [HttpLoggingInterceptor.Level.BODY] the interceptor calls `source.request(Long.MAX_VALUE)`
+     * to buffer the *complete* response body before logging it. For an API call that is a few
+     * kilobytes of JSON; for `movie/<user>/<pass>/<id>.mp4` it is the whole film. Playing any
+     * VOD item in a debug build therefore filled the heap and killed the process with
+     * `OutOfMemoryError` on the `OkHttp Dispatcher` thread — reproduced on a Pixel_7 emulator
+     * on 2026-08-08, after ~60 s of buffering at 0:00 with 576 MB of heap consumed.
+     *
+     * Removing the interceptor rather than lowering its level keeps the API client's verbose
+     * logging (genuinely useful, and small) while making it structurally impossible for a
+     * body-materialising interceptor to reach the media path.
+     */
+    @Provides
+    @Singleton
+    @StreamingHttpClient
+    fun provideStreamingOkHttpClient(apiClient: OkHttpClient): OkHttpClient =
+        apiClient.newBuilder()
+            .apply { interceptors().removeAll { it is HttpLoggingInterceptor } }
             .build()
 }
