@@ -52,6 +52,7 @@ import com.bobot.iptvapp.ui.components.FocusableTextButton
 import com.bobot.iptvapp.ui.components.GhostButton
 import com.bobot.iptvapp.ui.components.GlassSurface
 import com.bobot.iptvapp.ui.components.PrimaryButton
+import com.bobot.iptvapp.ui.components.dpadFocusEscape
 import com.bobot.iptvapp.ui.components.focusRingBehind
 import com.bobot.iptvapp.ui.components.glassSurface
 import com.bobot.iptvapp.ui.theme.AccentSolid
@@ -190,7 +191,9 @@ private fun SettingsContent(
                                 imeAction = ImeAction.Next,
                             ),
                             colors = settingsTextFieldColors(),
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .dpadFocusEscape(),
                         )
                     }
 
@@ -210,7 +213,9 @@ private fun SettingsContent(
                             enabled = !uiState.isLoading,
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
                             colors = settingsTextFieldColors(),
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .dpadFocusEscape(),
                         )
                     }
 
@@ -252,7 +257,9 @@ private fun SettingsContent(
                                 }
                             },
                             colors = settingsTextFieldColors(),
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .dpadFocusEscape(),
                         )
                     }
 

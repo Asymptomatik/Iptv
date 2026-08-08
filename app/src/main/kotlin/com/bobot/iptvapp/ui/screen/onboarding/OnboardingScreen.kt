@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.bobot.iptvapp.ui.components.PrimaryButton
+import com.bobot.iptvapp.ui.components.dpadFocusEscape
 import com.bobot.iptvapp.ui.components.glassSurface
 import com.bobot.iptvapp.ui.theme.AccentGradient
 import com.bobot.iptvapp.ui.theme.AccentSolid
@@ -170,7 +171,9 @@ private fun OnboardingContent(
                         imeAction = ImeAction.Next,
                     ),
                     colors = onboardingTextFieldColors(),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .dpadFocusEscape(),
                 )
             }
 
@@ -190,7 +193,9 @@ private fun OnboardingContent(
                     enabled = !uiState.isLoading,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
                     colors = onboardingTextFieldColors(),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .dpadFocusEscape(),
                 )
             }
 
@@ -231,7 +236,9 @@ private fun OnboardingContent(
                         }
                     },
                     colors = onboardingTextFieldColors(),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .dpadFocusEscape(),
                 )
             }
 

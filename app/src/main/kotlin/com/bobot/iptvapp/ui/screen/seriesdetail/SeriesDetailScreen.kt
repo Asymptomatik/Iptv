@@ -2,6 +2,7 @@ package com.bobot.iptvapp.ui.screen.seriesdetail
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,6 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
@@ -466,6 +468,20 @@ private fun SeriesSeasonSelector(
  * where both branches were identical, making focus invisible.
  * Now uses `.glassSurface(strong = isFocused)` so rest state is subtle glass
  * and focused state is the stronger glass variant — visually distinct on D-pad.
+ *
+ * ## Why the row is a focus *group* rather than a focus target
+ * The row is [clickable] so a touch anywhere on it starts playback. But `clickable` also makes
+ * the row itself focusable, and a focusable node is a leaf as far as directional focus search is
+ * concerned: once the row held the focus, neither `DPAD_RIGHT` nor `DPAD_DOWN` could reach the
+ * "Lire" and "Télécharger" buttons nested inside it. On an Android TV emulator on 2026-08-08
+ * those two actions were simply unreachable with a remote, even though the UI tree reported them
+ * as focusable and clickable.
+ *
+ * So the row keeps its click handler for touch, but gives up its own focusability
+ * (`focusProperties { canFocus = false }`, which applies to the `clickable` that follows it) and
+ * declares itself a [focusGroup] instead. D-pad navigation now enters the row and lands directly
+ * on its buttons. The highlight tracks [FocusState.hasFocus] rather than `isFocused` so the whole
+ * row still lights up while any of its buttons is focused — the behaviour a TV user expects.
  */
 @Composable
 private fun SeriesDetailEpisodeRow(
@@ -489,7 +505,9 @@ private fun SeriesDetailEpisodeRow(
             // BUG FIX: was `.background(if (isFocused) BackgroundElevated else BackgroundElevated)`
             // Now: rest = GlassFill + GlassBorder; focused = GlassFillStrong + GlassBorderStrong
             .glassSurface(shape = rowShape, strong = isFocused)
-            .onFocusChanged { focusState -> isFocused = focusState.isFocused }
+            .onFocusChanged { focusState -> isFocused = focusState.hasFocus }
+            .focusGroup()
+            .focusProperties { canFocus = false }
             .clickable(enabled = enabled, onClick = onClick)
             .padding(Spacing.md),
     ) {
