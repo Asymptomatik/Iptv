@@ -285,4 +285,64 @@ class CategoryLanguageTest {
 
         assertEquals("HD Movies", result)
     }
+
+    // ── Non-breaking spaces ──────────────────────────────────────────────────
+    // Regression coverage for a bug observed on a real Xtream catalogue: some providers separate
+    // the tag from its delimiter with U+00A0 instead of a plain space. Java's `\s` and
+    // Char.isWhitespace() are both ASCII-only and report false for it, so every pattern failed to
+    // match — the category lost its tag *and* had its raw prefix shown to the user.
+
+    @Test
+    fun `extractLanguageTag returns tag when a non-breaking space precedes the delimiter`() {
+        assertEquals("FR", CategoryLanguage.extractLanguageTag("FR\u00A0| Sport"))
+        assertEquals("EU", CategoryLanguage.extractLanguageTag("EU\u00A0| FRANCE GENERAL"))
+        assertEquals("AF", CategoryLanguage.extractLanguageTag("AF\u00A0| SOMETHING"))
+    }
+
+    @Test
+    fun `extractDisplayName strips the prefix when a non-breaking space precedes the delimiter`() {
+        assertEquals("FRANCE GENERAL", CategoryLanguage.extractDisplayName("EU\u00A0| FRANCE GENERAL"))
+        assertEquals("Sport", CategoryLanguage.extractDisplayName("FR\u00A0|\u00A0Sport"))
+    }
+
+    @Test
+    fun `extractLanguageTag returns nested tag across non-breaking spaces`() {
+        assertEquals("FR", CategoryLanguage.extractLanguageTag("SRS\u00A0|\u00A0FR\u00A0-\u00A0LATEST SERIES"))
+    }
+
+    @Test
+    fun `extractDisplayName removes nested prefixes across non-breaking spaces`() {
+        assertEquals(
+            "LATEST SERIES",
+            CategoryLanguage.extractDisplayName("SRS\u00A0|\u00A0FR\u00A0-\u00A0LATEST SERIES"),
+        )
+    }
+
+    @Test
+    fun `extractLanguageTag returns whitelisted tag separated by a non-breaking space alone`() {
+        assertEquals("FR", CategoryLanguage.extractLanguageTag("FR\u00A0Sport"))
+    }
+
+    @Test
+    fun `extractLanguageTag trims leading and trailing non-breaking spaces`() {
+        assertEquals("FR", CategoryLanguage.extractLanguageTag("\u00A0FR | Sport\u00A0"))
+    }
+
+    @Test
+    fun `extractDisplayName trims leading and trailing non-breaking spaces`() {
+        assertEquals("Sport", CategoryLanguage.extractDisplayName("\u00A0FR | Sport\u00A0"))
+        assertEquals("Unrecognised name", CategoryLanguage.extractDisplayName("\u00A0Unrecognised name\u00A0"))
+    }
+
+    @Test
+    fun `extractLanguageTag returns null for a name made only of non-breaking spaces`() {
+        assertNull(CategoryLanguage.extractLanguageTag("\u00A0\u00A0"))
+    }
+
+    @Test
+    fun `extractLanguageTag keeps rejecting non-whitelisted prefixes behind a non-breaking space`() {
+        // The whitespace widening must not weaken the false-positive filtering.
+        assertNull(CategoryLanguage.extractLanguageTag("HD\u00A0Movies"))
+        assertNull(CategoryLanguage.extractLanguageTag("US\u00A0Sports"))
+    }
 }
