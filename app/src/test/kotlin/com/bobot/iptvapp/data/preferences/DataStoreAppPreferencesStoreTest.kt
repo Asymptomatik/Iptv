@@ -273,4 +273,58 @@ class DataStoreAppPreferencesStoreTest {
                 cancel()
             }
         }
+
+    // ── Chaines tab default (region tags, not language tags) ─────────────────
+
+    @Test
+    fun `getDefaultLiveLanguageFilter returns EU when nothing stored`() = testScope.runTest {
+        assertEquals("EU", store.getDefaultLiveLanguageFilter())
+    }
+
+    @Test
+    fun `setDefaultLiveLanguageFilter then getDefaultLiveLanguageFilter returns the stored tag`() =
+        testScope.runTest {
+            store.setDefaultLiveLanguageFilter("AM")
+            assertEquals("AM", store.getDefaultLiveLanguageFilter())
+        }
+
+    @Test
+    fun `setDefaultLiveLanguageFilter with null clears the filter to null`() = testScope.runTest {
+        store.setDefaultLiveLanguageFilter("AM")
+        store.setDefaultLiveLanguageFilter(null)
+        assertNull(store.getDefaultLiveLanguageFilter())
+    }
+
+    @Test
+    fun `setDefaultLiveLanguageFilter trims and uppercases the stored tag`() = testScope.runTest {
+        store.setDefaultLiveLanguageFilter("  eu ")
+        assertEquals("EU", store.getDefaultLiveLanguageFilter())
+    }
+
+    @Test
+    fun `observeDefaultLiveLanguageFilter emits EU initially then reacts to changes`() =
+        testScope.runTest {
+            store.observeDefaultLiveLanguageFilter().test {
+                assertEquals("EU", awaitItem()) // initial — nothing stored yet
+
+                store.setDefaultLiveLanguageFilter("AM")
+                assertEquals("AM", awaitItem())
+
+                store.setDefaultLiveLanguageFilter(null)
+                assertNull(awaitItem())
+
+                cancel()
+            }
+        }
+
+    @Test
+    fun `the two default filters are stored independently`() = testScope.runTest {
+        // Distinct DataStore keys: writing one must not disturb the other, in either direction.
+        store.setDefaultLanguageFilter("EN")
+        assertEquals("EU", store.getDefaultLiveLanguageFilter())
+
+        store.setDefaultLiveLanguageFilter("AM")
+        assertEquals("EN", store.getDefaultLanguageFilter())
+        assertEquals("AM", store.getDefaultLiveLanguageFilter())
+    }
 }

@@ -83,4 +83,33 @@ interface AppPreferencesStore {
      * trimmed and upper-cased before being stored (e.g. `"  fr "` is stored as `"FR"`).
      */
     suspend fun setDefaultLanguageFilter(tag: String?)
+
+    /**
+     * Emits the default filter tag **for the Chaines (live) tab** on collection, then on every
+     * change. Same absent-vs-empty semantics as [observeDefaultLanguageFilter], but the product
+     * default is `"EU"` rather than `"FR"`.
+     *
+     * Live categories are tagged differently from VOD ones by real providers: on the reference
+     * catalogue this project is validated against, every live tag is a *region* (`EU`, `AM`, `AR`,
+     * `AS`, `AF`, `VIP`) and not one is a language — the 10 categories whose name contains
+     * "FRANCE" are all tagged `EU`. A single shared default of `"FR"` therefore matched nothing on
+     * that tab and silently fell back to "Toutes", while `"EU"` is the meaningful default there.
+     * Films/Series keep [observeDefaultLanguageFilter]'s `"FR"`, where tags really are languages.
+     *
+     * Note: as with [observeDefaultLanguageFilter], no production caller writes this preference
+     * yet — it is exposed ahead of a future user-facing setting, not dead code.
+     */
+    fun observeDefaultLiveLanguageFilter(): Flow<String?>
+
+    /**
+     * One-shot read of the Chaines tab's default filter tag. See [observeDefaultLiveLanguageFilter]
+     * for the absent-vs-empty semantics and why its default differs from [getDefaultLanguageFilter].
+     */
+    suspend fun getDefaultLiveLanguageFilter(): String?
+
+    /**
+     * Sets the Chaines tab's default filter to [tag], with the same null/trim/upper-case handling
+     * as [setDefaultLanguageFilter].
+     */
+    suspend fun setDefaultLiveLanguageFilter(tag: String?)
 }
