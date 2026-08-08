@@ -42,6 +42,7 @@ import com.bobot.iptvapp.ui.components.CategoryChip
 import com.bobot.iptvapp.ui.components.FocusableCard
 import com.bobot.iptvapp.ui.components.FocusableTextButton
 import com.bobot.iptvapp.ui.components.SectionTitle
+import com.bobot.iptvapp.ui.components.dpadFocusEscape
 import com.bobot.iptvapp.ui.components.glassSurface
 import com.bobot.iptvapp.ui.theme.AccentSolid
 import com.bobot.iptvapp.ui.theme.BackgroundBase
@@ -285,7 +286,8 @@ private fun SearchField(
             colors = searchTextFieldColors(),
             modifier = Modifier
                 .fillMaxWidth()
-                .focusRequester(focusRequester),
+                .focusRequester(focusRequester)
+                .dpadFocusEscape(),
         )
     }
 }
