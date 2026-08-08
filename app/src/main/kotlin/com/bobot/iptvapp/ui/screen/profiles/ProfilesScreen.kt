@@ -19,7 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -38,6 +38,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -187,6 +189,18 @@ private fun ProfilesSelectionContent(
     onProfileCardClick: (Profile) -> Unit,
     onAddProfileClick: () -> Unit,
 ) {
+    // Initial D-pad focus target, mirroring HomeScreen's pattern. Without it nothing is focused
+    // when this screen appears, and since it is the app's start destination for a returning user
+    // (see AppNavGraph), the very first DPAD_CENTER press on a TV does nothing — the user has to
+    // press a direction key first just to give focus to something. Targets the first profile, or
+    // the "add profile" card when there is no profile yet.
+    val initialFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(uiState.profiles) {
+        // requestFocus() throws when the target node is not attached yet (e.g. the LazyRow has not
+        // composed its first item for this emission). Same defensive handling as HomeScreen.
+        runCatching { initialFocusRequester.requestFocus() }
+    }
+
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             text = "Qui regarde ?",
@@ -201,20 +215,30 @@ private fun ProfilesSelectionContent(
             horizontalArrangement = Arrangement.spacedBy(LayoutDimens.CardRowSpacing),
             contentPadding = PaddingValues(LayoutDimens.LazyRowFocusPadding),
         ) {
-            items(uiState.profiles, key = { it.id }) { profile ->
+            itemsIndexed(uiState.profiles, key = { _, profile -> profile.id }) { index, profile ->
+                val cardModifier = Modifier
+                    .width(CardDimens.PosterWidthPhone)
+                    .let { if (index == 0) it.focusRequester(initialFocusRequester) else it }
+
                 ProfileCard(
                     profile = profile,
                     isManageModeActive = uiState.isManageModeActive,
                     onClick = { onProfileCardClick(profile) },
                     avatarGradient = avatarGradientForProfile(profile),
-                    modifier = Modifier.width(CardDimens.PosterWidthPhone),
+                    modifier = cardModifier,
                 )
             }
 
             item {
+                val addModifier = Modifier
+                    .width(CardDimens.PosterWidthPhone)
+                    .let {
+                        if (uiState.profiles.isEmpty()) it.focusRequester(initialFocusRequester) else it
+                    }
+
                 AddProfileCard(
                     onClick = onAddProfileClick,
-                    modifier = Modifier.width(CardDimens.PosterWidthPhone),
+                    modifier = addModifier,
                 )
             }
         }
