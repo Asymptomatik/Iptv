@@ -2,6 +2,7 @@ package com.bobot.iptvapp.data.remote.mapper
 
 import com.bobot.iptvapp.data.remote.dto.LiveStreamDto
 import com.bobot.iptvapp.domain.model.Channel
+import com.bobot.iptvapp.domain.util.BouquetSeparator
 
 /**
  * Maps a [LiveStreamDto] (network DTO from `get_live_streams`) to a [Channel] domain model.
@@ -21,6 +22,12 @@ fun LiveStreamDto.toDomain(): Channel = Channel(
 )
 
 /**
- * Convenience extension to map a list of [LiveStreamDto]s.
+ * Maps a list of [LiveStreamDto]s, dropping the bouquet separators the provider mixes into
+ * `get_live_streams` (see [BouquetSeparator] — QA finding Y2).
+ *
+ * The filter lives on the list mapper rather than on [toDomain] itself so that the single-item
+ * mapping stays a pure translation: dropping an element is a list-level decision, and the only
+ * caller that maps a live stream in isolation is a test.
  */
-fun List<LiveStreamDto>.toDomain(): List<Channel> = map { it.toDomain() }
+fun List<LiveStreamDto>.toDomain(): List<Channel> =
+    filterNot { BouquetSeparator.matches(it.name) }.map { it.toDomain() }

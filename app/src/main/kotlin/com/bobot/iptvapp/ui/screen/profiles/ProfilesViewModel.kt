@@ -67,6 +67,7 @@ data class ProfilesUiState(
     val editingProfileId: String? = null,
     val errorMessage: String? = null,
     val navigateToHome: Boolean = false,
+    val isDeleteConfirmationVisible: Boolean = false,
 )
 
 /**
@@ -231,6 +232,7 @@ class ProfilesViewModel @Inject constructor(
                 formName = "",
                 editingProfileId = null,
                 errorMessage = null,
+                isDeleteConfirmationVisible = false,
             )
         }
     }
@@ -302,13 +304,14 @@ class ProfilesViewModel @Inject constructor(
     }
 
     /**
-     * Deletes the profile currently open in [ProfilesMode.EDIT]. See class KDoc "Deleting the
-     * active profile" for the last-profile guard and active-id cleanup behaviour, and "Cleaning
-     * up on deletion" for the favorites/playback-progress purge performed alongside it.
+     * Arms the deletion confirmation (QA finding M2: "Supprimer" used to destroy the profile on a
+     * single press). The last-profile guard is evaluated here *and* again in [onDeleteProfile] —
+     * refusing early gives immediate feedback, re-checking on confirm covers the profile list
+     * changing while the dialog is open.
      */
-    fun onDeleteProfile() {
+    fun onDeleteProfileRequested() {
         val current = _uiState.value
-        val editingId = current.editingProfileId ?: return
+        if (current.editingProfileId == null) return
 
         if (current.profiles.size <= 1) {
             _uiState.update {
@@ -316,6 +319,40 @@ class ProfilesViewModel @Inject constructor(
             }
             return
         }
+
+        _uiState.update { it.copy(isDeleteConfirmationVisible = true, errorMessage = null) }
+    }
+
+    /** Dismisses the deletion confirmation without touching any data. */
+    fun onDeleteConfirmationDismissed() {
+        _uiState.update { it.copy(isDeleteConfirmationVisible = false) }
+    }
+
+    /**
+     * Deletes the profile currently open in [ProfilesMode.EDIT], once the user has confirmed via
+     * [onDeleteProfileRequested]. See class KDoc "Deleting the active profile" for the
+     * last-profile guard and active-id cleanup behaviour, and "Cleaning up on deletion" for the
+     * favorites/playback-progress purge performed alongside it.
+     *
+     * The confirmation flag is cleared *synchronously*, before the deletion coroutine is launched,
+     * so a second press landing on the same frame finds `editingProfileId == null` only after the
+     * coroutine completes but finds no dialog to press in the meantime.
+     */
+    fun onDeleteProfile() {
+        val current = _uiState.value
+        val editingId = current.editingProfileId ?: return
+
+        if (current.profiles.size <= 1) {
+            _uiState.update {
+                it.copy(
+                    errorMessage = "Impossible de supprimer le dernier profil restant.",
+                    isDeleteConfirmationVisible = false,
+                )
+            }
+            return
+        }
+
+        _uiState.update { it.copy(isDeleteConfirmationVisible = false) }
 
         viewModelScope.launch {
             profileRepository.deleteProfile(editingId)

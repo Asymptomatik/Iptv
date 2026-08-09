@@ -48,6 +48,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.bobot.iptvapp.ui.components.ConfirmDialog
 import com.bobot.iptvapp.ui.components.FocusableTextButton
 import com.bobot.iptvapp.ui.components.GhostButton
 import com.bobot.iptvapp.ui.components.GlassSurface
@@ -55,6 +56,7 @@ import com.bobot.iptvapp.ui.components.PrimaryButton
 import com.bobot.iptvapp.ui.components.dpadFocusEscape
 import com.bobot.iptvapp.ui.components.focusRingBehind
 import com.bobot.iptvapp.ui.components.glassSurface
+import com.bobot.iptvapp.ui.components.tvTextFieldEditGate
 import com.bobot.iptvapp.ui.theme.AccentSolid
 import com.bobot.iptvapp.ui.theme.BackgroundBase
 import com.bobot.iptvapp.ui.theme.DisabledSurface
@@ -66,6 +68,7 @@ import com.bobot.iptvapp.ui.theme.Spacing
 import com.bobot.iptvapp.ui.theme.TextDimmed
 import com.bobot.iptvapp.ui.theme.TextPrimary
 import com.bobot.iptvapp.ui.theme.TextSecondary
+import com.bobot.iptvapp.ui.util.rememberIsTvDevice
 
 /**
  * Settings screen (Task 15, reskinned Task 11) — "Cinematic Glass" V2.
@@ -103,12 +106,21 @@ fun SettingsScreen(
         onReloadMovies = viewModel::onReloadMovies,
         onReloadSeries = viewModel::onReloadSeries,
         onReloadChannels = viewModel::onReloadChannels,
-        onLogout = viewModel::onLogout,
+        onLogout = viewModel::onLogoutRequested,
+        onConfirmLogout = viewModel::onLogout,
+        onDismissLogoutConfirmation = viewModel::onLogoutConfirmationDismissed,
         onToggleWifiOnlyDownloads = viewModel::onToggleWifiOnlyDownloads,
         onNavigateToProfiles = onNavigateToProfiles,
         modifier = modifier,
     )
 }
+
+/**
+ * The credential fields, as far as the Android TV browse/edit split needs to tell them apart
+ * (QA finding Y3). At most one is being edited at a time, so the state is a nullable value of this
+ * type rather than three booleans.
+ */
+private enum class SettingsField { SERVER_URL, USERNAME, PASSWORD }
 
 /**
  * Stateless content — separated from [SettingsScreen] so it can be exercised directly in
@@ -126,10 +138,36 @@ private fun SettingsContent(
     onReloadSeries: () -> Unit,
     onReloadChannels: () -> Unit,
     onLogout: () -> Unit,
+    onConfirmLogout: () -> Unit,
+    onDismissLogoutConfirmation: () -> Unit,
     onToggleWifiOnlyDownloads: (Boolean) -> Unit,
     onNavigateToProfiles: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // QA finding Y3 — on Android TV, every focused editable field asks for the on-screen keyboard,
+    // which covers the bottom half of the display. The window hands its initial focus to the first
+    // focusable node — the URL field — so merely opening this screen put the keyboard up, and
+    // travelling down to "Enregistrer" needed a BACK between every field to get it out of the way.
+    //
+    // On TV the three fields therefore browse read-only and only start editing on DPAD_CENTER; see
+    // [tvTextFieldEditGate]. Phones are untouched: there, focus means a tap, and the keyboard is
+    // what the user asked for.
+    val isTv = rememberIsTvDevice()
+    var editingField by remember { mutableStateOf<SettingsField?>(null) }
+
+    // QA finding M2 — "Déconnexion" used to clear the credentials on a single press. Only the
+    // server credentials go; profiles, favorites, resume positions and downloads all survive.
+    if (uiState.isLogoutConfirmationVisible) {
+        ConfirmDialog(
+            title = "Se déconnecter ?",
+            message = "Les identifiants de ce serveur seront effacés et il faudra les saisir à " +
+                "nouveau. Vos profils, favoris et téléchargements sont conservés.",
+            confirmLabel = "Se déconnecter",
+            onConfirm = onConfirmLogout,
+            onDismiss = onDismissLogoutConfirmation,
+        )
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -191,9 +229,16 @@ private fun SettingsContent(
                                 imeAction = ImeAction.Next,
                             ),
                             colors = settingsTextFieldColors(),
+                            readOnly = isTv && editingField != SettingsField.SERVER_URL,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .dpadFocusEscape(),
+                                .dpadFocusEscape()
+                                .tvTextFieldEditGate(
+                                    enabled = isTv,
+                                    isEditing = editingField == SettingsField.SERVER_URL,
+                                    onStartEditing = { editingField = SettingsField.SERVER_URL },
+                                    onStopEditing = { editingField = null },
+                                ),
                         )
                     }
 
@@ -213,9 +258,16 @@ private fun SettingsContent(
                             enabled = !uiState.isLoading,
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
                             colors = settingsTextFieldColors(),
+                            readOnly = isTv && editingField != SettingsField.USERNAME,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .dpadFocusEscape(),
+                                .dpadFocusEscape()
+                                .tvTextFieldEditGate(
+                                    enabled = isTv,
+                                    isEditing = editingField == SettingsField.USERNAME,
+                                    onStartEditing = { editingField = SettingsField.USERNAME },
+                                    onStopEditing = { editingField = null },
+                                ),
                         )
                     }
 
@@ -257,9 +309,16 @@ private fun SettingsContent(
                                 }
                             },
                             colors = settingsTextFieldColors(),
+                            readOnly = isTv && editingField != SettingsField.PASSWORD,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .dpadFocusEscape(),
+                                .dpadFocusEscape()
+                                .tvTextFieldEditGate(
+                                    enabled = isTv,
+                                    isEditing = editingField == SettingsField.PASSWORD,
+                                    onStartEditing = { editingField = SettingsField.PASSWORD },
+                                    onStopEditing = { editingField = null },
+                                ),
                         )
                     }
 
@@ -514,6 +573,8 @@ private fun SettingsContentPreFilledPreview() {
             onReloadSeries = {},
             onReloadChannels = {},
             onLogout = {},
+            onConfirmLogout = {},
+            onDismissLogoutConfirmation = {},
             onToggleWifiOnlyDownloads = {},
             onNavigateToProfiles = {},
         )
@@ -540,6 +601,8 @@ private fun SettingsContentErrorPreview() {
             onReloadSeries = {},
             onReloadChannels = {},
             onLogout = {},
+            onConfirmLogout = {},
+            onDismissLogoutConfirmation = {},
             onToggleWifiOnlyDownloads = {},
             onNavigateToProfiles = {},
         )
@@ -565,6 +628,8 @@ private fun SettingsContentInfoPreview() {
             onReloadSeries = {},
             onReloadChannels = {},
             onLogout = {},
+            onConfirmLogout = {},
+            onDismissLogoutConfirmation = {},
             onToggleWifiOnlyDownloads = {},
             onNavigateToProfiles = {},
         )

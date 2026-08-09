@@ -4,6 +4,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -174,6 +176,7 @@ private fun MovieDetailErrorState(
 
 // ─── Content body ────────────────────────────────────────────────────────────
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun MovieDetailBody(
     movie: Movie,
@@ -221,10 +224,14 @@ private fun MovieDetailBody(
 
             Spacer(modifier = Modifier.height(Spacing.lg))
 
-            // Actions row
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
+            // Actions row — FlowRow, not Row: with "Reprendre" + "Recommencer" + a download
+            // button + the favorite toggle the fixed row overflowed a 1080-wide phone and pushed
+            // the favorite button entirely off screen (QA finding M1). Wrapping keeps every
+            // action reachable whatever the combination of labels.
+            FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(Spacing.md),
+                verticalArrangement = Arrangement.spacedBy(Spacing.sm),
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 // Primary action: Lire or Reprendre
                 val playLabel = if (uiState.canResume) "Reprendre" else "Lire"
@@ -279,6 +286,7 @@ private fun MovieDetailBody(
                     icon = if (uiState.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                     contentDescription = if (uiState.isFavorite) "Retirer de ma liste" else "Ajouter à ma liste",
                     onClick = onFavoriteClick,
+                    modifier = Modifier.align(Alignment.CenterVertically),
                 )
             }
 

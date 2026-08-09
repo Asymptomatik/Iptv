@@ -36,6 +36,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -154,6 +155,31 @@ private data class HomeSectionResources(
  * @property selectedMovieLanguage Films tab equivalent of [selectedLiveLanguage].
  * @property selectedSeriesLanguage Series tab equivalent of [selectedLiveLanguage].
  */
+/**
+ * Where one catalog tab ([ContentType.LIVE] / [ContentType.MOVIE] / [ContentType.SERIES]) stands in
+ * its own load — QA finding M3.
+ *
+ * [HomeUiState.isLoading] cannot answer this: it is `true` only while some section still holds a
+ * [Resource.Loading], and [com.bobot.iptvapp.domain.usecase.LoadCategoryScopedCatalogUseCase]
+ * publishes `Resource.Success(emptyList())` as soon as the (cheap, fast) category list resolves —
+ * *before* fetching any category's items. On a large account the per-category loop then runs for
+ * 30–40 s with `isLoading == false` and no rows, which Home rendered as the flat, wrong
+ * "Aucun contenu disponible pour le moment.".
+ *
+ * The three values are deliberately distinct: collapsing "never asked for" and "asked for, still
+ * running" back into one flag is what produced the bug.
+ */
+enum class CatalogTabLoadState {
+    /** [HomeViewModel.onCatalogTabSelected] has never been called for this content type. */
+    NOT_REQUESTED,
+
+    /** Requested; the per-category fetch loop is still running. Rows may already be arriving. */
+    LOADING,
+
+    /** The per-category fetch loop has run to completion — an empty tab here really is empty. */
+    LOADED,
+}
+
 data class HomeUiState(
     val continueWatchingRows: List<HomeRow> = emptyList(),
     val myListRows: List<HomeRow> = emptyList(),
@@ -168,6 +194,7 @@ data class HomeUiState(
     val selectedLiveLanguage: String? = null,
     val selectedMovieLanguage: String? = null,
     val selectedSeriesLanguage: String? = null,
+    val catalogTabLoadStates: Map<ContentType, CatalogTabLoadState> = emptyMap(),
 ) {
     /** `true` once at least one row exists in any section — used to pick which visual state to render. */
     val hasAnyRows: Boolean
@@ -724,6 +751,10 @@ class HomeViewModel @Inject constructor(
      */
     private fun startCatalogTabLoad(contentType: ContentType) {
         catalogTabJobs[contentType]?.cancel()
+        // Publish LOADING *synchronously*, before the coroutine is dispatched: HomeScreen calls
+        // onCatalogTabSelected from a LaunchedEffect on tab switch, and any gap between the switch
+        // and the first state emission would flash the empty state (QA finding M3).
+        markCatalogTabLoadState(contentType, CatalogTabLoadState.LOADING)
         catalogTabJobs[contentType] = viewModelScope.launch {
             when (contentType) {
                 ContentType.LIVE -> loadCatalogTab(
@@ -828,7 +859,28 @@ class HomeViewModel @Inject constructor(
             buildRowsFlow(contentType, categoriesFlow, itemsState, languageFilterState, categoryIdOf, toCard)
                 .collect { rowsState.value = it }
         }
-        loadCategoryScopedCatalogUseCase(categoriesFlow, itemsState, fetchCategoryItems = fetchCategoryItems)
+        try {
+            loadCategoryScopedCatalogUseCase(categoriesFlow, itemsState, fetchCategoryItems = fetchCategoryItems)
+        } finally {
+            // QA finding M3: this is the only point at which the per-category loop is genuinely
+            // over — an empty tab from here on really is empty. `isActive` distinguishes "finished"
+            // from "cancelled by a newer startCatalogTabLoad (or by onCleared)": in the cancelled
+            // case a fresh LOADING has already been published and must not be clobbered back to
+            // LOADED by this dying job. A non-cancellation failure still lands here with
+            // `isActive == true`, and is correctly reported as "no longer loading".
+            if (isActive) {
+                markCatalogTabLoadState(contentType, CatalogTabLoadState.LOADED)
+            }
+        }
+    }
+
+    /**
+     * Publishes one catalog tab's [CatalogTabLoadState] into [_uiState]. Safe to call directly
+     * (rather than through [reduceUiState]) because every caller runs on the main thread and
+     * `update` composes with the `combine` collector's own `update` on the same [MutableStateFlow].
+     */
+    private fun markCatalogTabLoadState(contentType: ContentType, state: CatalogTabLoadState) {
+        _uiState.update { it.copy(catalogTabLoadStates = it.catalogTabLoadStates + (contentType to state)) }
     }
 
     /**
