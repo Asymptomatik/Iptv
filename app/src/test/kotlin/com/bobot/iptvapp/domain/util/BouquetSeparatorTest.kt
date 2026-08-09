@@ -56,6 +56,8 @@ class BouquetSeparatorTest {
         assertFalse(BouquetSeparator.matches("M6 +1"))
         assertFalse("two stars either side is not enough", BouquetSeparator.matches("**CANAL+**"))
         assertFalse(BouquetSeparator.matches("RMC Sport 1 |FR|"))
+        assertFalse("an internal hashtag is not a frame", BouquetSeparator.matches("CNews #Replay"))
+        assertFalse(BouquetSeparator.matches("Eurosport 1 HD ***"))
     }
 
     @Test
