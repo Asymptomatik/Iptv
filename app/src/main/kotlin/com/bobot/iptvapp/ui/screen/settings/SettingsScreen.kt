@@ -48,6 +48,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.bobot.iptvapp.ui.components.ConfirmDialog
 import com.bobot.iptvapp.ui.components.FocusableTextButton
 import com.bobot.iptvapp.ui.components.GhostButton
 import com.bobot.iptvapp.ui.components.GlassSurface
@@ -103,7 +104,9 @@ fun SettingsScreen(
         onReloadMovies = viewModel::onReloadMovies,
         onReloadSeries = viewModel::onReloadSeries,
         onReloadChannels = viewModel::onReloadChannels,
-        onLogout = viewModel::onLogout,
+        onLogout = viewModel::onLogoutRequested,
+        onConfirmLogout = viewModel::onLogout,
+        onDismissLogoutConfirmation = viewModel::onLogoutConfirmationDismissed,
         onToggleWifiOnlyDownloads = viewModel::onToggleWifiOnlyDownloads,
         onNavigateToProfiles = onNavigateToProfiles,
         modifier = modifier,
@@ -126,10 +129,25 @@ private fun SettingsContent(
     onReloadSeries: () -> Unit,
     onReloadChannels: () -> Unit,
     onLogout: () -> Unit,
+    onConfirmLogout: () -> Unit,
+    onDismissLogoutConfirmation: () -> Unit,
     onToggleWifiOnlyDownloads: (Boolean) -> Unit,
     onNavigateToProfiles: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // QA finding M2 — "Déconnexion" used to clear the credentials on a single press. Only the
+    // server credentials go; profiles, favorites, resume positions and downloads all survive.
+    if (uiState.isLogoutConfirmationVisible) {
+        ConfirmDialog(
+            title = "Se déconnecter ?",
+            message = "Les identifiants de ce serveur seront effacés et il faudra les saisir à " +
+                "nouveau. Vos profils, favoris et téléchargements sont conservés.",
+            confirmLabel = "Se déconnecter",
+            onConfirm = onConfirmLogout,
+            onDismiss = onDismissLogoutConfirmation,
+        )
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -514,6 +532,8 @@ private fun SettingsContentPreFilledPreview() {
             onReloadSeries = {},
             onReloadChannels = {},
             onLogout = {},
+            onConfirmLogout = {},
+            onDismissLogoutConfirmation = {},
             onToggleWifiOnlyDownloads = {},
             onNavigateToProfiles = {},
         )
@@ -540,6 +560,8 @@ private fun SettingsContentErrorPreview() {
             onReloadSeries = {},
             onReloadChannels = {},
             onLogout = {},
+            onConfirmLogout = {},
+            onDismissLogoutConfirmation = {},
             onToggleWifiOnlyDownloads = {},
             onNavigateToProfiles = {},
         )
@@ -565,6 +587,8 @@ private fun SettingsContentInfoPreview() {
             onReloadSeries = {},
             onReloadChannels = {},
             onLogout = {},
+            onConfirmLogout = {},
+            onDismissLogoutConfirmation = {},
             onToggleWifiOnlyDownloads = {},
             onNavigateToProfiles = {},
         )

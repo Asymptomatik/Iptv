@@ -233,6 +233,24 @@ private fun HomeUiState.hasContentFor(tab: HomeTab): Boolean =
     heroItemFor(tab) != null || rowsFor(tab).isNotEmpty()
 
 /**
+ * `true` while [tab] still has content on the way — QA finding M3.
+ *
+ * For a catalog tab this reads that tab's own [CatalogTabLoadState] rather than the aggregate
+ * [HomeUiState.isLoading]: the latter goes `false` the moment the category *list* resolves, long
+ * before the per-category item loop ends, which is exactly how a 30–40 s load came to render
+ * "Aucun contenu disponible pour le moment.". [CatalogTabLoadState.NOT_REQUESTED] counts as
+ * loading too — it is the one-frame gap between the user picking the tab and the
+ * `LaunchedEffect(selectedTab)` below reaching [HomeViewModel.onCatalogTabSelected].
+ *
+ * Accueil has no per-tab load of its own (its rows come from favorites/progress, not from a
+ * catalog fetch), so it keeps using the aggregate flag.
+ */
+private fun HomeUiState.isLoadingFor(tab: HomeTab): Boolean {
+    val contentType = tab.toContentTypeOrNull() ?: return isLoading
+    return catalogTabLoadStates[contentType] != CatalogTabLoadState.LOADED
+}
+
+/**
  * Stateless content — separated from [HomeScreen] so it can be exercised directly in
  * @Preview without a Hilt ViewModel.
  *
@@ -278,7 +296,11 @@ private fun HomeContent(
             .background(BackgroundBase),
     ) {
         when {
-            uiState.isLoading && !hasTabContent -> HomeLoadingState()
+            // Per-tab, not uiState.isLoading — see isLoadingFor (QA finding M3). Kept ahead of the
+            // error branch on purpose: errorMessage is aggregated across all five sections, so a
+            // failure on, say, Chaines must not replace the spinner of a Films tab that is
+            // legitimately still loading.
+            uiState.isLoadingFor(selectedTab) && !hasTabContent -> HomeLoadingState()
 
             uiState.errorMessage != null && !hasTabContent -> HomeErrorState(
                 message = uiState.errorMessage,
@@ -483,6 +505,33 @@ private fun HomeErrorState(
     }
 }
 
+/**
+ * Inline "more categories on the way" footer, appended to the rows list while the active catalog
+ * tab is still in [CatalogTabLoadState.LOADING] — QA finding M3. Deliberately small and at the
+ * bottom: the rows already loaded stay usable, unlike a full-screen spinner.
+ */
+@Composable
+private fun HomeCatalogLoadingFooter(horizontalPadding: Dp) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = horizontalPadding, vertical = Spacing.lg),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Spacing.sm2),
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(18.dp),
+            color = AccentSolid,
+            strokeWidth = 2.dp,
+        )
+        Text(
+            text = "Chargement des catégories…",
+            style = MaterialTheme.typography.bodySmall,
+            color = TextSecondary,
+        )
+    }
+}
+
 @Composable
 private fun HomeEmptyState() {
     Box(
@@ -564,7 +613,7 @@ private fun HomeRowsContent(
     val listState = remember(selectedTab) { LazyListState() }
     val density = LocalDensity.current
     val collapseThresholdPx = remember(density) { with(density) { 200.dp.toPx() } }
-    val topBarCollapseFraction by remember {
+    val scrolledCollapseFraction by remember {
         derivedStateOf {
             if (listState.firstVisibleItemIndex > 0) {
                 1f
@@ -573,6 +622,9 @@ private fun HomeRowsContent(
             }
         }
     }
+    // The scrim only has a hero to fade over. On a catalog tab the list sits *below* the header
+    // (see the LazyColumn's inset just under), so the bar is solid from the first frame.
+    val topBarCollapseFraction = if (heroItem != null) scrolledCollapseFraction else 1f
 
     LaunchedEffect(
         selectedTab,
@@ -624,7 +676,23 @@ private fun HomeRowsContent(
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             state = listState,
-            modifier = Modifier.fillMaxSize(),
+            // QA finding M4 — Android TV: the header is drawn *over* this list, so it was invisible
+            // to the list's own geometry. A "topbar-spacer" first item used to reserve its height,
+            // but a scrollable item is exactly what scrolls away: the moment D-pad focus moved down
+            // to the first card, Compose scrolled that card into the list viewport (which starts at
+            // y=0, under the header) and parked the chip rows behind the opaque bar.
+            //
+            // Padding the *layout* instead of prepending an item shrinks the viewport itself, so no
+            // scroll position — focus-driven or manual — can put content under the header. Only the
+            // hero tab keeps the full-bleed overlay, which is the whole point of the hero.
+            modifier = if (heroItem != null) {
+                Modifier.fillMaxSize()
+            } else {
+                Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .padding(top = LayoutDimens.TopBarHeight + LayoutDimens.TabRowHeight)
+            },
             contentPadding = PaddingValues(bottom = Spacing.xl),
         ) {
             if (heroItem != null) {
@@ -639,15 +707,6 @@ private fun HomeRowsContent(
                             )
                         },
                         focusRequester = initialFocusRequester,
-                    )
-                }
-            } else {
-                // Reserve space for the floating header (title row + tab bar) when there is no hero
-                item(key = "topbar-spacer") {
-                    Spacer(
-                        modifier = Modifier
-                            .statusBarsPadding()
-                            .height(LayoutDimens.TopBarHeight + LayoutDimens.TabRowHeight),
                     )
                 }
             }
@@ -766,6 +825,15 @@ private fun HomeRowsContent(
                         initialFocusItem = rowsFocusTarget,
                         initialFocusRequester = initialFocusRequester,
                     )
+                }
+            }
+
+            // QA finding M3 — rows land one category at a time over ~30-40 s on a large account.
+            // Once the first ones are visible the full-screen spinner is gone, so this footer is
+            // what tells the user the catalog is still filling up rather than simply short.
+            if (uiState.isLoadingFor(selectedTab)) {
+                item(key = "catalog-loading-footer") {
+                    HomeCatalogLoadingFooter(horizontalPadding = horizontalPadding)
                 }
             }
         }

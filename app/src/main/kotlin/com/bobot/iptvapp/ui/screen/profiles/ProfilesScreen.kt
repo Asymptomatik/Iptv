@@ -54,6 +54,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.bobot.iptvapp.domain.model.Profile
+import com.bobot.iptvapp.ui.components.ConfirmDialog
 import com.bobot.iptvapp.ui.components.GhostButton
 import com.bobot.iptvapp.ui.components.PrimaryButton
 import com.bobot.iptvapp.ui.components.glassSurface
@@ -110,7 +111,9 @@ fun ProfilesScreen(
         onFormNameChange = viewModel::onFormNameChange,
         onSubmitCreate = viewModel::onSubmitCreate,
         onSubmitEdit = viewModel::onSubmitEdit,
-        onDeleteProfile = viewModel::onDeleteProfile,
+        onDeleteProfile = viewModel::onDeleteProfileRequested,
+        onConfirmDeleteProfile = viewModel::onDeleteProfile,
+        onDismissDeleteConfirmation = viewModel::onDeleteConfirmationDismissed,
         modifier = modifier,
     )
 }
@@ -130,8 +133,24 @@ private fun ProfilesContent(
     onSubmitCreate: () -> Unit,
     onSubmitEdit: () -> Unit,
     onDeleteProfile: () -> Unit,
+    onConfirmDeleteProfile: () -> Unit,
+    onDismissDeleteConfirmation: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // QA finding M2 — "Supprimer" used to destroy the profile (and its favorites and resume
+    // positions) on a single press. Downloads are *not* profile-scoped, so the wording
+    // deliberately does not promise they will go away.
+    if (uiState.isDeleteConfirmationVisible) {
+        ConfirmDialog(
+            title = "Supprimer ce profil ?",
+            message = "Les favoris et les reprises de lecture de ce profil seront " +
+                "définitivement perdus. Cette action est irréversible.",
+            confirmLabel = "Supprimer",
+            onConfirm = onConfirmDeleteProfile,
+            onDismiss = onDismissDeleteConfirmation,
+        )
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -563,6 +582,8 @@ private fun ProfilesContentSelectionPreview() {
             onSubmitCreate = {},
             onSubmitEdit = {},
             onDeleteProfile = {},
+            onConfirmDeleteProfile = {},
+            onDismissDeleteConfirmation = {},
         )
     }
 }
@@ -581,6 +602,8 @@ private fun ProfilesContentEmptyPreview() {
             onSubmitCreate = {},
             onSubmitEdit = {},
             onDeleteProfile = {},
+            onConfirmDeleteProfile = {},
+            onDismissDeleteConfirmation = {},
         )
     }
 }
@@ -604,6 +627,8 @@ private fun ProfilesContentEditPreview() {
             onSubmitCreate = {},
             onSubmitEdit = {},
             onDeleteProfile = {},
+            onConfirmDeleteProfile = {},
+            onDismissDeleteConfirmation = {},
         )
     }
 }

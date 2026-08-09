@@ -61,6 +61,7 @@ data class SettingsUiState(
     val infoMessage: String? = null,
     val isLoggedOut: Boolean = false,
     val isWifiOnlyDownloads: Boolean = false,
+    val isLogoutConfirmationVisible: Boolean = false,
 )
 
 /**
@@ -293,10 +294,24 @@ class SettingsViewModel @Inject constructor(
      * onboarding flow.
      */
     fun onLogout() {
+        _uiState.update { it.copy(isLogoutConfirmationVisible = false) }
         viewModelScope.launch {
             credentialsProvider.clearCredentials()
             _uiState.update { it.copy(isLoggedOut = true) }
         }
+    }
+
+    /**
+     * Arms the logout confirmation (QA finding M2: "Déconnexion" used to clear the credentials on
+     * a single press). Nothing is cleared until [onLogout] is called.
+     */
+    fun onLogoutRequested() {
+        _uiState.update { it.copy(isLogoutConfirmationVisible = true) }
+    }
+
+    /** Dismisses the logout confirmation without touching the persisted credentials. */
+    fun onLogoutConfirmationDismissed() {
+        _uiState.update { it.copy(isLogoutConfirmationVisible = false) }
     }
 
     /**
