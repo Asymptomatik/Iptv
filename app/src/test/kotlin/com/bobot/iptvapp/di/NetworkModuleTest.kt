@@ -47,6 +47,52 @@ class NetworkModuleTest {
     }
 
     @Test
+    fun `credentials passed as query parameters are redacted`() {
+        // Xtream's whole API is player_api.php?username=…&password=… — QA finding Y5 caught these
+        // in plain text in logcat.
+        val redacted = NetworkModule.redactCredentials(
+            "--> GET http://example.com:8080/player_api.php?username=alice&password=s3cr3t&action=get_vod_streams",
+        )
+
+        assertFalse("username leaked", redacted.contains("alice"))
+        assertFalse("password leaked", redacted.contains("s3cr3t"))
+        assertTrue("the request is no longer identifiable", redacted.contains("action=get_vod_streams"))
+    }
+
+    @Test
+    fun `credentials carried as path segments are redacted`() {
+        val redacted = NetworkModule.redactCredentials(
+            "--> GET http://example.com:8080/movie/alice/s3cr3t/12345.mp4",
+        )
+
+        assertFalse("username leaked", redacted.contains("alice"))
+        assertFalse("password leaked", redacted.contains("s3cr3t"))
+        assertTrue("the stream id is still readable", redacted.contains("12345.mp4"))
+    }
+
+    @Test
+    fun `a URL without credentials is left untouched`() {
+        val line = "<-- 200 OK http://example.com:8080/health (12ms, 34-byte body)"
+
+        assertTrue(line == NetworkModule.redactCredentials(line))
+    }
+
+    @Test
+    fun `the API client logs at BASIC, never BODY`() {
+        // BODY serialises the entire catalog JSON on every call: ~20 MB reclaimed in a loop and
+        // second-long frames while parsing (QA finding Y4), which also makes debug builds useless
+        // for any performance measurement.
+        val logging = NetworkModule.provideOkHttpClient()
+            .interceptors
+            .filterIsInstance<HttpLoggingInterceptor>()
+
+        assertTrue(
+            "expected a debug logging interceptor, or none at all in release",
+            logging.all { it.level == HttpLoggingInterceptor.Level.BASIC },
+        )
+    }
+
+    @Test
     fun `the streaming client keeps the API client's timeouts`() {
         val api = NetworkModule.provideOkHttpClient()
         val streaming = NetworkModule.provideStreamingOkHttpClient(api)

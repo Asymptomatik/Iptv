@@ -77,9 +77,9 @@ object NetworkModule {
      * Not for media bytes — see [StreamingHttpClient] and [provideStreamingOkHttpClient].
      *
      * Configuration:
-     * - **Logging**: A [HttpLoggingInterceptor] at [HttpLoggingInterceptor.Level.BODY]
-     *   is added only in debug builds ([BuildConfig.DEBUG]). Release builds produce no
-     *   network logs, protecting user credentials from appearing in logcat.
+     * - **Logging**: A [HttpLoggingInterceptor] at [HttpLoggingInterceptor.Level.BASIC], writing
+     *   through [redactingLogger], is added only in debug builds ([BuildConfig.DEBUG]). Release
+     *   builds produce no network logs at all.
      * - **Connect timeout**: 30 s — time to establish the TCP connection.
      * - **Read timeout**: 60 s — generous allowance for slow Xtream servers under load
      *   (stream-list payloads can be large).
@@ -97,8 +97,8 @@ object NetworkModule {
             .apply {
                 if (BuildConfig.DEBUG) {
                     addInterceptor(
-                        HttpLoggingInterceptor().apply {
-                            level = HttpLoggingInterceptor.Level.BODY
+                        HttpLoggingInterceptor(redactingLogger()).apply {
+                            level = HttpLoggingInterceptor.Level.BASIC
                         },
                     )
                 }
@@ -123,7 +123,9 @@ object NetworkModule {
      *
      * Removing the interceptor rather than lowering its level keeps the API client's verbose
      * logging (genuinely useful, and small) while making it structurally impossible for a
-     * body-materialising interceptor to reach the media path.
+     * body-materialising interceptor to reach the media path. The API client has since dropped to
+     * [HttpLoggingInterceptor.Level.BASIC] (QA finding Y4), but this removal stays: it is a
+     * structural guarantee, not a duplicate of a level setting somebody could raise again.
      */
     @Provides
     @Singleton
@@ -132,4 +134,36 @@ object NetworkModule {
         apiClient.newBuilder()
             .apply { interceptors().removeAll { it is HttpLoggingInterceptor } }
             .build()
+
+    /**
+     * Debug-only [HttpLoggingInterceptor.Logger] that strips Xtream credentials out of every line
+     * before it reaches logcat — QA finding Y5.
+     *
+     * Xtream carries the username and password *in the URL*, both as query parameters
+     * (`player_api.php?username=…&password=…`, see [com.bobot.iptvapp.data.remote.XtreamApi]) and
+     * as path segments (`/live|movie|series/<user>/<pass>/<id>.<ext>`, see
+     * [com.bobot.iptvapp.data.remote.XtreamUrlBuilder]). No logging level hides those —
+     * even [HttpLoggingInterceptor.Level.BASIC] prints the request line — so the redaction has to
+     * happen in the sink.
+     *
+     * Failing open (logging the raw line if a pattern misses) would defeat the point, but so would
+     * failing closed on everything: both patterns are anchored on the exact shapes the URL builder
+     * and the API interface produce, and anything else is a URL with no credentials in it.
+     */
+    private fun redactingLogger(): HttpLoggingInterceptor.Logger =
+        HttpLoggingInterceptor.Logger { message ->
+            HttpLoggingInterceptor.Logger.DEFAULT.log(redactCredentials(message))
+        }
+
+    /** The redaction itself, separated from the sink so it can be asserted on directly. */
+    internal fun redactCredentials(message: String): String = message
+        .replace(CREDENTIAL_QUERY_PARAM, "$1***")
+        .replace(CREDENTIAL_PATH_SEGMENTS, "/$1/***/***/")
+
+    // `?username=alice` / `&password=secret` → `?username=***`.
+    private val CREDENTIAL_QUERY_PARAM = Regex("([?&](?:username|password)=)[^&\\s]*")
+
+    // `/movie/alice/secret/42.mp4` → `/movie/***/***/42.mp4`. Written as a line comment on
+    // purpose: the masked path contains `*/`, which would close a KDoc block mid-sentence.
+    private val CREDENTIAL_PATH_SEGMENTS = Regex("/(live|movie|series)/[^/\\s]+/[^/\\s]+/")
 }
