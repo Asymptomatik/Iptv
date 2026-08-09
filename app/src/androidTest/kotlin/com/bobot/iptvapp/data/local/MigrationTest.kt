@@ -5,6 +5,7 @@ import androidx.room.testing.MigrationTestHelper
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.bobot.iptvapp.data.local.entity.CatalogSyncEntity
 import com.bobot.iptvapp.data.local.entity.MovieEntity
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -16,8 +17,14 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Instrumented tests for [DatabaseMigrations.MIGRATION_2_3] using [MigrationTestHelper] against
- * the schemas exported under `app/schemas/com.bobot.iptvapp.data.local.IptvDatabase/`.
+ * Instrumented tests for [DatabaseMigrations.MIGRATION_2_3] and
+ * [DatabaseMigrations.MIGRATION_3_4] using [MigrationTestHelper] against the schemas exported
+ * under `app/schemas/com.bobot.iptvapp.data.local.IptvDatabase/`.
+ *
+ * The two migrations are of opposite kinds and are tested as such: 2→3 recreates the cache tables
+ * empty and must be shown to leave *user data* untouched, while 3→4 is purely additive and must be
+ * shown to leave the *cached rows* in place — dropping them there would cost the very refetch the
+ * new table exists to avoid.
  *
  * ## Execution status — green, both tests, on 2026-08-08
  *
@@ -264,6 +271,86 @@ class MigrationTest {
             assertEquals(movieAccountA, readBackA)
             assertEquals(movieAccountB, readBackB)
             assertNull(dao.getMovieById("accountC", "m1"))
+        }
+
+        db.close()
+    }
+
+    @Test
+    fun migrate3To4_addsCatalogSyncAndPreservesCachedRows() {
+        helper.createDatabase(testDbName, 3).apply {
+            execSQL(
+                "INSERT INTO movies (accountKey, id, title, categoryId) VALUES " +
+                    "('accountA', 'm1', 'Movie One', 'cat1')",
+            )
+            close()
+        }
+
+        val migratedDb = helper.runMigrationsAndValidate(
+            testDbName,
+            4,
+            true,
+            DatabaseMigrations.MIGRATION_3_4,
+        )
+
+        // Unlike 2→3, this migration is purely additive: the cached rows must still be there
+        // afterwards. Losing them would cost the very refetch this schema change exists to avoid.
+        migratedDb.query("SELECT id, title FROM movies").use { cursor ->
+            assertTrue("The cached movie must survive a purely additive migration.", cursor.moveToFirst())
+            assertEquals("m1", cursor.getString(0))
+            assertEquals("Movie One", cursor.getString(1))
+            assertFalse(cursor.moveToNext())
+        }
+
+        // And the new table must start empty: the rows above were written without a timestamp, so
+        // there is no honest freshness to backfill. Every slice reads as "never synced".
+        migratedDb.query("SELECT COUNT(*) FROM catalog_sync").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(0, cursor.getInt(0))
+        }
+        migratedDb.close()
+
+        val db = Room.databaseBuilder(
+            ApplicationProvider.getApplicationContext(),
+            IptvDatabase::class.java,
+            testDbName,
+        )
+            .addMigrations(
+                DatabaseMigrations.MIGRATION_1_2,
+                DatabaseMigrations.MIGRATION_2_3,
+                DatabaseMigrations.MIGRATION_3_4,
+            )
+            .allowMainThreadQueries()
+            .build()
+
+        val dao = db.catalogCacheDao()
+        runBlocking {
+            // The composite key is (accountKey, contentType, scope): two accounts may hold a
+            // marker for the same slice, and neither may overwrite the other.
+            dao.upsertSyncMarker(
+                CatalogSyncEntity("accountA", "MOVIE", CatalogSyncEntity.SCOPE_CATEGORIES, 1_000L),
+            )
+            dao.upsertSyncMarker(
+                CatalogSyncEntity("accountB", "MOVIE", CatalogSyncEntity.SCOPE_CATEGORIES, 2_000L),
+            )
+
+            assertEquals(
+                1_000L,
+                dao.getSyncedAtMillis("accountA", "MOVIE", CatalogSyncEntity.SCOPE_CATEGORIES),
+            )
+            assertEquals(
+                2_000L,
+                dao.getSyncedAtMillis("accountB", "MOVIE", CatalogSyncEntity.SCOPE_CATEGORIES),
+            )
+            assertNull(dao.getSyncedAtMillis("accountA", "LIVE", CatalogSyncEntity.SCOPE_CATEGORIES))
+
+            dao.clearSyncMarkersByType("accountA", "MOVIE")
+            assertNull(dao.getSyncedAtMillis("accountA", "MOVIE", CatalogSyncEntity.SCOPE_CATEGORIES))
+            assertEquals(
+                "A per-account clear must not reach into another account's partition.",
+                2_000L,
+                dao.getSyncedAtMillis("accountB", "MOVIE", CatalogSyncEntity.SCOPE_CATEGORIES),
+            )
         }
 
         db.close()

@@ -74,6 +74,7 @@ class SettingsViewModelTest {
         appPreferencesStore = mockk()
         every { appPreferencesStore.observeWifiOnlyDownloads() } returns flowOf(false)
         coEvery { appPreferencesStore.setWifiOnlyDownloads(any()) } just Runs
+        coEvery { catalogRepository.invalidatePersistentCache(any()) } just Runs
     }
 
     @After
@@ -315,10 +316,17 @@ class SettingsViewModelTest {
         every { catalogRepository.invalidateCache(any()) } just Runs
 
         viewModel.onReloadMovies()
+        testDispatcher.scheduler.runCurrent()
 
         verify(exactly = 1) { catalogRepository.invalidateCache(ContentType.MOVIE) }
         verify(exactly = 0) { catalogRepository.invalidateCache(ContentType.SERIES) }
         verify(exactly = 0) { catalogRepository.invalidateCache(ContentType.LIVE) }
+        // Both halves, or the button does nothing: since schema v4 the repository answers reads
+        // from Room whenever the slice is fresh, so clearing the in-memory cache alone would send
+        // the next read straight back to the same cached rows.
+        coVerify(exactly = 1) { catalogRepository.invalidatePersistentCache(ContentType.MOVIE) }
+        coVerify(exactly = 0) { catalogRepository.invalidatePersistentCache(ContentType.SERIES) }
+        coVerify(exactly = 0) { catalogRepository.invalidatePersistentCache(ContentType.LIVE) }
         val state = viewModel.uiState.value
         assertEquals("Films rechargés.", state.infoMessage)
         assertNull(state.errorMessage)

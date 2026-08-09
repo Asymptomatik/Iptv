@@ -263,13 +263,24 @@ class SettingsViewModel @Inject constructor(
 
     /**
      * Shared implementation behind [onReloadMovies], [onReloadSeries] and [onReloadChannels]:
-     * invalidates the single-[type] in-memory cache via [CatalogRepository.invalidateCache] (a
-     * synchronous, non-suspend call — no [viewModelScope] launch needed) and shows a
-     * type-specific confirmation message, replacing the previous single global
-     * "Catalogue rechargé." message with one distinct per content type.
+     * invalidates the single-[type] cache and shows a type-specific confirmation message,
+     * replacing the previous single global "Catalogue rechargé." message with one distinct per
+     * content type.
+     *
+     * Both halves of the cache have to go, and in this order. [CatalogRepository.invalidateCache]
+     * clears the in-memory session cache synchronously, which is what stops the current session
+     * from answering the next read out of memory. But since schema v4 the repository also serves
+     * reads from Room whenever the slice is fresh, so clearing memory alone would send the next
+     * read straight to Room and the button would appear to do nothing at all — hence
+     * [CatalogRepository.invalidatePersistentCache], which is `suspend` and therefore needs the
+     * [viewModelScope] launch.
+     *
+     * The confirmation is shown immediately rather than after the marker clear completes: it
+     * acknowledges the request, and the Room write is best-effort with nothing to report.
      */
     private fun reloadCatalog(type: ContentType, confirmationMessage: String) {
         catalogRepository.invalidateCache(type)
+        viewModelScope.launch { catalogRepository.invalidatePersistentCache(type) }
         _uiState.update {
             it.copy(errorMessage = null, infoMessage = confirmationMessage)
         }

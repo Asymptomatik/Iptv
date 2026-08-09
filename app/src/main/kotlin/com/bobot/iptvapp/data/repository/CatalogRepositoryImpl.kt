@@ -2,6 +2,9 @@ package com.bobot.iptvapp.data.repository
 
 import com.bobot.iptvapp.data.local.dao.CatalogCacheDao
 import com.bobot.iptvapp.data.local.dao.EpgDao
+import com.bobot.iptvapp.data.local.entity.CatalogSyncEntity
+import com.bobot.iptvapp.data.local.entity.CatalogSyncEntity.Companion.SCOPE_ALL
+import com.bobot.iptvapp.data.local.entity.CatalogSyncEntity.Companion.SCOPE_CATEGORIES
 import com.bobot.iptvapp.data.local.mapper.toDomain
 import com.bobot.iptvapp.data.local.mapper.toEntity
 import com.bobot.iptvapp.data.source.CatalogDataSource
@@ -78,6 +81,20 @@ import javax.inject.Inject
  * Room reads/writes performed for this cache are best-effort: a failure while persisting
  * to Room does not turn a successful network fetch into an error, and a failure while
  * reading the Room fallback falls through to [Resource.Error] instead of crashing.
+ *
+ * ## Room on the happy path (schema v4)
+ * The fallback above is the *failure* path. Room is also consulted **before** the data source
+ * on every read, through [freshFromRoom], and the fetch is skipped entirely when the slice was
+ * synced within [CATALOG_CACHE_TTL_MILLIS].
+ *
+ * This is the difference between a session cache and a real one. The `cachedAll*` fields above
+ * only ever memoize the *unfiltered* lists, which the catalog screens never request: Home and
+ * Search load one category at a time (the OOM fix documented on both ViewModels), so their
+ * loads were memoized nowhere in this class. What made a second visit feel instant was
+ * `HomeViewModel.requestedContentTypes`, a guard that dies with the ViewModel — so every process
+ * restart replayed the full, minutes-long catalog fetch against a Room cache that already held
+ * every row and was never asked. Freshness is tracked per slice in `catalog_sync`; see
+ * [CatalogSyncEntity] for the grain and [freshFromRoom] for why rows alone could not decide it.
  *
  * ## Series detail write-through (Task 11b/25 carry-forward)
  * [getSeriesDetail] additionally persists the parent [Series] plus its full flattened
@@ -266,10 +283,22 @@ class CatalogRepositoryImpl @Inject constructor(
             // reads DataStore and hashes, and once the catalog is loaded most collections are
             // served entirely from memory and would never use the key.
             val accountKey = currentAccountKey()
+            freshFromRoom(accountKey, ContentType.LIVE, SCOPE_ALL) { key ->
+                catalogCacheDao.observeAllChannels(key.value).first().toDomain()
+            }?.let {
+                // Promoted to the session cache exactly as a network result would be, so the
+                // per-category branch below is served from memory for the rest of the session.
+                cachedAllChannels = it
+                emit(Resource.Success(it))
+                return@flow
+            }
             try {
                 val result = dataSource.getLiveChannels(null)
                 cachedAllChannels = result
-                persistQuietly(accountKey) { key -> catalogCacheDao.upsertChannels(result.toEntity(key)) }
+                persistQuietly(accountKey) { key ->
+                    catalogCacheDao.upsertChannels(result.toEntity(key))
+                    markSynced(key, ContentType.LIVE, SCOPE_ALL)
+                }
                 emit(Resource.Success(result))
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
@@ -285,9 +314,15 @@ class CatalogRepositoryImpl @Inject constructor(
                 emit(Resource.Success(fromCache))
             } else {
                 val accountKey = currentAccountKey()
+                freshFromRoom(accountKey, ContentType.LIVE, categoryId) { key ->
+                    catalogCacheDao.observeChannelsByCategory(key.value, categoryId).first().toDomain()
+                }?.let { emit(Resource.Success(it)); return@flow }
                 try {
                     val result = dataSource.getLiveChannels(categoryId)
-                    persistQuietly(accountKey) { key -> catalogCacheDao.upsertChannels(result.toEntity(key)) }
+                    persistQuietly(accountKey) { key ->
+                        catalogCacheDao.upsertChannels(result.toEntity(key))
+                        markSynced(key, ContentType.LIVE, categoryId)
+                    }
                     emit(Resource.Success(result))
                 } catch (t: Throwable) {
                     rethrowIfCancellation(t)
@@ -304,10 +339,20 @@ class CatalogRepositoryImpl @Inject constructor(
         if (categoryId == null) {
             cachedAllMovies?.let { emit(Resource.Success(it)); return@flow }
             val accountKey = currentAccountKey()
+            freshFromRoom(accountKey, ContentType.MOVIE, SCOPE_ALL) { key ->
+                catalogCacheDao.observeAllMovies(key.value).first().toDomain()
+            }?.let {
+                cachedAllMovies = it
+                emit(Resource.Success(it))
+                return@flow
+            }
             try {
                 val result = dataSource.getMovies(null)
                 cachedAllMovies = result
-                persistQuietly(accountKey) { key -> catalogCacheDao.upsertMovies(result.toEntity(key)) }
+                persistQuietly(accountKey) { key ->
+                    catalogCacheDao.upsertMovies(result.toEntity(key))
+                    markSynced(key, ContentType.MOVIE, SCOPE_ALL)
+                }
                 emit(Resource.Success(result))
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
@@ -321,9 +366,15 @@ class CatalogRepositoryImpl @Inject constructor(
                 emit(Resource.Success(fromCache))
             } else {
                 val accountKey = currentAccountKey()
+                freshFromRoom(accountKey, ContentType.MOVIE, categoryId) { key ->
+                    catalogCacheDao.observeMoviesByCategory(key.value, categoryId).first().toDomain()
+                }?.let { emit(Resource.Success(it)); return@flow }
                 try {
                     val result = dataSource.getMovies(categoryId)
-                    persistQuietly(accountKey) { key -> catalogCacheDao.upsertMovies(result.toEntity(key)) }
+                    persistQuietly(accountKey) { key ->
+                        catalogCacheDao.upsertMovies(result.toEntity(key))
+                        markSynced(key, ContentType.MOVIE, categoryId)
+                    }
                     emit(Resource.Success(result))
                 } catch (t: Throwable) {
                     rethrowIfCancellation(t)
@@ -340,10 +391,20 @@ class CatalogRepositoryImpl @Inject constructor(
         if (categoryId == null) {
             cachedAllSeries?.let { emit(Resource.Success(it)); return@flow }
             val accountKey = currentAccountKey()
+            freshFromRoom(accountKey, ContentType.SERIES, SCOPE_ALL) { key ->
+                catalogCacheDao.observeAllSeries(key.value).first().toDomain()
+            }?.let {
+                cachedAllSeries = it
+                emit(Resource.Success(it))
+                return@flow
+            }
             try {
                 val result = dataSource.getSeriesList(null)
                 cachedAllSeries = result
-                persistQuietly(accountKey) { key -> catalogCacheDao.upsertSeries(result.toEntity(key)) }
+                persistQuietly(accountKey) { key ->
+                    catalogCacheDao.upsertSeries(result.toEntity(key))
+                    markSynced(key, ContentType.SERIES, SCOPE_ALL)
+                }
                 emit(Resource.Success(result))
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
@@ -357,9 +418,15 @@ class CatalogRepositoryImpl @Inject constructor(
                 emit(Resource.Success(fromCache))
             } else {
                 val accountKey = currentAccountKey()
+                freshFromRoom(accountKey, ContentType.SERIES, categoryId) { key ->
+                    catalogCacheDao.observeSeriesByCategory(key.value, categoryId).first().toDomain()
+                }?.let { emit(Resource.Success(it)); return@flow }
                 try {
                     val result = dataSource.getSeriesList(categoryId)
-                    persistQuietly(accountKey) { key -> catalogCacheDao.upsertSeries(result.toEntity(key)) }
+                    persistQuietly(accountKey) { key ->
+                        catalogCacheDao.upsertSeries(result.toEntity(key))
+                        markSynced(key, ContentType.SERIES, categoryId)
+                    }
                     emit(Resource.Success(result))
                 } catch (t: Throwable) {
                     rethrowIfCancellation(t)
@@ -427,6 +494,30 @@ class CatalogRepositoryImpl @Inject constructor(
         }
 
     /**
+     * Resolves a single live channel from the Room catalog cache.
+     *
+     * Cache-only, like [getCachedEpisodeWithSeries]: a miss (or a Room I/O failure) is a `null`
+     * the caller is expected to handle, never an exception. [BouquetSeparator] is applied here
+     * too — a separator row cached before QA finding Y2 was fixed must not come back as a
+     * playable channel through this door either.
+     *
+     * Runs on [ioDispatcher] via [withContext] — see [getMovieDetail] for rationale.
+     */
+    override suspend fun getCachedChannel(channelId: String): Channel? =
+        withContext(ioDispatcher) {
+            try {
+                val accountKey = currentAccountKey() ?: return@withContext null
+                catalogCacheDao.getChannelById(accountKey.value, channelId)
+                    ?.let { listOf(it).toDomain() }
+                    ?.firstOrNull()
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (cacheReadError: Throwable) {
+                null
+            }
+        }
+
+    /**
      * Resolves a series episode and its parent series from the Room catalog cache.
      *
      * Read-only, cache-only lookup — no network call is made and no [Resource] wrapper
@@ -487,14 +578,82 @@ class CatalogRepositoryImpl @Inject constructor(
         credentialsProvider.getCredentials()?.let { accountKeyOf(it) }
 
     /**
+     * Reads one catalog slice back from Room, but only when it is recent enough to serve as if
+     * it had just been fetched. Returns `null` — meaning "go to the network" — when there is no
+     * account, no marker, an expired marker, an empty result, or a failed read.
+     *
+     * ## Why the marker, and not just "are there rows?"
+     * Rows alone cannot answer the question. They were already being written on every successful
+     * fetch before this existed, and reading them unconditionally would pin the catalog to
+     * whatever the first ever sync returned: new films would never appear, removed channels
+     * would never go away, and the only escape would be the manual reload in Réglages. The
+     * marker is what turns a permanent snapshot into a cache — see [CatalogSyncEntity] for why
+     * it is a side table rather than a column on every row.
+     *
+     * ## Why the read is per-slice
+     * [fetchFromCache] reads one category at a time, the same grain the network path uses, which
+     * is what keeps the "Category-scoped, on-demand loading (OOM fix)" bound documented on
+     * `HomeViewModel` intact: a warm start replaces N HTTP round-trips with N small local
+     * queries, not with one query that materialises the whole bouquet at once.
+     *
+     * A failed read falls through to the network rather than surfacing: this sits on the happy
+     * path, where a broken cache must cost latency, never an error the user can see.
+     */
+    private suspend fun <T> freshFromRoom(
+        accountKey: AccountKey?,
+        contentType: ContentType,
+        scope: String,
+        fetchFromCache: suspend (AccountKey) -> List<T>,
+    ): List<T>? {
+        if (accountKey == null) return null
+        return try {
+            val syncedAt = catalogCacheDao.getSyncedAtMillis(accountKey.value, contentType.name, scope)
+                ?: return null
+            // A clock moved backwards (timezone/NTP correction, or a restored backup) would make
+            // `now - syncedAt` negative and the slice look eternally fresh; the lower bound sends
+            // that case back to the network instead.
+            val age = System.currentTimeMillis() - syncedAt
+            if (age !in 0 until CATALOG_CACHE_TTL_MILLIS) return null
+            fetchFromCache(accountKey).takeIf { it.isNotEmpty() }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (cacheReadError: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * Stamps a slice as synced *now*. Called from inside a [persistQuietly] block, always after
+     * the rows it describes — a marker that lands without them would advertise a cache that is
+     * not there, and would be believed for a full TTL.
+     */
+    private suspend fun markSynced(accountKey: AccountKey, contentType: ContentType, scope: String) {
+        catalogCacheDao.upsertSyncMarker(
+            CatalogSyncEntity(
+                accountKey = accountKey.value,
+                contentType = contentType.name,
+                scope = scope,
+                syncedAtMillis = System.currentTimeMillis(),
+            ),
+        )
+    }
+
+    /**
      * Persists a freshly fetched category list to the Room cache under [accountKey],
      * ignoring write failures.
      *
      * Caching is a side-effect of a successful fetch — a Room write error must not
      * downgrade an otherwise successful [Resource.Success] emission to an error.
      */
-    private suspend fun persistCategoriesQuietly(accountKey: AccountKey, categories: List<Category>) {
-        persistQuietly { catalogCacheDao.upsertCategories(categories.toEntity(accountKey)) }
+    private suspend fun persistCategoriesQuietly(
+        accountKey: AccountKey,
+        contentType: ContentType,
+        categories: List<Category>,
+    ) {
+        persistQuietly {
+            catalogCacheDao.upsertCategories(categories.toEntity(accountKey))
+            markSynced(accountKey, contentType, SCOPE_CATEGORIES)
+        }
     }
 
     /**
@@ -566,8 +725,10 @@ class CatalogRepositoryImpl @Inject constructor(
      * no "previous account" to protect, so every partition — not just the one active at
      * logout time — is cleared using the DAOs' unparameterised `clearAll*` methods.
      *
-     * Uses the seven global (unpartitioned) clears documented on [CatalogCacheDao] and
-     * [EpgDao.clearAll] — the seventh table, `epg_programs`, is owned by [EpgDao] rather
+     * Uses the global (unpartitioned) clears documented on [CatalogCacheDao] and
+     * [EpgDao.clearAll] — including `catalog_sync`, whose markers must go with the rows they
+     * describe, or the next account would find a fresh-looking cache with nothing behind it.
+     * `epg_programs` is owned by [EpgDao] rather
      * than [CatalogCacheDao] since [getEpg] is a pure network pass-through that never
      * touches Room; [epgDao] is injected into this class solely for this purge.
      *
@@ -585,6 +746,7 @@ class CatalogRepositoryImpl @Inject constructor(
         persistQuietly { catalogCacheDao.clearSeries() }
         persistQuietly { catalogCacheDao.clearAllSeasons() }
         persistQuietly { catalogCacheDao.clearAllEpisodes() }
+        persistQuietly { catalogCacheDao.clearAllSyncMarkers() }
         persistQuietly { epgDao.clearAll() }
     }
 
@@ -774,13 +936,25 @@ class CatalogRepositoryImpl @Inject constructor(
             // before [deferred] is ever resolved.
             var result: Resource<List<Category>>? = null
             try {
-                val fresh = fetch()
+                // A recent enough Room copy stands in for the request entirely. Cheap on its own —
+                // a category list is small — but it is what lets the *whole* tab load stay local:
+                // LoadCategoryScopedCatalogUseCase waits on this terminal value before it can fetch
+                // a single category, so one network round-trip here would put the network back in
+                // front of an otherwise fully cached load.
+                val cached = freshFromRoom(accountKey, contentType, SCOPE_CATEGORIES) { key ->
+                    catalogCacheDao.observeCategoriesByType(key.value, contentType.name).first().toDomain()
+                }
+                val fresh = cached ?: fetch()
                 val publishable = state.mutex.withLock {
                     (state.generation.get() == generation).also { if (it) writeMemo(fresh) }
                 }
                 // Same gate for Room: a result the memo refused is the previous account's and has no
                 // business landing in the offline cache either. See "Invalidation generations".
-                if (publishable && accountKey != null) persistCategoriesQuietly(accountKey, fresh)
+                // Skipped outright for a cached result — rewriting Room with what it just returned
+                // would only push the marker forward and keep the slice alive for ever.
+                if (cached == null && publishable && accountKey != null) {
+                    persistCategoriesQuietly(accountKey, contentType, fresh)
+                }
                 result = Resource.Success(fresh)
             } catch (cancellation: CancellationException) {
                 // Leaves [result] null: the `finally` below cancels [deferred], which hands the
@@ -843,5 +1017,30 @@ class CatalogRepositoryImpl @Inject constructor(
                 cachedAllSeries = null
             }
         }
+    }
+
+    /**
+     * Drops the current account's freshness markers for [type], which is what makes the next
+     * [freshFromRoom] miss and go back to the server. The cached rows survive on purpose — see
+     * [CatalogRepository.invalidatePersistentCache] for why, and for why this is not folded into
+     * [invalidateCache].
+     */
+    override suspend fun invalidatePersistentCache(type: ContentType) {
+        val accountKey = currentAccountKey() ?: return
+        persistQuietly { catalogCacheDao.clearSyncMarkersByType(accountKey.value, type.name) }
+    }
+
+    private companion object {
+        /**
+         * How long a synced catalog slice is served from Room before the server is consulted
+         * again.
+         *
+         * Twenty-four hours is a deliberate trade against a full catalog load that takes about a
+         * minute on this provider — the official app behaves the same way — and against a bouquet
+         * that changes on the order of days, not minutes. It is the interval between *automatic*
+         * refetches only: the per-type "recharger" actions in Réglages force one at any time
+         * through [invalidatePersistentCache].
+         */
+        const val CATALOG_CACHE_TTL_MILLIS = 24L * 60 * 60 * 1000
     }
 }

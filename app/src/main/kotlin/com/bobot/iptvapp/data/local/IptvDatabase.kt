@@ -9,6 +9,7 @@ import com.bobot.iptvapp.data.local.dao.EpgDao
 import com.bobot.iptvapp.data.local.dao.FavoriteDao
 import com.bobot.iptvapp.data.local.dao.PlaybackProgressDao
 import com.bobot.iptvapp.data.local.dao.ProfileDao
+import com.bobot.iptvapp.data.local.entity.CatalogSyncEntity
 import com.bobot.iptvapp.data.local.entity.CategoryEntity
 import com.bobot.iptvapp.data.local.entity.ChannelEntity
 import com.bobot.iptvapp.data.local.entity.EpisodeEntity
@@ -25,13 +26,16 @@ import com.bobot.iptvapp.data.local.entity.SeriesEntity
  * Room database for the IPTV app.
  *
  * ## Schema version
- * **Version 3** — cache tables are now partitioned by account.
+ * **Version 4** — the catalog cache records when each of its slices was last synced.
  *
  * ### Migration history
  * - `MIGRATION_1_2`: adds the `downloads` table (Media3-projected download index); does not
  *   touch any existing table.
  * - `MIGRATION_2_3`: recreates the seven catalog cache tables with `accountKey` as the leading
  *   column of their composite primary key, partitioning them by account.
+ * - `MIGRATION_3_4`: adds the `catalog_sync` table, which lets the catalog cache be read on the
+ *   happy path instead of only as a network-failure fallback; creates no rows, so the first
+ *   open after upgrading refetches once and every open after that is served from Room.
  *
  * **No `fallbackToDestructiveMigration()` is registered at the database level.**
  *
@@ -44,7 +48,7 @@ import com.bobot.iptvapp.data.local.entity.SeriesEntity
  * be applied globally in production builds once the app has been released, as it would
  * silently erase user profiles, favorites, watch history, and downloaded episodes.
  *
- * ### Catalog cache tables — `categories`, `channels`, `movies`, `series`, `seasons`, `episodes`, `epg_programs`
+ * ### Catalog cache tables — `categories`, `channels`, `movies`, `series`, `seasons`, `episodes`, `epg_programs`, `catalog_sync`
  * These are offline-first caches of the Xtream Codes API, now **partitioned by account**
  * via `accountKey` in the composite primary key. Losing them is recoverable — the next app
  * open re-fetches and rebuilds the cache transparently for the current account. This allows
@@ -75,8 +79,9 @@ import com.bobot.iptvapp.data.local.entity.SeriesEntity
         EpisodeEntity::class,
         EpgProgramEntity::class,
         DownloadEntity::class,
+        CatalogSyncEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)

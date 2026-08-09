@@ -3,6 +3,7 @@ package com.bobot.iptvapp.data.local.dao
 import androidx.room.Dao
 import androidx.room.Query
 import androidx.room.Upsert
+import com.bobot.iptvapp.data.local.entity.CatalogSyncEntity
 import com.bobot.iptvapp.data.local.entity.CategoryEntity
 import com.bobot.iptvapp.data.local.entity.ChannelEntity
 import com.bobot.iptvapp.data.local.entity.EpisodeEntity
@@ -94,6 +95,13 @@ interface CatalogCacheDao {
     fun observeChannelsByCategory(accountKey: String, categoryId: String): Flow<List<ChannelEntity>>
 
     /** Deletes all channel rows, across every account. */
+    /**
+     * One-shot lookup of a single channel for [accountKey] by its stream [id].
+     * Returns `null` when the channel is not in the cache.
+     */
+    @Query("SELECT * FROM channels WHERE accountKey = :accountKey AND id = :id LIMIT 1")
+    suspend fun getChannelById(accountKey: String, id: String): ChannelEntity?
+
     @Query("DELETE FROM channels")
     suspend fun clearChannels()
 
@@ -217,4 +225,41 @@ interface CatalogCacheDao {
     /** Deletes all episode rows, across every account. */
     @Query("DELETE FROM episodes")
     suspend fun clearAllEpisodes()
+
+    // ── Sync markers ────────────────────────────────────────────────────────
+
+    /**
+     * Records that a catalog slice was just filled from the API — see [CatalogSyncEntity]
+     * for the grain and for why the timestamp lives beside the rows rather than on them.
+     *
+     * Written by the repository in the same best-effort block as the rows themselves, and
+     * always *after* them: a marker without its rows would claim a fresh cache that is not
+     * there, whereas rows without a marker only cost a refetch.
+     */
+    @Upsert
+    suspend fun upsertSyncMarker(marker: CatalogSyncEntity)
+
+    /**
+     * Returns when the slice was last synced, or `null` when it never was.
+     *
+     * `null` is the honest answer for "no marker" and the repository treats it exactly like
+     * an expired one, so a cache written before schema v4 — rows present, marker absent —
+     * is refetched once rather than served as if it were fresh.
+     */
+    @Query(
+        "SELECT syncedAtMillis FROM catalog_sync " +
+            "WHERE accountKey = :accountKey AND contentType = :contentType AND scope = :scope LIMIT 1",
+    )
+    suspend fun getSyncedAtMillis(accountKey: String, contentType: String, scope: String): Long?
+
+    /**
+     * Drops every marker of one content type for [accountKey], which is what makes the next
+     * read miss and refetch. Backs the per-type "recharger" actions in Réglages.
+     */
+    @Query("DELETE FROM catalog_sync WHERE accountKey = :accountKey AND contentType = :contentType")
+    suspend fun clearSyncMarkersByType(accountKey: String, contentType: String)
+
+    /** Deletes all sync markers, across every account. Backs the full-logout purge. */
+    @Query("DELETE FROM catalog_sync")
+    suspend fun clearAllSyncMarkers()
 }

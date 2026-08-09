@@ -413,12 +413,12 @@ class CatalogRepositoryAccountPartitionTest {
             }
 
             // Every global clearAll* call on the fake DAO now fails, simulating a Room I/O error
-            // during the logout purge. onGlobalClear only instruments the six clears owned by
+            // during the logout purge. onGlobalClear only instruments the seven clears owned by
             // CatalogCacheDao (see FakeCatalogCacheDao's KDoc "Simulating a failing purge") — the
-            // seventh table, epg_programs, is purged through epgDao.clearAll(), a relaxed mock
+            // eighth table, epg_programs, is purged through epgDao.clearAll(), a relaxed mock
             // elsewhere in this file that never throws by default. Force it to fail too so all
-            // seven tables purged by purgeAllCachePartitionsQuietly are actually exercised by this
-            // resilience test, not just six of them.
+            // eight tables purged by purgeAllCachePartitionsQuietly are actually exercised by this
+            // resilience test, not just seven of them.
             var purgeAttempts = 0
             catalogCacheDao.onGlobalClear = {
                 purgeAttempts++
@@ -426,13 +426,13 @@ class CatalogRepositoryAccountPartitionTest {
             }
             coEvery { epgDao.clearAll() } throws RuntimeException("simulated EPG purge failure")
 
-            // Logout — the purge fails for all seven tables, but this must not crash the
+            // Logout — the purge fails for all eight tables, but this must not crash the
             // application-scoped credentials-observer coroutine, nor the invalidateCaches() call
             // that precedes the purge in the same collect{} block.
             logout()
             assertEquals(
                 "Expected one onGlobalClear invocation per CatalogCacheDao global clear method.",
-                6,
+                7,
                 purgeAttempts,
             )
             coVerify(exactly = 1) { epgDao.clearAll() }
@@ -454,8 +454,8 @@ class CatalogRepositoryAccountPartitionTest {
                     "must reach purgeAllCachePartitionsQuietly() and attempt every clear again, " +
                     "exactly as the first logout did. If the observer's collect{} coroutine had " +
                     "died, this second logout would never be processed and purgeAttempts would " +
-                    "stay at 6.",
-                12,
+                    "stay at 7.",
+                14,
                 purgeAttempts,
             )
             coVerify(exactly = 2) { epgDao.clearAll() }

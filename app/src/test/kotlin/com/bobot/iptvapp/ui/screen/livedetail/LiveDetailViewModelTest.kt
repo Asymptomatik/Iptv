@@ -97,6 +97,9 @@ class LiveDetailViewModelTest {
 
         coEvery { appPreferencesStore.getActiveProfileId() } returns profileId
         coEvery { credentialsProvider.getCredentials() } returns credentials
+        // Cache miss by default, so every test below still exercises the unfiltered-list
+        // fallback it was written against. The cache *hit* has its own test.
+        coEvery { catalogRepository.getCachedChannel(any()) } returns null
         every { favoritesRepository.isFavorite(any(), any(), any()) } returns isFavoriteFlow
         coEvery { favoritesRepository.toggleFavorite(any(), any(), any()) } just Runs
     }
@@ -153,6 +156,34 @@ class LiveDetailViewModelTest {
         assertNull(state.errorMessage)
         assertEquals(channelWithEpg, state.channel)
         assertEquals("http://example.com:8080/live/alice/secret/101.ts", state.streamUrl)
+    }
+
+    @Test
+    fun `initialize resolves the channel from the cache without downloading the whole bouquet`() {
+        coEvery { catalogRepository.getCachedChannel(channelId) } returns channelWithEpg
+        coEvery { catalogRepository.getEpg("bbc.world") } returns Resource.Success(emptyList())
+
+        initialize()
+
+        val state = viewModel.uiState.value
+        assertEquals(channelWithEpg, state.channel)
+        assertEquals("http://example.com:8080/live/alice/secret/101.ts", state.streamUrl)
+        // `getLiveChannels(null)` is the unfiltered bouquet — the single heaviest call the API
+        // offers, and one the catalog screens never make, so it is never cached either. Opening a
+        // channel used to pay for it in full, every time.
+        verify(exactly = 0) { catalogRepository.getLiveChannels(any()) }
+    }
+
+    @Test
+    fun `a cached channel still gets its EPG and favorite state`() {
+        coEvery { catalogRepository.getCachedChannel(channelId) } returns channelWithEpg
+        coEvery { catalogRepository.getEpg("bbc.world") } returns Resource.Success(emptyList())
+
+        initialize()
+
+        // A channel read from Room is not a lesser one: both dependent loads must still run.
+        coVerify(exactly = 1) { catalogRepository.getEpg("bbc.world") }
+        verify(exactly = 1) { favoritesRepository.isFavorite(profileId, channelId, ContentType.LIVE) }
     }
 
     @Test

@@ -1,5 +1,6 @@
 package com.bobot.iptvapp.data.local.dao
 
+import com.bobot.iptvapp.data.local.entity.CatalogSyncEntity
 import com.bobot.iptvapp.data.local.entity.CategoryEntity
 import com.bobot.iptvapp.data.local.entity.ChannelEntity
 import com.bobot.iptvapp.data.local.entity.EpisodeEntity
@@ -48,6 +49,26 @@ class FakeCatalogCacheDao : CatalogCacheDao {
     private val series = mutableMapOf<Pair<String, String>, SeriesEntity>()
     private val seasons = mutableMapOf<Triple<String, String, Int>, SeasonEntity>()
     private val episodes = mutableMapOf<Pair<String, String>, EpisodeEntity>()
+    private val syncMarkers = mutableMapOf<Triple<String, String, String>, CatalogSyncEntity>()
+
+    /**
+     * Marks a slice as synced [ageMillis] ago, so a test can put the cache on either side of the
+     * repository's TTL without a clock abstraction. Writing the age rather than the instant is
+     * what keeps the assertions readable: `markSyncedAgo(..., ageMillis = 0)` is a cache that was
+     * just filled, a large age is one that has expired.
+     */
+    fun markSyncedAgo(accountKey: String, contentType: String, scope: String, ageMillis: Long) {
+        syncMarkers[Triple(accountKey, contentType, scope)] = CatalogSyncEntity(
+            accountKey = accountKey,
+            contentType = contentType,
+            scope = scope,
+            syncedAtMillis = System.currentTimeMillis() - ageMillis,
+        )
+    }
+
+    /** `null` when the slice was never synced — mirrors [getSyncedAtMillis]'s own contract. */
+    fun syncedAtMillisOrNull(accountKey: String, contentType: String, scope: String): Long? =
+        syncMarkers[Triple(accountKey, contentType, scope)]?.syncedAtMillis
 
     // ── Categories ────────────────────────────────────────────────────────────
 
@@ -86,6 +107,9 @@ class FakeCatalogCacheDao : CatalogCacheDao {
                 .filter { it.accountKey == accountKey && it.categoryId == categoryId }
                 .sortedBy { it.name },
         )
+
+    override suspend fun getChannelById(accountKey: String, id: String): ChannelEntity? =
+        channels[accountKey to id]
 
     override suspend fun clearChannels() {
         onGlobalClear?.invoke()
@@ -193,5 +217,23 @@ class FakeCatalogCacheDao : CatalogCacheDao {
     override suspend fun clearAllEpisodes() {
         onGlobalClear?.invoke()
         episodes.clear()
+    }
+
+    // ── Sync markers ──────────────────────────────────────────────────────────
+
+    override suspend fun upsertSyncMarker(marker: CatalogSyncEntity) {
+        syncMarkers[Triple(marker.accountKey, marker.contentType, marker.scope)] = marker
+    }
+
+    override suspend fun getSyncedAtMillis(accountKey: String, contentType: String, scope: String): Long? =
+        syncMarkers[Triple(accountKey, contentType, scope)]?.syncedAtMillis
+
+    override suspend fun clearSyncMarkersByType(accountKey: String, contentType: String) {
+        syncMarkers.values.removeAll { it.accountKey == accountKey && it.contentType == contentType }
+    }
+
+    override suspend fun clearAllSyncMarkers() {
+        onGlobalClear?.invoke()
+        syncMarkers.clear()
     }
 }

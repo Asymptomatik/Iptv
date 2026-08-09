@@ -148,6 +148,26 @@ interface CatalogRepository {
      */
     suspend fun getCachedEpisodeWithSeries(episodeId: String): Pair<Series, Episode>?
 
+    /**
+     * Resolves a single live channel from the offline-first Room catalog cache — no network
+     * call is made, and a miss is a silent `null` rather than a [Resource].
+     *
+     * Exists because the live detail screen needs exactly one channel's metadata, and the only
+     * way to get it used to be [getLiveChannels] with `categoryId = null` — the *unfiltered*
+     * list. That is the heaviest request the API offers, and it is one the catalog screens never
+     * make (they load per category), so it was never cached either: opening a channel meant
+     * downloading the entire bouquet to read one row out of it, every single time.
+     *
+     * Unlike the list reads, this lookup is not TTL-gated. Channel metadata — name, logo, EPG id
+     * — is stable, the caller falls back to the network when it misses, and the row is refreshed
+     * whenever its category is. Gating it would reintroduce the full-bouquet download for no
+     * practical gain in freshness.
+     *
+     * @param channelId The stream ID matching [Channel.id].
+     * @return The cached channel, or `null` when it is absent (or no credentials are configured).
+     */
+    suspend fun getCachedChannel(channelId: String): Channel?
+
     // ── Authentication ────────────────────────────────────────────────────────
 
     /**
@@ -165,8 +185,9 @@ interface CatalogRepository {
      * Invalidates all in-memory session caches held by this repository.
      *
      * This method affects **only the in-memory session cache** — it does not access the
-     * Room database. The Room offline-first cache is automatically partitioned by account
-     * and does not require invalidation: each account's data partition is self-contained.
+     * Room database. Account switches need no Room invalidation: each account's data
+     * partition is self-contained. To force the persistent cache to be refetched, see
+     * [invalidatePersistentCache].
      *
      * Called automatically by [com.bobot.iptvapp.data.repository.CatalogRepositoryImpl]
      * when credentials change (via [com.bobot.iptvapp.data.source.CredentialsProvider.observeCredentials]),
@@ -184,8 +205,8 @@ interface CatalogRepository {
      * Invalidates the in-memory session cache for a single [ContentType] only.
      *
      * This method affects **only the in-memory session cache** — it does not access the
-     * Room database. The Room offline-first cache is automatically partitioned by account
-     * and does not require targeted invalidation.
+     * Room database. Pair it with [invalidatePersistentCache] when the caller wants the
+     * next read to reach the server rather than Room.
      *
      * Unlike [invalidateCaches] (which clears every cached list and category across
      * all content types — used for global events such as a credentials/server change),
@@ -201,4 +222,29 @@ interface CatalogRepository {
      * @param type the content type whose in-memory cache should be cleared.
      */
     fun invalidateCache(type: ContentType)
+
+    /**
+     * Marks the Room catalog cache for [type] as stale, so the next read refetches from the
+     * server instead of being served locally.
+     *
+     * Deliberately separate from [invalidateCache] rather than folded into it. The two have
+     * different callers and must keep different reach: [invalidateCache] also fires from the
+     * application-scoped credentials observer, where "the current account" has *already*
+     * become the new one — clearing persistent freshness there would throw away a perfectly
+     * valid cache belonging to the account the user just switched to, and cost them a full
+     * refetch for nothing. This method is for the explicit, user-initiated reload in Réglages,
+     * where a refetch is exactly what was asked for.
+     *
+     * Only the current account's markers for [type] are dropped; the cached rows themselves
+     * are left in place, so the reload degrades to today's offline fallback if the network is
+     * down rather than emptying the screen. Callers normally pair this with [invalidateCache]
+     * for the same [type] — the in-memory session cache would otherwise answer first and the
+     * reload would appear to do nothing.
+     *
+     * A no-op when no credentials are configured, and best-effort: a Room failure leaves the
+     * markers as they were rather than surfacing an error.
+     *
+     * @param type the content type whose persistent cache should be considered stale.
+     */
+    suspend fun invalidatePersistentCache(type: ContentType)
 }
