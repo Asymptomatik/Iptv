@@ -35,6 +35,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -283,7 +284,10 @@ private fun HomeContent(
     onCatalogTabSelected: (ContentType) -> Unit = {},
     onLanguageSelected: (ContentType, String?) -> Unit = { _, _ -> },
 ) {
-    var selectedTab by remember { mutableStateOf(HomeTab.HOME) }
+    // rememberSaveable, not remember — QA finding Y1. Opening a channel or a film destroys this
+    // composable; on BACK, plain remember handed the user Accueil again and lost wherever they
+    // were in the catalog.
+    var selectedTab by rememberSaveable { mutableStateOf(HomeTab.HOME) }
     val hasTabContent = uiState.hasContentFor(selectedTab)
 
     LaunchedEffect(selectedTab) {
@@ -591,9 +595,11 @@ private fun HomeRowsContent(
 
     val heroItem = uiState.heroItemFor(selectedTab)
 
-    var selectedLiveCategoryId by remember { mutableStateOf<String?>(null) }
-    var selectedMovieCategoryId by remember { mutableStateOf<String?>(null) }
-    var selectedSeriesCategoryId by remember { mutableStateOf<String?>(null) }
+    // Saveable for the same reason as selectedTab (QA finding Y1): the category a user drilled
+    // into is part of "where I was", and BACK used to drop it.
+    var selectedLiveCategoryId by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedMovieCategoryId by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedSeriesCategoryId by rememberSaveable { mutableStateOf<String?>(null) }
 
     val rawSelectedCategoryId = when (selectedTab) {
         HomeTab.HOME -> null
@@ -610,7 +616,7 @@ private fun HomeRowsContent(
     // Scroll-driven header background: transparent scrim while the first item (hero, when
     // present) is at the top, fading to a fully solid bar once the user scrolls past it.
     // Re-created per selectedTab so each tab starts fresh at the top of its own list.
-    val listState = remember(selectedTab) { LazyListState() }
+    val listState = rememberSaveable(selectedTab, saver = LazyListState.Saver) { LazyListState() }
     val density = LocalDensity.current
     val collapseThresholdPx = remember(density) { with(density) { 200.dp.toPx() } }
     val scrolledCollapseFraction by remember {
