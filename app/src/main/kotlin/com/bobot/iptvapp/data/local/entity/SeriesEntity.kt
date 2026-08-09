@@ -1,6 +1,7 @@
 package com.bobot.iptvapp.data.local.entity
 
 import androidx.room.Entity
+import androidx.room.Index
 
 /**
  * Room entity caching Xtream Codes series metadata (list-level, no season/episode tree).
@@ -20,7 +21,11 @@ import androidx.room.Entity
  * Catalog cache — destructive fallback is acceptable. The next app launch
  * re-fetches and rebuilds the cache from the Xtream Codes API.
  */
-@Entity(tableName = "series", primaryKeys = ["accountKey", "id"])
+@Entity(
+    tableName = "series",
+    primaryKeys = ["accountKey", "id"],
+    indices = [Index(value = ["accountKey", "categoryId"])],
+)
 data class SeriesEntity(
     val accountKey: String,
     val id: String,

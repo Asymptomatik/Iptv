@@ -35,7 +35,9 @@ import com.bobot.iptvapp.data.local.entity.SeriesEntity
  *   column of their composite primary key, partitioning them by account.
  * - `MIGRATION_3_4`: adds the `catalog_sync` table, which lets the catalog cache be read on the
  *   happy path instead of only as a network-failure fallback; creates no rows, so the first
- *   open after upgrading refetches once and every open after that is served from Room.
+ *   open after upgrading refetches once and every open after that is served from Room. It also
+ *   indexes `categories`, `channels`, `movies` and `series` on the columns those reads filter
+ *   by, without which every per-category read scans the whole table.
  *
  * **No `fallbackToDestructiveMigration()` is registered at the database level.**
  *

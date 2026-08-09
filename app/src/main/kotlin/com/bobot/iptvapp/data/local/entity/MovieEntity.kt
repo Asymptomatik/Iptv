@@ -1,6 +1,7 @@
 package com.bobot.iptvapp.data.local.entity
 
 import androidx.room.Entity
+import androidx.room.Index
 
 /**
  * Room entity caching an Xtream Codes VOD movie.
@@ -18,7 +19,11 @@ import androidx.room.Entity
  * Catalog cache — destructive fallback is acceptable. The next app launch
  * re-fetches and rebuilds the cache from the Xtream Codes API.
  */
-@Entity(tableName = "movies", primaryKeys = ["accountKey", "id"])
+@Entity(
+    tableName = "movies",
+    primaryKeys = ["accountKey", "id"],
+    indices = [Index(value = ["accountKey", "categoryId"])],
+)
 data class MovieEntity(
     val accountKey: String,
     val id: String,

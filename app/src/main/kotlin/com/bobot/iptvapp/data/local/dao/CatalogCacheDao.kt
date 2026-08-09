@@ -43,6 +43,17 @@ import kotlinx.coroutines.flow.Flow
  * [clearSeries], [clearAllSeasons], [clearAllEpisodes]) remain global and unparameterised
  * by design — they back the full-logout purge, not per-account isolation.
  *
+ * ## One-shot reads (schema v4)
+ * Every `observe…` read below has a `get…` twin returning the same rows as a plain suspend
+ * call. They exist for
+ * [com.bobot.iptvapp.data.repository.CatalogRepositoryImpl]'s read-through cache, which reads
+ * one category at a time and wants a value, not a subscription. Collecting a Room `Flow` and
+ * taking its first value would work, but each collection registers an `InvalidationTracker`
+ * observer and, when the observed-table set changes, creates and drops the temp triggers that
+ * back it. Paid once that is nothing; paid once per category — a real provider serves 157 VOD
+ * categories — it dominated the warm open, which is exactly the wait this cache exists to
+ * remove.
+ *
  * ## Migration policy
  * All tables in this DAO are catalog caches. Destructive fallback is acceptable for
  * cache tables in the event of a migration gap — the next app open re-populates them.
@@ -68,6 +79,15 @@ interface CatalogCacheDao {
     fun observeCategoriesByType(accountKey: String, contentType: String): Flow<List<CategoryEntity>>
 
     /**
+     * One-shot equivalent of [observeCategoriesByType], for the read-through cache.
+     *
+     * See the "One-shot reads" section of this interface's KDoc for why the cache path must not
+     * go through the `Flow` overloads.
+     */
+    @Query("SELECT * FROM categories WHERE accountKey = :accountKey AND contentType = :contentType ORDER BY name ASC")
+    suspend fun getCategoriesByType(accountKey: String, contentType: String): List<CategoryEntity>
+
+    /**
      * Deletes categories for [accountKey] whose `contentType` column equals the given
      * [contentType] name.
      *
@@ -90,9 +110,17 @@ interface CatalogCacheDao {
     @Query("SELECT * FROM channels WHERE accountKey = :accountKey ORDER BY name ASC")
     fun observeAllChannels(accountKey: String): Flow<List<ChannelEntity>>
 
+    /** One-shot equivalent of [observeAllChannels], for the read-through cache. */
+    @Query("SELECT * FROM channels WHERE accountKey = :accountKey ORDER BY name ASC")
+    suspend fun getAllChannels(accountKey: String): List<ChannelEntity>
+
     /** Observes live channels for [accountKey] belonging to the given [categoryId], alphabetically. */
     @Query("SELECT * FROM channels WHERE accountKey = :accountKey AND categoryId = :categoryId ORDER BY name ASC")
     fun observeChannelsByCategory(accountKey: String, categoryId: String): Flow<List<ChannelEntity>>
+
+    /** One-shot equivalent of [observeChannelsByCategory], for the read-through cache. */
+    @Query("SELECT * FROM channels WHERE accountKey = :accountKey AND categoryId = :categoryId ORDER BY name ASC")
+    suspend fun getChannelsByCategory(accountKey: String, categoryId: String): List<ChannelEntity>
 
     /** Deletes all channel rows, across every account. */
     /**
@@ -115,9 +143,17 @@ interface CatalogCacheDao {
     @Query("SELECT * FROM movies WHERE accountKey = :accountKey ORDER BY title ASC")
     fun observeAllMovies(accountKey: String): Flow<List<MovieEntity>>
 
+    /** One-shot equivalent of [observeAllMovies], for the read-through cache. */
+    @Query("SELECT * FROM movies WHERE accountKey = :accountKey ORDER BY title ASC")
+    suspend fun getAllMovies(accountKey: String): List<MovieEntity>
+
     /** Observes movies for [accountKey] in the given [categoryId], alphabetically by title. */
     @Query("SELECT * FROM movies WHERE accountKey = :accountKey AND categoryId = :categoryId ORDER BY title ASC")
     fun observeMoviesByCategory(accountKey: String, categoryId: String): Flow<List<MovieEntity>>
+
+    /** One-shot equivalent of [observeMoviesByCategory], for the read-through cache. */
+    @Query("SELECT * FROM movies WHERE accountKey = :accountKey AND categoryId = :categoryId ORDER BY title ASC")
+    suspend fun getMoviesByCategory(accountKey: String, categoryId: String): List<MovieEntity>
 
     /**
      * One-shot lookup of a single movie for [accountKey] by its stream [id].
@@ -140,9 +176,17 @@ interface CatalogCacheDao {
     @Query("SELECT * FROM series WHERE accountKey = :accountKey ORDER BY title ASC")
     fun observeAllSeries(accountKey: String): Flow<List<SeriesEntity>>
 
+    /** One-shot equivalent of [observeAllSeries], for the read-through cache. */
+    @Query("SELECT * FROM series WHERE accountKey = :accountKey ORDER BY title ASC")
+    suspend fun getAllSeries(accountKey: String): List<SeriesEntity>
+
     /** Observes series for [accountKey] in the given [categoryId], alphabetically by title. */
     @Query("SELECT * FROM series WHERE accountKey = :accountKey AND categoryId = :categoryId ORDER BY title ASC")
     fun observeSeriesByCategory(accountKey: String, categoryId: String): Flow<List<SeriesEntity>>
+
+    /** One-shot equivalent of [observeSeriesByCategory], for the read-through cache. */
+    @Query("SELECT * FROM series WHERE accountKey = :accountKey AND categoryId = :categoryId ORDER BY title ASC")
+    suspend fun getSeriesByCategory(accountKey: String, categoryId: String): List<SeriesEntity>
 
     /**
      * One-shot lookup of a single series for [accountKey] by its [id].

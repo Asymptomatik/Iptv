@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 4,
-    "identityHash": "a92dd30cb82cb41edaedb778bf87ae70",
+    "identityHash": "95c4a31c915f851b22e4dfe8475261c6",
     "entities": [
       {
         "tableName": "profiles",
@@ -164,7 +164,18 @@
             "id"
           ]
         },
-        "indices": [],
+        "indices": [
+          {
+            "name": "index_categories_accountKey_contentType",
+            "unique": false,
+            "columnNames": [
+              "accountKey",
+              "contentType"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_categories_accountKey_contentType` ON `${TABLE_NAME}` (`accountKey`, `contentType`)"
+          }
+        ],
         "foreignKeys": []
       },
       {
@@ -215,7 +226,18 @@
             "id"
           ]
         },
-        "indices": [],
+        "indices": [
+          {
+            "name": "index_channels_accountKey_categoryId",
+            "unique": false,
+            "columnNames": [
+              "accountKey",
+              "categoryId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_channels_accountKey_categoryId` ON `${TABLE_NAME}` (`accountKey`, `categoryId`)"
+          }
+        ],
         "foreignKeys": []
       },
       {
@@ -296,7 +318,18 @@
             "id"
           ]
         },
-        "indices": [],
+        "indices": [
+          {
+            "name": "index_movies_accountKey_categoryId",
+            "unique": false,
+            "columnNames": [
+              "accountKey",
+              "categoryId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_movies_accountKey_categoryId` ON `${TABLE_NAME}` (`accountKey`, `categoryId`)"
+          }
+        ],
         "foreignKeys": []
       },
       {
@@ -359,7 +392,18 @@
             "id"
           ]
         },
-        "indices": [],
+        "indices": [
+          {
+            "name": "index_series_accountKey_categoryId",
+            "unique": false,
+            "columnNames": [
+              "accountKey",
+              "categoryId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_series_accountKey_categoryId` ON `${TABLE_NAME}` (`accountKey`, `categoryId`)"
+          }
+        ],
         "foreignKeys": []
       },
       {
@@ -669,7 +713,7 @@
     "views": [],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'a92dd30cb82cb41edaedb778bf87ae70')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '95c4a31c915f851b22e4dfe8475261c6')"
     ]
   }
 }

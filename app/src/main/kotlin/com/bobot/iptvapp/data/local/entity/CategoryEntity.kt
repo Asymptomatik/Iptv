@@ -1,6 +1,7 @@
 package com.bobot.iptvapp.data.local.entity
 
 import androidx.room.Entity
+import androidx.room.Index
 import com.bobot.iptvapp.domain.model.ContentType
 
 /**
@@ -24,7 +25,11 @@ import com.bobot.iptvapp.domain.model.ContentType
  * Catalog cache — destructive fallback is acceptable. The next app launch
  * re-fetches and rebuilds the cache from the Xtream Codes API.
  */
-@Entity(tableName = "categories", primaryKeys = ["accountKey", "id"])
+@Entity(
+    tableName = "categories",
+    primaryKeys = ["accountKey", "id"],
+    indices = [Index(value = ["accountKey", "contentType"])],
+)
 data class CategoryEntity(
     val accountKey: String,
     val id: String,

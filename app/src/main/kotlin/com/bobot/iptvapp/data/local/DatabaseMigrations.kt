@@ -99,14 +99,33 @@ object DatabaseMigrations {
      * reads as "never synced", the first open after upgrading refetches exactly once, and every
      * open after that is served from Room.
      *
-     * The `CREATE TABLE` statement is copied verbatim from the `createSql` field of
-     * `app/schemas/com.bobot.iptvapp.data.local.IptvDatabase/4.json`, as
-     * [MIGRATION_2_3] does, so it matches byte-for-byte what Room validates at runtime.
+     * Also indexes the four cache tables on the columns the catalog screens filter by. Before
+     * this migration `categories`, `channels`, `movies` and `series` carried no index at all
+     * beyond their primary key, so `WHERE accountKey = ? AND categoryId = ?` meant a full table
+     * scan — cheap while Room was only a failure-path fallback, ruinous now that a warm open
+     * runs one such query per category (measured on a real 154k-row cache: ~40 s to fill the
+     * movies grid, entirely in SQLite, with the network untouched).
+     *
+     * The `CREATE TABLE` / `CREATE INDEX` statements are copied verbatim from the `createSql`
+     * fields of `app/schemas/com.bobot.iptvapp.data.local.IptvDatabase/4.json`, as
+     * [MIGRATION_2_3] does, so they match byte-for-byte what Room validates at runtime.
      */
     val MIGRATION_3_4 = object : Migration(3, 4) {
         override fun migrate(database: SupportSQLiteDatabase) {
             database.execSQL(
                 "CREATE TABLE IF NOT EXISTS `catalog_sync` (`accountKey` TEXT NOT NULL, `contentType` TEXT NOT NULL, `scope` TEXT NOT NULL, `syncedAtMillis` INTEGER NOT NULL, PRIMARY KEY(`accountKey`, `contentType`, `scope`))",
+            )
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_categories_accountKey_contentType` ON `categories` (`accountKey`, `contentType`)",
+            )
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_channels_accountKey_categoryId` ON `channels` (`accountKey`, `categoryId`)",
+            )
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_movies_accountKey_categoryId` ON `movies` (`accountKey`, `categoryId`)",
+            )
+            database.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_series_accountKey_categoryId` ON `series` (`accountKey`, `categoryId`)",
             )
         }
     }

@@ -34,7 +34,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
@@ -284,7 +283,7 @@ class CatalogRepositoryImpl @Inject constructor(
             // served entirely from memory and would never use the key.
             val accountKey = currentAccountKey()
             freshFromRoom(accountKey, ContentType.LIVE, SCOPE_ALL) { key ->
-                catalogCacheDao.observeAllChannels(key.value).first().toDomain()
+                catalogCacheDao.getAllChannels(key.value).toDomain()
             }?.let {
                 // Promoted to the session cache exactly as a network result would be, so the
                 // per-category branch below is served from memory for the rest of the session.
@@ -303,7 +302,7 @@ class CatalogRepositoryImpl @Inject constructor(
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
                 emitFromRoomCacheOrError(accountKey, t) { key ->
-                    catalogCacheDao.observeAllChannels(key.value).first().toDomain()
+                    catalogCacheDao.getAllChannels(key.value).toDomain()
                 }
             }
         } else {
@@ -315,7 +314,7 @@ class CatalogRepositoryImpl @Inject constructor(
             } else {
                 val accountKey = currentAccountKey()
                 freshFromRoom(accountKey, ContentType.LIVE, categoryId) { key ->
-                    catalogCacheDao.observeChannelsByCategory(key.value, categoryId).first().toDomain()
+                    catalogCacheDao.getChannelsByCategory(key.value, categoryId).toDomain()
                 }?.let { emit(Resource.Success(it)); return@flow }
                 try {
                     val result = dataSource.getLiveChannels(categoryId)
@@ -327,7 +326,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 } catch (t: Throwable) {
                     rethrowIfCancellation(t)
                     emitFromRoomCacheOrError(accountKey, t) { key ->
-                        catalogCacheDao.observeChannelsByCategory(key.value, categoryId).first().toDomain()
+                        catalogCacheDao.getChannelsByCategory(key.value, categoryId).toDomain()
                     }
                 }
             }
@@ -340,7 +339,7 @@ class CatalogRepositoryImpl @Inject constructor(
             cachedAllMovies?.let { emit(Resource.Success(it)); return@flow }
             val accountKey = currentAccountKey()
             freshFromRoom(accountKey, ContentType.MOVIE, SCOPE_ALL) { key ->
-                catalogCacheDao.observeAllMovies(key.value).first().toDomain()
+                catalogCacheDao.getAllMovies(key.value).toDomain()
             }?.let {
                 cachedAllMovies = it
                 emit(Resource.Success(it))
@@ -357,7 +356,7 @@ class CatalogRepositoryImpl @Inject constructor(
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
                 emitFromRoomCacheOrError(accountKey, t) { key ->
-                    catalogCacheDao.observeAllMovies(key.value).first().toDomain()
+                    catalogCacheDao.getAllMovies(key.value).toDomain()
                 }
             }
         } else {
@@ -367,7 +366,7 @@ class CatalogRepositoryImpl @Inject constructor(
             } else {
                 val accountKey = currentAccountKey()
                 freshFromRoom(accountKey, ContentType.MOVIE, categoryId) { key ->
-                    catalogCacheDao.observeMoviesByCategory(key.value, categoryId).first().toDomain()
+                    catalogCacheDao.getMoviesByCategory(key.value, categoryId).toDomain()
                 }?.let { emit(Resource.Success(it)); return@flow }
                 try {
                     val result = dataSource.getMovies(categoryId)
@@ -379,7 +378,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 } catch (t: Throwable) {
                     rethrowIfCancellation(t)
                     emitFromRoomCacheOrError(accountKey, t) { key ->
-                        catalogCacheDao.observeMoviesByCategory(key.value, categoryId).first().toDomain()
+                        catalogCacheDao.getMoviesByCategory(key.value, categoryId).toDomain()
                     }
                 }
             }
@@ -392,7 +391,7 @@ class CatalogRepositoryImpl @Inject constructor(
             cachedAllSeries?.let { emit(Resource.Success(it)); return@flow }
             val accountKey = currentAccountKey()
             freshFromRoom(accountKey, ContentType.SERIES, SCOPE_ALL) { key ->
-                catalogCacheDao.observeAllSeries(key.value).first().toDomain()
+                catalogCacheDao.getAllSeries(key.value).toDomain()
             }?.let {
                 cachedAllSeries = it
                 emit(Resource.Success(it))
@@ -409,7 +408,7 @@ class CatalogRepositoryImpl @Inject constructor(
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
                 emitFromRoomCacheOrError(accountKey, t) { key ->
-                    catalogCacheDao.observeAllSeries(key.value).first().toDomain()
+                    catalogCacheDao.getAllSeries(key.value).toDomain()
                 }
             }
         } else {
@@ -419,7 +418,7 @@ class CatalogRepositoryImpl @Inject constructor(
             } else {
                 val accountKey = currentAccountKey()
                 freshFromRoom(accountKey, ContentType.SERIES, categoryId) { key ->
-                    catalogCacheDao.observeSeriesByCategory(key.value, categoryId).first().toDomain()
+                    catalogCacheDao.getSeriesByCategory(key.value, categoryId).toDomain()
                 }?.let { emit(Resource.Success(it)); return@flow }
                 try {
                     val result = dataSource.getSeriesList(categoryId)
@@ -431,7 +430,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 } catch (t: Throwable) {
                     rethrowIfCancellation(t)
                     emitFromRoomCacheOrError(accountKey, t) { key ->
-                        catalogCacheDao.observeSeriesByCategory(key.value, categoryId).first().toDomain()
+                        catalogCacheDao.getSeriesByCategory(key.value, categoryId).toDomain()
                     }
                 }
             }
@@ -942,7 +941,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 // a single category, so one network round-trip here would put the network back in
                 // front of an otherwise fully cached load.
                 val cached = freshFromRoom(accountKey, contentType, SCOPE_CATEGORIES) { key ->
-                    catalogCacheDao.observeCategoriesByType(key.value, contentType.name).first().toDomain()
+                    catalogCacheDao.getCategoriesByType(key.value, contentType.name).toDomain()
                 }
                 val fresh = cached ?: fetch()
                 val publishable = state.mutex.withLock {
@@ -964,7 +963,7 @@ class CatalogRepositoryImpl @Inject constructor(
                 // Deliberately not memoized, matching the previous behaviour: a Room fallback or an
                 // error never becomes the session cache.
                 result = fromRoomCacheOrError(accountKey, t) { key ->
-                    catalogCacheDao.observeCategoriesByType(key.value, contentType.name).first().toDomain()
+                    catalogCacheDao.getCategoriesByType(key.value, contentType.name).toDomain()
                 }
             } finally {
                 withContext(NonCancellable) {

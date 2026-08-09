@@ -1,6 +1,7 @@
 package com.bobot.iptvapp.data.local.entity
 
 import androidx.room.Entity
+import androidx.room.Index
 
 /**
  * Room entity caching an Xtream Codes live broadcast channel.
@@ -19,7 +20,11 @@ import androidx.room.Entity
  * Catalog cache — destructive fallback is acceptable. The next app launch
  * re-fetches and rebuilds the cache from the Xtream Codes API.
  */
-@Entity(tableName = "channels", primaryKeys = ["accountKey", "id"])
+@Entity(
+    tableName = "channels",
+    primaryKeys = ["accountKey", "id"],
+    indices = [Index(value = ["accountKey", "categoryId"])],
+)
 data class ChannelEntity(
     val accountKey: String,
     val id: String,

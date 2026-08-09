@@ -239,7 +239,11 @@ class MigrationTest {
             IptvDatabase::class.java,
             testDbName,
         )
-            .addMigrations(DatabaseMigrations.MIGRATION_1_2, DatabaseMigrations.MIGRATION_2_3)
+            .addMigrations(
+                DatabaseMigrations.MIGRATION_1_2,
+                DatabaseMigrations.MIGRATION_2_3,
+                DatabaseMigrations.MIGRATION_3_4,
+            )
             .allowMainThreadQueries()
             .build()
 
@@ -277,7 +281,7 @@ class MigrationTest {
     }
 
     @Test
-    fun migrate3To4_addsCatalogSyncAndPreservesCachedRows() {
+    fun migrate3To4_addsCatalogSyncAndCategoryIndicesAndPreservesCachedRows() {
         helper.createDatabase(testDbName, 3).apply {
             execSQL(
                 "INSERT INTO movies (accountKey, id, title, categoryId) VALUES " +
@@ -307,6 +311,24 @@ class MigrationTest {
         migratedDb.query("SELECT COUNT(*) FROM catalog_sync").use { cursor ->
             assertTrue(cursor.moveToFirst())
             assertEquals(0, cursor.getInt(0))
+        }
+
+        // `runMigrationsAndValidate` already rejects a missing index, but state it outright: the
+        // per-category reads this schema unlocks are only worth doing because they are indexed.
+        // Without these, a warm open scans the whole cache once per category.
+        val indexNames = mutableSetOf<String>()
+        migratedDb.query("SELECT name FROM sqlite_master WHERE type = 'index'").use { cursor ->
+            while (cursor.moveToNext()) {
+                indexNames += cursor.getString(0)
+            }
+        }
+        listOf(
+            "index_categories_accountKey_contentType",
+            "index_channels_accountKey_categoryId",
+            "index_movies_accountKey_categoryId",
+            "index_series_accountKey_categoryId",
+        ).forEach { expected ->
+            assertTrue("Migration 3→4 must create $expected.", expected in indexNames)
         }
         migratedDb.close()
 
