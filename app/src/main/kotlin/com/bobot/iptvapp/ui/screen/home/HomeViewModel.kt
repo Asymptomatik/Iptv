@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.bobot.iptvapp.data.preferences.AppPreferencesStore
 import com.bobot.iptvapp.data.remote.XtreamUrlBuilder
 import com.bobot.iptvapp.data.source.CredentialsProvider
+import com.bobot.iptvapp.di.DefaultDispatcher
 import com.bobot.iptvapp.domain.model.Category
 import com.bobot.iptvapp.domain.model.Channel
 import com.bobot.iptvapp.domain.model.ContentType
@@ -24,6 +25,7 @@ import com.bobot.iptvapp.domain.util.Resource
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
@@ -34,10 +36,12 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
 /**
@@ -259,6 +263,23 @@ data class HomeUiState(
  * never renders an empty row. [loadCatalogTab] forwards every emission of this combined Flow into
  * the relevant `*RowsState` so the tab's rows render progressively as categories complete.
  *
+ * ## Incremental row building
+ * The items Flow above emits the *whole* accumulated catalog once per category, so a naive
+ * [toRows] does work proportional to the entire catalog every time a single category lands —
+ * quadratic in the number of categories. On an account with 157 VOD categories and 154 000 films
+ * that meant building roughly 24 million [HomeCardItem]s to display 154 000, which is where the
+ * load time went once the network stopped being the bottleneck.
+ *
+ * [toRows] therefore builds cards through two memos, [cardMemo] and [rowMemo] (see
+ * [mergedCardsFor] for why one is not enough), so each emission only maps the category that
+ * actually arrived. Both are versioned by item *count* rather than by content, which is sound
+ * only because a category's slice is fetched once and never mutated in place — and both are
+ * dropped by [clearCardMemos] when a reload restarts the accumulator, which is the one moment
+ * that assumption would otherwise break.
+ *
+ * The row-building step also runs on [defaultDispatcher] rather than the main thread — see the
+ * `flowOn` in [loadCatalogTab].
+ *
  * ## Sharing the category-scoped item state across consumers
  * [channelsState] / [moviesState] / [seriesState] are created exactly once, as instance
  * properties, and shared across [buildRowsFlow] (via [loadCatalogTab]), [buildMyListFlow], and
@@ -437,6 +458,7 @@ class HomeViewModel @Inject constructor(
     private val credentialsProvider: CredentialsProvider,
     private val filterCatalogByLanguageUseCase: FilterCatalogByLanguageUseCase,
     private val loadCategoryScopedCatalogUseCase: LoadCategoryScopedCatalogUseCase,
+    @DefaultDispatcher private val defaultDispatcher: CoroutineDispatcher,
 ) : ViewModel() {
 
     private companion object {
@@ -453,6 +475,22 @@ class HomeViewModel @Inject constructor(
 
     /** Cached Xtream credentials (fetched once at init) — see class KDoc "Credentials caching". */
     private var activeCredentials: XtreamCredentials? = null
+
+    // ── Row-building memos — see class KDoc "Incremental row building" ───────────────────────────
+
+    /** One category's cards, versioned by the number of domain items they were built from. */
+    private val cardMemo = ConcurrentHashMap<CardMemoKey, CachedCards>()
+
+    /** One row's merged cards, versioned by the `(categoryId, size)` pairs that produced them. */
+    private val rowMemo = ConcurrentHashMap<RowMemoKey, CachedRow>()
+
+    private data class CardMemoKey(val contentType: ContentType, val categoryId: String)
+
+    private data class RowMemoKey(val contentType: ContentType, val displayName: String)
+
+    private class CachedCards(val sourceSize: Int, val cards: List<HomeCardItem>)
+
+    private class CachedRow(val version: List<Pair<String, Int>>, val cards: List<HomeCardItem>)
 
     // ── On-demand catalog loading state (OOM fix) — see class KDoc "On-demand catalog loading" ──
 
@@ -569,7 +607,7 @@ class HomeViewModel @Inject constructor(
      * again — including across [onRetry]. See class KDoc "Default language filter and its one-shot
      * fallback".
      */
-    private val explicitSelectionContentTypes = mutableSetOf<ContentType>()
+    private val explicitSelectionContentTypes: MutableSet<ContentType> = ConcurrentHashMap.newKeySet()
 
     /**
      * Content types for which the "selected language has no matching loaded category" fallback (see
@@ -588,7 +626,7 @@ class HomeViewModel @Inject constructor(
      * [explicitSelectionContentTypes], re-checking eligibility on later ticks can only ever revise an
      * *automatic* selection, never a user's own.
      */
-    private val fallbackAppliedContentTypes = mutableSetOf<ContentType>()
+    private val fallbackAppliedContentTypes: MutableSet<ContentType> = ConcurrentHashMap.newKeySet()
 
     init {
         viewModelScope.launch {
@@ -751,6 +789,10 @@ class HomeViewModel @Inject constructor(
      */
     private fun startCatalogTabLoad(contentType: ContentType) {
         catalogTabJobs[contentType]?.cancel()
+        // A reload starts the accumulator over at zero, so every memo entry for this type is about
+        // to describe a slice that no longer exists. Dropping them here is what stops a category
+        // whose refreshed content happens to have the same item count from rendering stale cards.
+        clearCardMemos(contentType)
         // Publish LOADING *synchronously*, before the coroutine is dispatched: HomeScreen calls
         // onCatalogTabSelected from a LaunchedEffect on tab switch, and any gap between the switch
         // and the first state emission would flash the empty state (QA finding M3).
@@ -857,6 +899,11 @@ class HomeViewModel @Inject constructor(
 
         launch {
             buildRowsFlow(contentType, categoriesFlow, itemsState, languageFilterState, categoryIdOf, toCard)
+                // Row building is the only genuinely CPU-bound step in this ViewModel, and it runs
+                // once per category as the catalog fills up. Off the main thread it costs the user
+                // nothing; on it, it was competing with the frames that render the very rows it
+                // produces. Nothing upstream touches anything but StateFlows, so the shift is safe.
+                .flowOn(defaultDispatcher)
                 .collect { rowsState.value = it }
         }
         try {
@@ -1208,25 +1255,80 @@ class HomeViewModel @Inject constructor(
         val items: List<T> = itemsResource.data
         val itemsByCategory = items.groupBy(categoryIdOf)
         val rows = filterCatalogByLanguageUseCase.filterCategories(categories, selectedLanguage)
-            .groupBy(
-                keySelector = { category -> rowGroupingKey(category, contentType) },
-                valueTransform = { category -> category to itemsByCategory[category.id].orEmpty() },
-            )
+            .groupBy { category -> rowGroupingKey(category, contentType) }
             .mapNotNull { (displayName, groupedCategories) ->
-                val mergedItems = groupedCategories
-                    .flatMap { (_, categoryItems) -> categoryItems }
-                    .map(toCard)
+                val mergedItems = mergedCardsFor(
+                    contentType = contentType,
+                    displayName = displayName,
+                    groupedCategories = groupedCategories,
+                    itemsByCategory = itemsByCategory,
+                    toCard = toCard,
+                )
                 if (mergedItems.isEmpty()) {
                     null
                 } else {
                     HomeRow(
-                        categoryId = groupedCategories.first().first.id,
+                        categoryId = groupedCategories.first().id,
                         title = displayName,
                         items = mergedItems,
                     )
                 }
             }
         return Resource.Success(rows)
+    }
+
+    /**
+     * The cards of one row, reusing the previous emission's work whenever the underlying slice has
+     * not moved — see class KDoc "Incremental row building".
+     *
+     * Two memos, because they go stale on different events. [cardMemo] holds one category's cards
+     * and only has to be rebuilt when *that* category's item count changes; [rowMemo] holds the
+     * merged, cross-category list a row actually renders and additionally has to be rebuilt when
+     * the set of categories in the row changes, which is what a language filter does. The version
+     * carried by [rowMemo] is therefore the row's `(categoryId, size)` pairs rather than a single
+     * total: two different category sets can add up to the same number of items.
+     */
+    private fun <T> mergedCardsFor(
+        contentType: ContentType,
+        displayName: String,
+        groupedCategories: List<Category>,
+        itemsByCategory: Map<String, List<T>>,
+        toCard: (T) -> HomeCardItem,
+    ): List<HomeCardItem> {
+        val version = groupedCategories.map { category ->
+            category.id to (itemsByCategory[category.id]?.size ?: 0)
+        }
+        val rowKey = RowMemoKey(contentType, displayName)
+        rowMemo[rowKey]?.let { cached ->
+            if (cached.version == version) return cached.cards
+        }
+        val merged = groupedCategories.flatMap { category ->
+            cardsFor(contentType, category.id, itemsByCategory[category.id].orEmpty(), toCard)
+        }
+        rowMemo[rowKey] = CachedRow(version, merged)
+        return merged
+    }
+
+    /** One category's cards, rebuilt only when that category's item count has changed. */
+    private fun <T> cardsFor(
+        contentType: ContentType,
+        categoryId: String,
+        categoryItems: List<T>,
+        toCard: (T) -> HomeCardItem,
+    ): List<HomeCardItem> {
+        val key = CardMemoKey(contentType, categoryId)
+        cardMemo[key]?.let { cached ->
+            if (cached.sourceSize == categoryItems.size) return cached.cards
+        }
+        val cards = categoryItems.map(toCard)
+        cardMemo[key] = CachedCards(categoryItems.size, cards)
+        return cards
+    }
+
+    /** Drops both memos for [contentType], so a reload never reuses the previous load's cards. */
+    private fun clearCardMemos(contentType: ContentType) {
+        cardMemo.keys.removeAll { it.contentType == contentType }
+        rowMemo.keys.removeAll { it.contentType == contentType }
     }
 
     private fun rowGroupingKey(category: Category, contentType: ContentType): String =

@@ -128,6 +128,19 @@ class HomeViewModelTest {
         durationMillis = null,
         containerExtension = null,
     )
+    private val comedyCategory = Category(id = "11", name = "Comedie", type = ContentType.MOVIE)
+    private val movie3 = Movie(
+        id = "m3",
+        title = "Rire Jaune",
+        posterUrl = null,
+        plot = null,
+        categoryId = "11",
+        rating = null,
+        year = null,
+        addedMillis = null,
+        durationMillis = null,
+        containerExtension = null,
+    )
     private val movie2 = Movie(
         id = "m2",
         title = "Vengeance Nocturne",
@@ -248,6 +261,9 @@ class HomeViewModelTest {
             credentialsProvider,
             FilterCatalogByLanguageUseCase(),
             LoadCategoryScopedCatalogUseCase(),
+            // Row building runs on this dispatcher in production; handing it the test one keeps
+            // every emission inside the scheduler these tests advance by hand.
+            testDispatcher,
         )
         testDispatcher.scheduler.runCurrent()
     }
@@ -417,6 +433,59 @@ class HomeViewModelTest {
                 ),
             ),
             state.seriesRows,
+        )
+    }
+
+    // ── Incremental row building (card memos) ─────────────────────────────────
+
+    @Test
+    fun `a category loading after another does not disturb the rows already built`() {
+        stubMovies("10", listOf(movie1))
+        stubMovies("11", listOf(movie3))
+
+        createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        vodCategoriesFlow.value = Resource.Success(listOf(actionCategory, comedyCategory))
+        testDispatcher.scheduler.runCurrent()
+
+        // Both categories share a row (neither name carries a language tag, so each groups under
+        // its own display name) — what matters is that the first category's cards, which come from
+        // the memo on the second emission, are still the right ones.
+        assertEquals(
+            listOf(
+                HomeCardItem(id = "m1", title = "Explosion Totale", imageUrl = null, contentType = ContentType.MOVIE),
+            ),
+            viewModel.uiState.value.movieRows.first { it.categoryId == "10" }.items,
+        )
+        assertEquals(
+            listOf(
+                HomeCardItem(id = "m3", title = "Rire Jaune", imageUrl = null, contentType = ContentType.MOVIE),
+            ),
+            viewModel.uiState.value.movieRows.first { it.categoryId == "11" }.items,
+        )
+    }
+
+    @Test
+    fun `a reload whose category returns different items of the same count rebuilds the cards`() {
+        stubMovies("10", listOf(movie1))
+
+        createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        vodCategoriesFlow.value = Resource.Success(listOf(actionCategory))
+        testDispatcher.scheduler.runCurrent()
+
+        // Same category, same item count, different film: the memos are versioned by count, so
+        // only the reload dropping them keeps this from rendering the previous load's card.
+        stubMovies("10", listOf(movie2))
+        viewModel.onRetry()
+        vodCategoriesFlow.value = Resource.Success(listOf(actionCategory))
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(
+            listOf(
+                HomeCardItem(id = "m2", title = "Vengeance Nocturne", imageUrl = null, contentType = ContentType.MOVIE),
+            ),
+            viewModel.uiState.value.movieRows.first { it.categoryId == "10" }.items,
         )
     }
 
