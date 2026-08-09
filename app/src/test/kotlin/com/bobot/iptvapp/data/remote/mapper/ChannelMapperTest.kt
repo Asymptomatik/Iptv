@@ -97,4 +97,21 @@ class ChannelMapperTest {
         assertEquals("10", results[0].id)
         assertEquals("20", results[1].id)
     }
+
+    @Test
+    fun `list toDomain drops bouquet separators`() {
+        // The provider mixes divider rows into get_live_streams; they carry a stream_id like any
+        // other entry, so without this filter they become tappable cards on a dead stream — and
+        // the first one of a category becomes the Accueil hero (QA finding Y2).
+        val dtos = listOf(
+            LiveStreamDto(streamId = "1", name = "##### FRANCE GENERAL FHD #####", categoryId = "1"),
+            LiveStreamDto(streamId = "10", name = "TF1", categoryId = "1"),
+            LiveStreamDto(streamId = "2", name = "--- SPORT ---", categoryId = "1"),
+            LiveStreamDto(streamId = "20", name = "M6", categoryId = "1"),
+        )
+
+        val results = dtos.toDomain()
+
+        assertEquals(listOf("TF1", "M6"), results.map { it.name })
+    }
 }
