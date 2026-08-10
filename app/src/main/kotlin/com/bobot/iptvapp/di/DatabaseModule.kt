@@ -35,10 +35,11 @@ import javax.inject.Singleton
  * (managed by the Android OS, typically `/data/data/<package>/databases/`).
  *
  * ## Migrations
- * Version 3 — see [IptvDatabase] KDoc for the full migration policy.
+ * Version 4 — see [IptvDatabase] KDoc for the full migration policy.
  * [DatabaseMigrations.MIGRATION_1_2] adds the `downloads` table;
  * [DatabaseMigrations.MIGRATION_2_3] partitions the seven catalog cache tables by
- * `accountKey` (Task 3 carry-forward), recreating them empty. Never call
+ * `accountKey` (Task 3 carry-forward), recreating them empty;
+ * [DatabaseMigrations.MIGRATION_3_4] adds the `catalog_sync` freshness markers. Never call
  * `fallbackToDestructiveMigration()` without reading the migration policy in [IptvDatabase].
  */
 @Module
@@ -52,7 +53,11 @@ object DatabaseModule {
             context,
             IptvDatabase::class.java,
             "iptv.db",
-        ).addMigrations(DatabaseMigrations.MIGRATION_1_2, DatabaseMigrations.MIGRATION_2_3).build()
+        ).addMigrations(
+            DatabaseMigrations.MIGRATION_1_2,
+            DatabaseMigrations.MIGRATION_2_3,
+            DatabaseMigrations.MIGRATION_3_4,
+        ).build()
 
     @Provides
     fun provideProfileDao(db: IptvDatabase): ProfileDao = db.profileDao()

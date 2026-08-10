@@ -227,25 +227,24 @@ class LiveDetailViewModel @Inject constructor(
 
             val streamUrl = buildStreamUrl(channelId)
 
+            // The cache is asked first, and it answers with a single row. The fallback below
+            // resolves this same channel out of `getLiveChannels(categoryId = null)` — the
+            // *unfiltered* bouquet, the heaviest call the API offers, downloaded in full to read
+            // one entry from it. Since the catalog screens load per category (the OOM fix), that
+            // unfiltered list is never memoized either, so before this lookup existed the cost was
+            // paid again on every single channel opened.
+            val cached = catalogRepository.getCachedChannel(channelId)
+            if (cached != null) {
+                onChannelResolved(cached, streamUrl, profileId)
+                return@launch
+            }
+
             catalogRepository.getLiveChannels(categoryId = null).collect { resource ->
                 when (resource) {
                     is Resource.Success -> {
                         val channel = resource.data.firstOrNull { it.id == channelId }
                         if (channel != null) {
-                            _uiState.update {
-                                it.copy(
-                                    isLoading = false,
-                                    errorMessage = null,
-                                    channel = channel,
-                                    streamUrl = streamUrl,
-                                )
-                            }
-
-                            if (profileId != null) {
-                                observeFavorite(profileId, channelId)
-                            }
-
-                            loadEpg(channel)
+                            onChannelResolved(channel, streamUrl, profileId)
                         } else {
                             _uiState.update {
                                 it.copy(isLoading = false, errorMessage = CHANNEL_NOT_FOUND_MESSAGE)
@@ -263,6 +262,28 @@ class LiveDetailViewModel @Inject constructor(
                 }
             }
         }
+    }
+
+    /**
+     * Publishes a resolved channel and starts the two loads that depend on it, identically for
+     * the cached and the network path — a channel read from Room is not a lesser one, and must
+     * still get its favourite state observed and its EPG fetched.
+     */
+    private suspend fun onChannelResolved(channel: Channel, streamUrl: String?, profileId: String?) {
+        _uiState.update {
+            it.copy(
+                isLoading = false,
+                errorMessage = null,
+                channel = channel,
+                streamUrl = streamUrl,
+            )
+        }
+
+        if (profileId != null) {
+            observeFavorite(profileId, channel.id)
+        }
+
+        loadEpg(channel)
     }
 
     /** See class KDoc "EPG fetch (current / upcoming split)". */

@@ -1,5 +1,6 @@
 package com.bobot.iptvapp.data.local.dao
 
+import com.bobot.iptvapp.data.local.entity.CatalogSyncEntity
 import com.bobot.iptvapp.data.local.entity.CategoryEntity
 import com.bobot.iptvapp.data.local.entity.ChannelEntity
 import com.bobot.iptvapp.data.local.entity.EpisodeEntity
@@ -48,6 +49,26 @@ class FakeCatalogCacheDao : CatalogCacheDao {
     private val series = mutableMapOf<Pair<String, String>, SeriesEntity>()
     private val seasons = mutableMapOf<Triple<String, String, Int>, SeasonEntity>()
     private val episodes = mutableMapOf<Pair<String, String>, EpisodeEntity>()
+    private val syncMarkers = mutableMapOf<Triple<String, String, String>, CatalogSyncEntity>()
+
+    /**
+     * Marks a slice as synced [ageMillis] ago, so a test can put the cache on either side of the
+     * repository's TTL without a clock abstraction. Writing the age rather than the instant is
+     * what keeps the assertions readable: `markSyncedAgo(..., ageMillis = 0)` is a cache that was
+     * just filled, a large age is one that has expired.
+     */
+    fun markSyncedAgo(accountKey: String, contentType: String, scope: String, ageMillis: Long) {
+        syncMarkers[Triple(accountKey, contentType, scope)] = CatalogSyncEntity(
+            accountKey = accountKey,
+            contentType = contentType,
+            scope = scope,
+            syncedAtMillis = System.currentTimeMillis() - ageMillis,
+        )
+    }
+
+    /** `null` when the slice was never synced — mirrors [getSyncedAtMillis]'s own contract. */
+    fun syncedAtMillisOrNull(accountKey: String, contentType: String, scope: String): Long? =
+        syncMarkers[Triple(accountKey, contentType, scope)]?.syncedAtMillis
 
     // ── Categories ────────────────────────────────────────────────────────────
 
@@ -56,11 +77,15 @@ class FakeCatalogCacheDao : CatalogCacheDao {
     }
 
     override fun observeCategoriesByType(accountKey: String, contentType: String): Flow<List<CategoryEntity>> =
-        flowOf(
-            categories.values
-                .filter { it.accountKey == accountKey && it.contentType.name == contentType }
-                .sortedBy { it.name },
-        )
+        flowOf(categoriesByType(accountKey, contentType))
+
+    override suspend fun getCategoriesByType(accountKey: String, contentType: String): List<CategoryEntity> =
+        categoriesByType(accountKey, contentType)
+
+    private fun categoriesByType(accountKey: String, contentType: String): List<CategoryEntity> =
+        categories.values
+            .filter { it.accountKey == accountKey && it.contentType.name == contentType }
+            .sortedBy { it.name }
 
     override suspend fun clearCategoriesByType(accountKey: String, contentType: String) {
         categories.values.removeAll { it.accountKey == accountKey && it.contentType.name == contentType }
@@ -78,14 +103,26 @@ class FakeCatalogCacheDao : CatalogCacheDao {
     }
 
     override fun observeAllChannels(accountKey: String): Flow<List<ChannelEntity>> =
-        flowOf(channels.values.filter { it.accountKey == accountKey }.sortedBy { it.name })
+        flowOf(allChannels(accountKey))
+
+    override suspend fun getAllChannels(accountKey: String): List<ChannelEntity> = allChannels(accountKey)
+
+    private fun allChannels(accountKey: String): List<ChannelEntity> =
+        channels.values.filter { it.accountKey == accountKey }.sortedBy { it.name }
 
     override fun observeChannelsByCategory(accountKey: String, categoryId: String): Flow<List<ChannelEntity>> =
-        flowOf(
-            channels.values
-                .filter { it.accountKey == accountKey && it.categoryId == categoryId }
-                .sortedBy { it.name },
-        )
+        flowOf(channelsByCategory(accountKey, categoryId))
+
+    override suspend fun getChannelsByCategory(accountKey: String, categoryId: String): List<ChannelEntity> =
+        channelsByCategory(accountKey, categoryId)
+
+    private fun channelsByCategory(accountKey: String, categoryId: String): List<ChannelEntity> =
+        channels.values
+            .filter { it.accountKey == accountKey && it.categoryId == categoryId }
+            .sortedBy { it.name }
+
+    override suspend fun getChannelById(accountKey: String, id: String): ChannelEntity? =
+        channels[accountKey to id]
 
     override suspend fun clearChannels() {
         onGlobalClear?.invoke()
@@ -98,15 +135,23 @@ class FakeCatalogCacheDao : CatalogCacheDao {
         movies.forEach { this.movies[it.accountKey to it.id] = it }
     }
 
-    override fun observeAllMovies(accountKey: String): Flow<List<MovieEntity>> =
-        flowOf(movies.values.filter { it.accountKey == accountKey }.sortedBy { it.title })
+    override fun observeAllMovies(accountKey: String): Flow<List<MovieEntity>> = flowOf(allMovies(accountKey))
+
+    override suspend fun getAllMovies(accountKey: String): List<MovieEntity> = allMovies(accountKey)
+
+    private fun allMovies(accountKey: String): List<MovieEntity> =
+        movies.values.filter { it.accountKey == accountKey }.sortedBy { it.title }
 
     override fun observeMoviesByCategory(accountKey: String, categoryId: String): Flow<List<MovieEntity>> =
-        flowOf(
-            movies.values
-                .filter { it.accountKey == accountKey && it.categoryId == categoryId }
-                .sortedBy { it.title },
-        )
+        flowOf(moviesByCategory(accountKey, categoryId))
+
+    override suspend fun getMoviesByCategory(accountKey: String, categoryId: String): List<MovieEntity> =
+        moviesByCategory(accountKey, categoryId)
+
+    private fun moviesByCategory(accountKey: String, categoryId: String): List<MovieEntity> =
+        movies.values
+            .filter { it.accountKey == accountKey && it.categoryId == categoryId }
+            .sortedBy { it.title }
 
     override suspend fun getMovieById(accountKey: String, id: String): MovieEntity? = movies[accountKey to id]
 
@@ -121,15 +166,23 @@ class FakeCatalogCacheDao : CatalogCacheDao {
         series.forEach { this.series[it.accountKey to it.id] = it }
     }
 
-    override fun observeAllSeries(accountKey: String): Flow<List<SeriesEntity>> =
-        flowOf(series.values.filter { it.accountKey == accountKey }.sortedBy { it.title })
+    override fun observeAllSeries(accountKey: String): Flow<List<SeriesEntity>> = flowOf(allSeries(accountKey))
+
+    override suspend fun getAllSeries(accountKey: String): List<SeriesEntity> = allSeries(accountKey)
+
+    private fun allSeries(accountKey: String): List<SeriesEntity> =
+        series.values.filter { it.accountKey == accountKey }.sortedBy { it.title }
 
     override fun observeSeriesByCategory(accountKey: String, categoryId: String): Flow<List<SeriesEntity>> =
-        flowOf(
-            series.values
-                .filter { it.accountKey == accountKey && it.categoryId == categoryId }
-                .sortedBy { it.title },
-        )
+        flowOf(seriesByCategory(accountKey, categoryId))
+
+    override suspend fun getSeriesByCategory(accountKey: String, categoryId: String): List<SeriesEntity> =
+        seriesByCategory(accountKey, categoryId)
+
+    private fun seriesByCategory(accountKey: String, categoryId: String): List<SeriesEntity> =
+        series.values
+            .filter { it.accountKey == accountKey && it.categoryId == categoryId }
+            .sortedBy { it.title }
 
     override suspend fun getSeriesById(accountKey: String, id: String): SeriesEntity? = series[accountKey to id]
 
@@ -193,5 +246,23 @@ class FakeCatalogCacheDao : CatalogCacheDao {
     override suspend fun clearAllEpisodes() {
         onGlobalClear?.invoke()
         episodes.clear()
+    }
+
+    // ── Sync markers ──────────────────────────────────────────────────────────
+
+    override suspend fun upsertSyncMarker(marker: CatalogSyncEntity) {
+        syncMarkers[Triple(marker.accountKey, marker.contentType, marker.scope)] = marker
+    }
+
+    override suspend fun getSyncedAtMillis(accountKey: String, contentType: String, scope: String): Long? =
+        syncMarkers[Triple(accountKey, contentType, scope)]?.syncedAtMillis
+
+    override suspend fun clearSyncMarkersByType(accountKey: String, contentType: String) {
+        syncMarkers.values.removeAll { it.accountKey == accountKey && it.contentType == contentType }
+    }
+
+    override suspend fun clearAllSyncMarkers() {
+        onGlobalClear?.invoke()
+        syncMarkers.clear()
     }
 }

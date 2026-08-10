@@ -102,13 +102,13 @@ class CatalogRepositoryImplTest {
         // (Relying on MockK's relaxed-mock defaulting for Flow-returning methods would be
         // implementation-defined; explicit stubs keep this deterministic.) The accountKey
         // parameter is stubbed with any() — see class-level KDoc "Account partitioning".
-        every { catalogCacheDao.observeCategoriesByType(any(), any()) } returns flowOf(emptyList())
-        every { catalogCacheDao.observeAllChannels(any()) } returns flowOf(emptyList())
-        every { catalogCacheDao.observeChannelsByCategory(any(), any()) } returns flowOf(emptyList())
-        every { catalogCacheDao.observeAllMovies(any()) } returns flowOf(emptyList())
-        every { catalogCacheDao.observeMoviesByCategory(any(), any()) } returns flowOf(emptyList())
-        every { catalogCacheDao.observeAllSeries(any()) } returns flowOf(emptyList())
-        every { catalogCacheDao.observeSeriesByCategory(any(), any()) } returns flowOf(emptyList())
+        coEvery { catalogCacheDao.getCategoriesByType(any(), any()) } returns emptyList()
+        coEvery { catalogCacheDao.getAllChannels(any()) } returns emptyList()
+        coEvery { catalogCacheDao.getChannelsByCategory(any(), any()) } returns emptyList()
+        coEvery { catalogCacheDao.getAllMovies(any()) } returns emptyList()
+        coEvery { catalogCacheDao.getMoviesByCategory(any(), any()) } returns emptyList()
+        coEvery { catalogCacheDao.getAllSeries(any()) } returns emptyList()
+        coEvery { catalogCacheDao.getSeriesByCategory(any(), any()) } returns emptyList()
         // Configured before the repository is constructed so its init{} credentials
         // observer (drop(1)) skips this startup value, exactly like a restored session.
         runBlocking { credentialsProvider.setCredentials(testCredentials) }
@@ -473,7 +473,7 @@ class CatalogRepositoryImplTest {
                 ),
             )
             coEvery { dataSource.getLiveChannels(null) } throws CatalogException.NetworkError("Offline")
-            every { catalogCacheDao.observeAllChannels(any()) } returns flowOf(cachedEntities)
+            coEvery { catalogCacheDao.getAllChannels(any()) } returns cachedEntities
 
             repository.getLiveChannels(null).test {
                 awaitItem() // Loading
@@ -489,7 +489,7 @@ class CatalogRepositoryImplTest {
         runTest(testDispatcher) {
             val exception = CatalogException.NetworkError("Offline")
             coEvery { dataSource.getLiveChannels(null) } throws exception
-            every { catalogCacheDao.observeAllChannels(any()) } returns flowOf(emptyList())
+            coEvery { catalogCacheDao.getAllChannels(any()) } returns emptyList()
 
             repository.getLiveChannels(null).test {
                 awaitItem() // Loading
