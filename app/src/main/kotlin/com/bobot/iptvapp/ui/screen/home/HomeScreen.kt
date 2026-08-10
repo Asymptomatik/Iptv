@@ -33,6 +33,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -613,6 +614,12 @@ private fun HomeRowsContent(
     val initialFocusRequester = remember(selectedTab) { FocusRequester() }
     val rowsFocusTarget = uiState.initialFocusItemFor(selectedTab, selectedCategoryId)
 
+    // Poster grid paging — see [homeCategoryGridSection]. Deliberately *not* saveable: a page
+    // count restored into a grid whose category is still loading would lay out more rows than
+    // there are items. Keyed on tab and category so opening another category starts at page one.
+    var gridPageCount by remember(selectedTab, selectedCategoryId) { mutableIntStateOf(1) }
+    val gridVisibleItemCount = gridPageCount * GRID_PAGE_SIZE
+
     // Scroll-driven header background: transparent scrim while the first item (hero, when
     // present) is at the top, fading to a fully solid bar once the user scrolls past it.
     // Re-created per selectedTab so each tab starts fresh at the top of its own list.
@@ -775,6 +782,8 @@ private fun HomeRowsContent(
                         onCardClick = onCardClick,
                         initialFocusItem = rowsFocusTarget,
                         initialFocusRequester = initialFocusRequester,
+                        visibleItemCount = gridVisibleItemCount,
+                        onLoadMore = { gridPageCount++ },
                         isLive = true,
                     )
                 }
@@ -803,6 +812,8 @@ private fun HomeRowsContent(
                         onCardClick = onCardClick,
                         initialFocusItem = rowsFocusTarget,
                         initialFocusRequester = initialFocusRequester,
+                        visibleItemCount = gridVisibleItemCount,
+                        onLoadMore = { gridPageCount++ },
                     )
                 }
 
@@ -830,6 +841,8 @@ private fun HomeRowsContent(
                         onCardClick = onCardClick,
                         initialFocusItem = rowsFocusTarget,
                         initialFocusRequester = initialFocusRequester,
+                        visibleItemCount = gridVisibleItemCount,
+                        onLoadMore = { gridPageCount++ },
                     )
                 }
             }
@@ -1017,8 +1030,36 @@ private fun LazyListScope.homeCategorySelectorRow(
 }
 
 /**
+ * How many poster cards [homeCategoryGridSection] lays out per page.
+ *
+ * Divisible by both grid widths (2 on phone, 4 on TV) so a page is always a whole number of rows,
+ * and large enough — 30 phone rows, 15 TV rows — that the next page is requested well before the
+ * user could scroll into empty space.
+ */
+private const val GRID_PAGE_SIZE = 60
+
+/**
+ * How many grid rows before the end of the laid-out page [homeCategoryGridSection] asks for the
+ * next one. Four rows is more than a viewport's worth of prefetch on both form factors, so the
+ * next page is always in place before the user can scroll — or D-pad — into it.
+ */
+private const val GRID_LOAD_MORE_ROW_MARGIN = 4
+
+/**
  * Adds one selected-category section to the enclosing [LazyColumn]: a title followed by a
  * vertical poster grid built from that category's items.
+ *
+ * ## Why the grid is paged
+ * This runs inside the [LazyColumn]'s item-provider lambda, which Compose re-executes on every
+ * recomposition of the list — that is, once per catalog emission while a tab is still loading.
+ * The grid rows are lazy, but splitting [HomeRow.items] into rows of [columns] is not: it is an
+ * eager pass over the whole list, on the main thread. On a "Toutes"-style row merging every VOD
+ * category of a language that list holds tens of thousands of cards, and the split was being
+ * redone from scratch each time.
+ *
+ * Only [visibleItemCount] items are laid out, and [onLoadMore] extends that by one page when the
+ * user scrolls near the end, so the cost of the split is bounded by what the user has actually
+ * scrolled through rather than by the size of the category.
  */
 private fun LazyListScope.homeCategoryGridSection(
     sectionTitle: String,
@@ -1029,6 +1070,8 @@ private fun LazyListScope.homeCategoryGridSection(
     onCardClick: (HomeCardItem) -> Unit,
     initialFocusItem: HomeCardItem?,
     initialFocusRequester: FocusRequester,
+    visibleItemCount: Int,
+    onLoadMore: () -> Unit,
     isLive: Boolean = false,
 ) {
     if (row == null || row.items.isEmpty()) return
@@ -1045,8 +1088,24 @@ private fun LazyListScope.homeCategoryGridSection(
         )
     }
 
-    row.items.chunked(columns).forEachIndexed { index, itemsChunk ->
+    val visibleItems = row.items.take(visibleItemCount)
+    val visibleRows = visibleItems.chunked(columns)
+
+    // Which row asks for the next page. It has to be a real grid row, not a sentinel item appended
+    // after the last one: on TV the list scrolls by moving focus, so a non-focusable trailing item
+    // would never be reached and paging would stall at page one. Firing a few rows early also hides
+    // the split behind the scroll instead of at its very end.
+    val loadMoreRowIndex = (visibleRows.lastIndex - GRID_LOAD_MORE_ROW_MARGIN).coerceAtLeast(0)
+    val hasMoreItems = visibleItems.size < row.items.size
+
+    visibleRows.forEachIndexed { index, itemsChunk ->
         item(key = "grid-$sectionTitle-${row.categoryId}-$index") {
+            if (hasMoreItems && index == loadMoreRowIndex) {
+                // Composing this row *is* the signal — a LazyColumn only composes what it is about
+                // to show. Keyed on the page size so the effect re-arms once for each new page and
+                // is disposed as soon as the trigger moves further down the grid.
+                LaunchedEffect(visibleItems.size) { onLoadMore() }
+            }
             HomeCategoryGridRow(
                 items = itemsChunk,
                 columns = columns,
@@ -1519,6 +1578,8 @@ private fun HomeCatalogSelectionPhonePreview() {
                 onCardClick = {},
                 initialFocusItem = previewMovieRowAlt.items.first(),
                 initialFocusRequester = FocusRequester(),
+                visibleItemCount = GRID_PAGE_SIZE,
+                onLoadMore = {},
             )
         }
     }
@@ -1562,6 +1623,8 @@ private fun HomeCatalogSelectionTvPreview() {
                 onCardClick = {},
                 initialFocusItem = previewMovieRowAlt.items.first(),
                 initialFocusRequester = FocusRequester(),
+                visibleItemCount = GRID_PAGE_SIZE,
+                onLoadMore = {},
             )
         }
     }
