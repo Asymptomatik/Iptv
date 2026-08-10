@@ -283,7 +283,19 @@ private fun SettingsContent(
                             value = uiState.password,
                             onValueChange = onPasswordChange,
                             label = { Text("Mot de passe") },
-                            placeholder = { Text("Laisser vide pour ne pas changer") },
+                            // QA finding N13: this used to be a `placeholder`, which Material 3
+                            // only reveals once the field has focus — so the one thing the user
+                            // needs *before* deciding whether to touch the field ("does saving
+                            // with an empty box wipe my password?", it does not, see
+                            // SettingsViewModel.onSaveCredentials) was invisible until too late.
+                            // As supporting text it is always on screen.
+                            supportingText = {
+                                Text(
+                                    text = "Laisser vide pour ne pas changer",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextSecondary,
+                                )
+                            },
                             singleLine = true,
                             enabled = !uiState.isLoading,
                             visualTransformation = if (uiState.isPasswordVisible) {
@@ -322,27 +334,7 @@ private fun SettingsContent(
                         )
                     }
 
-                    if (uiState.errorMessage != null) {
-                        Spacer(modifier = Modifier.height(Spacing.md))
-                        Text(
-                            text = uiState.errorMessage,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = SemanticError,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
-
-                    if (uiState.infoMessage != null) {
-                        Spacer(modifier = Modifier.height(Spacing.md))
-                        Text(
-                            text = uiState.infoMessage,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary,
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    }
+                    SettingsMessages(uiState, SettingsMessageSection.CREDENTIALS)
 
                     Spacer(modifier = Modifier.height(Spacing.lg))
 
@@ -416,6 +408,8 @@ private fun SettingsContent(
                         onClick = onLogout,
                         modifier = Modifier.fillMaxWidth(),
                     )
+
+                    SettingsMessages(uiState, SettingsMessageSection.ACTIONS)
                 }
             }
 
@@ -453,6 +447,39 @@ private fun SettingsContent(
 
             Spacer(modifier = Modifier.height(Spacing.xl))
         }
+    }
+}
+
+/**
+ * Renders [SettingsUiState.errorMessage] / [SettingsUiState.infoMessage], but only inside the
+ * [section] they came from — the reload confirmations used to be printed in the credentials card,
+ * out of sight of the button that produced them (QA finding N12). Emits nothing when there is no
+ * message, or when the current message belongs to the other section.
+ */
+@Composable
+private fun SettingsMessages(uiState: SettingsUiState, section: SettingsMessageSection) {
+    if (uiState.messageSection != section) return
+
+    uiState.errorMessage?.let { message ->
+        Spacer(modifier = Modifier.height(Spacing.md))
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodySmall,
+            color = SemanticError,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+
+    uiState.infoMessage?.let { message ->
+        Spacer(modifier = Modifier.height(Spacing.md))
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodySmall,
+            color = TextSecondary,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 

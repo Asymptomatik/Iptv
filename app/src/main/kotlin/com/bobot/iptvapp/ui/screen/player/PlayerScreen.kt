@@ -5,6 +5,8 @@ import android.content.pm.PackageManager
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -267,6 +269,28 @@ fun PlayerScreen(
         }
 
         if (!uiState.hasError) {
+            // ── Dimming scrim (QA finding N10) ───────────────────────────────
+            // The bottom bar has always carried its own gradient, but the floating centre
+            // cluster sits bare over the picture, and on a bright frame its translucent discs
+            // all but disappeared. One scrim across the whole surface fixes the centre cluster
+            // and deepens the bottom bar at the same time.
+            //
+            // No `pointerInput` on it: with nothing consuming pointer events it stays invisible
+            // to touch, so tap-to-hide still reaches the root Box underneath. It is also skipped
+            // while the track selector is open, which brings its own, heavier scrim.
+            AnimatedVisibility(
+                visible = controlsVisible && !trackSelectorVisible,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier.matchParentSize(),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.35f)),
+                )
+            }
+
             // Floating, transparent seek/play/seek cluster. Visible only while not buffering so
             // it never overlaps the centered buffering spinner above (mutually exclusive).
             // Both control clusters step aside while the track selector is open. The scrim
@@ -286,11 +310,17 @@ fun PlayerScreen(
                 )
             }
 
+            // QA finding N11: on TV the bar sat flush against the bottom edge, right on top of
+            // the subtitles burned into the picture. Those pixels are part of the video and
+            // cannot be moved, so the bar moves instead — lifting it by the height of a two-line
+            // subtitle leaves the band below it clear. Phones keep the bar on the edge: there is
+            // far less height to give away, and the burned-in band is proportionally smaller.
             AnimatedVisibility(
                 visible = controlsVisible && !trackSelectorVisible,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .fillMaxWidth(),
+                    .fillMaxWidth()
+                    .padding(bottom = if (isTv) SUBTITLE_SAFE_BOTTOM_TV else 0.dp),
             ) {
                 PlayerControlsOverlay(
                     uiState = uiState,
@@ -558,6 +588,32 @@ private fun PlayerCenterControls(
 }
 
 /**
+ * Bottom inset applied to the control bar on TV so it clears the subtitle band burned into the
+ * video — see the call site in [PlayerScreen] (QA finding N11).
+ */
+private val SUBTITLE_SAFE_BOTTOM_TV = 72.dp
+
+/**
+ * Shared look of the player's circular controls (QA finding N10).
+ *
+ * These buttons float over live video, so they cannot borrow contrast from a background that is
+ * under someone else's control. They used to be a white wash at 10% opacity with a slightly
+ * brighter one at 18% for focus — legible over a night scene, invisible over a snowfield, and on
+ * TV the difference between the two states was too slight to tell where the D-pad was.
+ *
+ * Resting state is therefore a near-opaque dark disc with a faint rim, and focus swaps it for a
+ * filled accent disc ringed in white. Neither depends on what is playing underneath.
+ */
+internal fun Modifier.playerControlSurface(isFocused: Boolean): Modifier = this
+    .clip(CircleShape)
+    .background(if (isFocused) AccentSolid else Color.Black.copy(alpha = 0.55f))
+    .border(
+        width = if (isFocused) CardDimens.FocusBorderWidth else 1.dp,
+        color = if (isFocused) Color.White else Color.White.copy(alpha = 0.35f),
+        shape = CircleShape,
+    )
+
+/**
  * Glass circular seek button — clearly labeled with Unicode arrow + "10 s" text.
  */
 @Composable
@@ -572,13 +628,7 @@ private fun PlayerSeekButton(
     Box(
         contentAlignment = Alignment.Center,
         modifier = modifier
-            .clip(CircleShape)
-            .background(Color.White.copy(alpha = if (isFocused) 0.18f else 0.10f))
-            .border(
-                width = if (isFocused) CardDimens.FocusBorderWidth else 0.dp,
-                color = if (isFocused) AccentSolid else Color.Transparent,
-                shape = CircleShape,
-            )
+            .playerControlSurface(isFocused)
             .onFocusChanged { focusState -> isFocused = focusState.isFocused }
             .clickable(onClickLabel = contentDescription, onClick = onClick)
             .padding(horizontal = Spacing.sm2, vertical = Spacing.sm),
@@ -620,13 +670,7 @@ private fun PlayerOrientationToggleButton(
         contentAlignment = Alignment.Center,
         modifier = modifier
             .size(40.dp)
-            .clip(CircleShape)
-            .background(Color.White.copy(alpha = if (isFocused) 0.18f else 0.10f))
-            .border(
-                width = if (isFocused) CardDimens.FocusBorderWidth else 0.dp,
-                color = if (isFocused) AccentSolid else Color.Transparent,
-                shape = CircleShape,
-            )
+            .playerControlSurface(isFocused)
             .onFocusChanged { focusState -> isFocused = focusState.isFocused }
             .clickable(onClickLabel = contentDescription, onClick = onClick)
             .padding(Spacing.sm),
@@ -663,16 +707,7 @@ private fun PlayerPlayPauseButton(
         contentAlignment = Alignment.Center,
         modifier = modifier
             .size(64.dp)
-            .clip(CircleShape)
-            .background(
-                if (isFocused) AccentSolid.copy(alpha = 0.85f)
-                else Color.White.copy(alpha = 0.15f)
-            )
-            .border(
-                width = if (isFocused) CardDimens.FocusBorderWidth else 0.dp,
-                color = if (isFocused) AccentSolid else Color.Transparent,
-                shape = CircleShape,
-            )
+            .playerControlSurface(isFocused)
             .onFocusChanged { focusState -> isFocused = focusState.isFocused }
             .clickable(
                 onClickLabel = if (isPlaying) "Mettre en pause" else "Lecture",

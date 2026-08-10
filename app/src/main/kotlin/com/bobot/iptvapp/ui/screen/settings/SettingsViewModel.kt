@@ -40,6 +40,9 @@ import javax.inject.Inject
  * @property infoMessage        Human-readable confirmation from the last successful action (save
  *                               or catalog reload), or `null` when there is nothing to show.
  *                               Cleared the same way as [errorMessage].
+ * @property messageSection     Which block of the screen [errorMessage] / [infoMessage] belong
+ *                               to, so the confirmation is rendered next to the control that
+ *                               produced it (QA finding N12). Ignored when both messages are null.
  * @property isLoggedOut        One-shot success signal. Becomes `true` exactly once
  *                               [SettingsViewModel.onLogout] finishes clearing the persisted
  *                               credentials; [SettingsScreen] observes this to trigger navigation
@@ -51,6 +54,16 @@ import javax.inject.Inject
  *                               (downloads allowed on any network) to match the preference store's
  *                               own default before the first emission arrives.
  */
+/**
+ * The block of [SettingsScreen] a message belongs to.
+ *
+ * Reload confirmations used to be rendered inside the credentials card, several hundred pixels
+ * above the button that triggered them and off-screen entirely once the user had scrolled down to
+ * press it (QA finding N12). Tagging the message with its origin is enough for the screen to place
+ * it correctly, and keeps a single message slot in the state rather than one per section.
+ */
+enum class SettingsMessageSection { CREDENTIALS, ACTIONS }
+
 data class SettingsUiState(
     val serverUrl: String = "",
     val username: String = "",
@@ -59,6 +72,7 @@ data class SettingsUiState(
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
     val infoMessage: String? = null,
+    val messageSection: SettingsMessageSection = SettingsMessageSection.CREDENTIALS,
     val isLoggedOut: Boolean = false,
     val isWifiOnlyDownloads: Boolean = false,
     val isLogoutConfirmationVisible: Boolean = false,
@@ -174,7 +188,10 @@ class SettingsViewModel @Inject constructor(
 
         if (baseUrl.isBlank() || username.isBlank()) {
             _uiState.update {
-                it.copy(errorMessage = "Veuillez renseigner l'URL du serveur et l'identifiant.")
+                it.copy(
+                    errorMessage = "Veuillez renseigner l'URL du serveur et l'identifiant.",
+                    messageSection = SettingsMessageSection.CREDENTIALS,
+                )
             }
             return
         }
@@ -185,7 +202,10 @@ class SettingsViewModel @Inject constructor(
         val effectivePassword = typedPassword.ifBlank { lastKnownGoodCredentials?.password.orEmpty() }
         if (effectivePassword.isBlank()) {
             _uiState.update {
-                it.copy(errorMessage = "Veuillez renseigner un mot de passe.")
+                it.copy(
+                    errorMessage = "Veuillez renseigner un mot de passe.",
+                    messageSection = SettingsMessageSection.CREDENTIALS,
+                )
             }
             return
         }
@@ -206,6 +226,7 @@ class SettingsViewModel @Inject constructor(
                             isLoading = false,
                             password = "",
                             infoMessage = "Identifiants mis à jour avec succès.",
+                            messageSection = SettingsMessageSection.CREDENTIALS,
                         )
                     }
                 }
@@ -226,6 +247,7 @@ class SettingsViewModel @Inject constructor(
                         it.copy(
                             isLoading = false,
                             errorMessage = errorMessageFor(result),
+                            messageSection = SettingsMessageSection.CREDENTIALS,
                         )
                     }
                 }
@@ -276,13 +298,19 @@ class SettingsViewModel @Inject constructor(
      * [viewModelScope] launch.
      *
      * The confirmation is shown immediately rather than after the marker clear completes: it
-     * acknowledges the request, and the Room write is best-effort with nothing to report.
+     * acknowledges the request, and the Room write is best-effort with nothing to report. It is
+     * tagged [SettingsMessageSection.ACTIONS] so it appears under the reload buttons rather than
+     * in the credentials card above them (QA finding N12).
      */
     private fun reloadCatalog(type: ContentType, confirmationMessage: String) {
         catalogRepository.invalidateCache(type)
         viewModelScope.launch { catalogRepository.invalidatePersistentCache(type) }
         _uiState.update {
-            it.copy(errorMessage = null, infoMessage = confirmationMessage)
+            it.copy(
+                errorMessage = null,
+                infoMessage = confirmationMessage,
+                messageSection = SettingsMessageSection.ACTIONS,
+            )
         }
     }
 
