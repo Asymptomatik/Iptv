@@ -252,9 +252,9 @@ class RemoteXtreamSource @Inject constructor(
      *
      * **Note on ID semantics**: The Xtream Codes `get_short_epg` endpoint accepts a
      * numeric `stream_id` (the same as [com.bobot.iptvapp.domain.model.Channel.id]).
-     * Pass [Channel.id] from the caller, not [Channel.epgChannelId].
-     * The [FakeXtreamSource] uses [Channel.epgChannelId] as its key — the distinction
-     * is handled at the caller (repository) level.
+     * Pass [Channel.id] from the caller, not [Channel.epgChannelId] — as of QA finding N3 the
+     * [FakeXtreamSource] takes the same id, so there is no longer a per-source distinction for
+     * callers to handle.
      */
     override suspend fun getShortEpg(channelId: String, limit: Int?): List<EpgProgram> {
         val (api, creds) = resolveApi()
@@ -265,7 +265,7 @@ class RemoteXtreamSource @Inject constructor(
                 action = XtreamApi.Action.GET_SHORT_EPG,
                 streamId = channelId,
                 limit = limit,
-            ).toDomain()
+            ).toDomain(fallbackChannelId = channelId)
         }
     }
 }

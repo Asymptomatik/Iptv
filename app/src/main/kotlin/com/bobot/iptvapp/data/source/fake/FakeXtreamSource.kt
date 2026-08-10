@@ -114,9 +114,16 @@ class FakeXtreamSource @Inject constructor() : CatalogDataSource {
      *  - Slot 1 (index 1): now playing     — [hourStart, hourStart + 1h)
      *  - Slot 2 (index 2): next            — [hourStart + 1h, hourStart + 2h)
      *  - Slot 3 (index 3): next+1          — [hourStart + 2h, hourStart + 3h)
+     *
+     * [channelId] is a [Channel.id] (numeric `stream_id`), like the real endpoint takes —
+     * see [CatalogDataSource.getShortEpg]. [EPG_DATA] stays keyed by XMLTV id because that is
+     * what reads naturally next to the programme titles, so the channel is looked up first to
+     * translate one into the other. A channel with no [Channel.epgChannelId] resolves to no
+     * entries, which is the "channel the provider has no schedule for" case this fake models.
      */
     private fun buildEpgPrograms(channelId: String): List<EpgProgram> {
-        val entries = EPG_DATA[channelId] ?: return emptyList()
+        val epgChannelId = ALL_CHANNELS.find { it.id == channelId }?.epgChannelId
+        val entries = EPG_DATA[epgChannelId] ?: return emptyList()
         val now = System.currentTimeMillis()
         val slotMs = HOUR_MS
         val hourStart = now - (now % slotMs)

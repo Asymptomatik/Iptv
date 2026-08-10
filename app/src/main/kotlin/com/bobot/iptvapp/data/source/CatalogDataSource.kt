@@ -105,10 +105,13 @@ interface CatalogDataSource {
     /**
      * Returns EPG programme entries for a live channel.
      *
-     * [channelId] matches [com.bobot.iptvapp.domain.model.Channel.epgChannelId].
-     * Channels without an [epgChannelId] have no EPG data — return an empty list for those.
+     * [channelId] is a [com.bobot.iptvapp.domain.model.Channel.id] — the numeric `stream_id`
+     * the Xtream `get_short_epg` endpoint keys on, *not* the XMLTV
+     * [com.bobot.iptvapp.domain.model.Channel.epgChannelId]. Implementations that index their
+     * schedule by XMLTV id must translate (QA finding N3: the fake used to take the XMLTV id
+     * here, so every real request answered with an empty listing).
      *
-     * @param channelId The EPG channel identifier (e.g. "bbc.world").
+     * @param channelId The numeric stream identifier (e.g. "101").
      * @param limit     Maximum number of entries to return. Pass `null` for all available.
      * @return An empty list when [channelId] is unknown or has no EPG data.
      */
