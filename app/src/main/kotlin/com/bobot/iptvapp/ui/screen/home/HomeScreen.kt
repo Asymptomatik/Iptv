@@ -24,6 +24,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Tab
@@ -363,6 +366,7 @@ private fun HomeHeader(
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         HomeTopBar(
+            selectedTab = selectedTab,
             onNavigateToSearch = onNavigateToSearch,
             onNavigateToSettings = onNavigateToSettings,
             onNavigateToDownloads = onNavigateToDownloads,
@@ -380,8 +384,23 @@ private fun HomeHeader(
     }
 }
 
+/**
+ * Home top bar — screen title plus the Recherche / Téléchargements / Réglages links.
+ *
+ * ## Title (QA finding N1)
+ * The title follows [selectedTab] rather than being pinned to "Accueil". The tab bar right
+ * below shows the same word, but the title is what the collapsed bar keeps once the tabs
+ * scroll under it, so it is the only thing telling the user which catalog they are in.
+ *
+ * ## Phone actions are icons (QA finding N2)
+ * Spelled out, the three links measure wider than a phone's top bar, and [Arrangement.SpaceBetween]
+ * resolved that by ellipsising them into "Recherche" / "Téléch…" / "Regl…". Phones therefore get
+ * icon buttons — the label survives as `contentDescription`, so TalkBack still announces it —
+ * while TV keeps the text, having both the width for it and no pointer to hover for a tooltip.
+ */
 @Composable
 private fun HomeTopBar(
+    selectedTab: HomeTab,
     onNavigateToSearch: () -> Unit,
     onNavigateToSettings: () -> Unit,
     onNavigateToDownloads: () -> Unit,
@@ -412,15 +431,36 @@ private fun HomeTopBar(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = "Accueil",
+            text = selectedTab.label,
             style = MaterialTheme.typography.headlineSmall,
             color = TextPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
         )
 
         Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm)) {
-            FocusableTextButton(label = "Recherche", onClick = onNavigateToSearch)
-            FocusableTextButton(label = "Téléchargements", onClick = onNavigateToDownloads)
-            FocusableTextButton(label = "Reglages", onClick = onNavigateToSettings)
+            if (isTv) {
+                FocusableTextButton(label = "Recherche", onClick = onNavigateToSearch)
+                FocusableTextButton(label = "Téléchargements", onClick = onNavigateToDownloads)
+                FocusableTextButton(label = "Réglages", onClick = onNavigateToSettings)
+            } else {
+                GlassIconButton(
+                    icon = Icons.Default.Search,
+                    contentDescription = "Recherche",
+                    onClick = onNavigateToSearch,
+                )
+                GlassIconButton(
+                    icon = Icons.AutoMirrored.Filled.List,
+                    contentDescription = "Téléchargements",
+                    onClick = onNavigateToDownloads,
+                )
+                GlassIconButton(
+                    icon = Icons.Default.Settings,
+                    contentDescription = "Réglages",
+                    onClick = onNavigateToSettings,
+                )
+            }
         }
     }
 }

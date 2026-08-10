@@ -36,10 +36,10 @@ object CategoryLanguage {
      * `U+205F`, `U+3000`); the union with `\s` keeps the ASCII control whitespace (tab, newline, …)
      * that `\p{Zs}` does not itself include.
      */
-    private const val WS = "[\\s\\p{Zs}]"
+    internal const val WS = "[\\s\\p{Zs}]"
 
     /** Negation of [WS] — the Unicode-aware counterpart of the ASCII-only `\S`. */
-    private const val NON_WS = "[^\\s\\p{Zs}]"
+    internal const val NON_WS = "[^\\s\\p{Zs}]"
 
     /**
      * Matches a leading 2-3 letter alphabetic tag followed by one of the common delimiters
@@ -106,8 +106,7 @@ object CategoryLanguage {
      * `false` for the non-breaking spaces. Without this, a name such as `"<U+00A0>FR | Sport"` would
      * keep its leading `U+00A0`, and the `^` anchor of every pattern above would fail to match.
      */
-    private fun String.trimSpaces(): String =
-        trim { it.isWhitespace() || it.category == CharCategory.SPACE_SEPARATOR }
+    private fun String.trimSpaces(): String = trimUnicodeSpaces()
 
     /**
      * Extracts the language tag from [name], or `null` when no recognised pattern is found.
@@ -163,6 +162,17 @@ object CategoryLanguage {
         return trimmed
     }
 }
+
+/**
+ * Trims leading and trailing whitespace **including** the Unicode space separators
+ * ([CharCategory.SPACE_SEPARATOR], e.g. the non-breaking space) that providers sprinkle around
+ * their prefixes and that `String.trim()` alone leaves in place.
+ *
+ * Shared with [StreamTitle], which strips the same family of prefixes off stream titles rather
+ * than off category names.
+ */
+internal fun String.trimUnicodeSpaces(): String =
+    trim { it.isWhitespace() || it.category == CharCategory.SPACE_SEPARATOR }
 
 /**
  * Convenience accessor for [CategoryLanguage.extractLanguageTag] applied to this category's

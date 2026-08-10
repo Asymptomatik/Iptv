@@ -36,6 +36,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.bobot.iptvapp.domain.model.DownloadState
 import com.bobot.iptvapp.domain.model.OfflineDownload
+import com.bobot.iptvapp.domain.util.StreamTitle
 import com.bobot.iptvapp.ui.components.FocusableTextButton
 import com.bobot.iptvapp.ui.components.GhostButton
 import com.bobot.iptvapp.ui.components.GlassSurface
@@ -174,7 +175,10 @@ private fun DownloadCard(
             )
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = download.title,
+                    // Downloads enqueued from now on already store the stripped title (QA finding
+                    // N4); stripping again here costs nothing and also cleans up the rows that
+                    // were enqueued before, which keep the provider prefix in the database.
+                    text = StreamTitle.displayTitle(download.title),
                     style = MaterialTheme.typography.titleMedium,
                     color = TextPrimary,
                     maxLines = 2,

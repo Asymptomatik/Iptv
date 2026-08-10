@@ -6,6 +6,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -26,8 +27,6 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.RoundRect
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -43,7 +42,6 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.bobot.iptvapp.ui.theme.AccentGlow
 import com.bobot.iptvapp.ui.theme.AccentGradient
-import com.bobot.iptvapp.ui.theme.BackgroundBase
 import com.bobot.iptvapp.ui.theme.BackgroundElevated
 import com.bobot.iptvapp.ui.theme.CardDimens
 import com.bobot.iptvapp.ui.theme.GlassBorderStrong
@@ -81,7 +79,7 @@ import com.bobot.iptvapp.ui.theme.TextPrimary
  *  - The [Path] object is `remember`ed and reset+rebuilt inside the `drawBehind` lambda
  *    (which runs on the draw thread — Path reset is safe here; no heap allocation of the
  *    object itself per frame).
- *  - The gradient [Brush] for the focus ring is re-derived only when [focusRingAlpha]
+ *  - The gradient brush for the focus ring is re-derived only when [focusRingAlpha]
  *    changes (via a remembered lambda capture), avoiding `Brush.linearGradient(...)` and
  *    per-colour `.copy(alpha = ...)` on every draw frame.
  *  - The two separate `drawBehind` blocks from T7 are merged into a single block so the
@@ -100,7 +98,8 @@ import com.bobot.iptvapp.ui.theme.TextPrimary
  * The original 5-parameter signature is unchanged. Three optional parameters are added
  * (all defaulting to `null` / `false`) so every existing call site compiles without
  * modification:
- *  - [progress]  — when non-null, draws a continue-watching progress bar at the bottom.
+ *  - [progress]  — when non-null, draws a continue-watching progress bar at the bottom of
+ *                  the artwork.
  *  - [badge]     — when non-null, renders a composable overlay in the top-left corner
  *                  (e.g. a LIVE pill).
  *  - [landscape] — when `true` the poster aspect ratio switches from 2:3 to 16:9.
@@ -108,13 +107,15 @@ import com.bobot.iptvapp.ui.theme.TextPrimary
  * This composable is **stateless** — it holds only transient UI focus state.
  * Content selection, loading, and navigation state must be hoisted by callers.
  *
- * @param title              Title displayed in the bottom gradient overlay.
+ * @param title              Title displayed below the poster (two lines, reserved even when
+ *                           the title is short so cards in a grid row stay aligned).
  * @param imageUrl           Poster URL loaded by Coil. Pass `null` for the placeholder.
  * @param onClick            Invoked on touch tap or D-pad Enter.
  * @param modifier           Caller-supplied modifier; typically sets the card width.
  * @param contentDescription Accessibility label; defaults to [title] when null.
- * @param progress           Optional progress value in [0, 1] for the continue-watching
- *                           bar. When `null` (default) no bar is shown.
+ * @param progress           Optional progress value in [0, 1] for the continue-watching bar
+ *                           drawn across the bottom of the artwork. When `null` (default) no
+ *                           bar is shown.
  * @param badge              Optional composable placed in the top-left corner (e.g. a
  *                           LIVE pill).  When `null` (default) nothing is placed there.
  * @param landscape          When `true` the card uses a 16:9 aspect ratio instead of the
@@ -177,7 +178,9 @@ fun FocusableCard(
     // itself is not heap-allocated per frame — only the geometry is recomputed.
     val focusRingPath = remember { Path() }
 
-    Box(
+    // Column, not Box: since QA finding N7 the title is stacked *under* the poster
+    // rather than overlaid on it.
+    Column(
         modifier = modifier
             // ── graphicsLayer: scale + upward lift at draw time ───────────────
             // Layout bounds stay fixed so neighbours and LazyRow arrangement are
@@ -254,91 +257,93 @@ fun FocusableCard(
             // clickable makes the node reachable by D-pad AND touch.
             .clickable(onClick = onClick),
     ) {
-        // ── Poster image ──────────────────────────────────────────────────────
-        // ColorPainter instances are created once per composition via remember.
-        val placeholderPainter = remember { ColorPainter(BackgroundElevated) }
-        val errorPainter       = remember { ColorPainter(BackgroundElevated) }
+        // ── Poster block ──────────────────────────────────────────────────────
+        // The artwork and everything drawn *on* it (badge, progress bar) live in
+        // this Box; the title lives below it, outside the image bounds.
+        Box(modifier = Modifier.fillMaxWidth()) {
+            // ColorPainter instances are created once per composition via remember.
+            val placeholderPainter = remember { ColorPainter(BackgroundElevated) }
+            val errorPainter       = remember { ColorPainter(BackgroundElevated) }
 
-        val aspectRatio = if (landscape) CardDimens.BannerAspectRatio else CardDimens.PosterAspectRatio
+            val aspectRatio =
+                if (landscape) CardDimens.BannerAspectRatio else CardDimens.PosterAspectRatio
 
-        AsyncImage(
-            model              = imageUrl,
-            contentDescription = contentDescription ?: title,
-            contentScale       = ContentScale.Crop,
-            modifier           = Modifier
-                .fillMaxWidth()
-                .aspectRatio(aspectRatio),
-            placeholder        = placeholderPainter,
-            error              = errorPainter,
-            fallback           = placeholderPainter,
-        )
+            AsyncImage(
+                model              = imageUrl,
+                contentDescription = contentDescription ?: title,
+                contentScale       = ContentScale.Crop,
+                modifier           = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(aspectRatio),
+                placeholder        = placeholderPainter,
+                error              = errorPainter,
+                fallback           = placeholderPainter,
+            )
 
-        // ── Title gradient overlay ────────────────────────────────────────────
-        // Semi-transparent gradient so the title is legible over any poster.
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .fillMaxWidth()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(
-                            Color.Transparent,
-                            BackgroundBase.copy(alpha = 0.9f),
-                        ),
+            // ── Optional: continue-watching progress bar ──────────────────────
+            // Pinned to the bottom of the *artwork*, which is also where the eye
+            // expects it — the title now sits underneath it.
+            // Using AccentGradient for the filled portion, matching the design spec
+            // `.card .progress > i { background: var(--accent-gradient) }`.
+            if (progress != null) {
+                val clampedProgress = progress.coerceIn(0f, 1f)
+                // Track — full-width 4 dp bar.
+                // styles.css .card .progress: rgba(255,255,255,0.14) — closest named
+                // token is GlassBorderStrong (0.18).  Using a solid token avoids a
+                // hardcoded hex while keeping the track visually subtle.
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .background(GlassBorderStrong),
+                ) {
+                    // Filled portion — gradient over the track.
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(clampedProgress)
+                            .height(4.dp)
+                            .background(brush = AccentGradient),
                     )
-                ),
-        ) {
-            Text(
-                text     = title,
-                style    = MaterialTheme.typography.labelLarge,
-                color    = TextPrimary,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(
+                }
+            }
+
+            // ── Optional: badge slot (top-left) ──────────────────────────────
+            // Callers supply arbitrary composable content (e.g. a LIVE pill).
+            if (badge != null) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(Spacing.sm),
+                ) {
+                    badge()
+                }
+            }
+        }
+
+        // ── Title ─────────────────────────────────────────────────────────────
+        // QA finding N7: this used to be a gradient overlay sitting *on* the
+        // poster, where two lines of text hid roughly a quarter of the artwork —
+        // including, on most posters, the printed title itself. It now sits below
+        // the image, on the card's own surface.
+        //
+        // `minLines = 2` is what keeps a grid row aligned: the cards in a row are
+        // laid out side by side with no common height, so a one-line title next to
+        // a two-line one would leave the shorter card's bottom edge floating.
+        Text(
+            text     = title,
+            style    = MaterialTheme.typography.labelLarge,
+            color    = TextPrimary,
+            minLines = 2,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(
                     horizontal = Spacing.sm,
                     vertical   = CardDimens.TitleVerticalPadding,
                 ),
-            )
-        }
-
-        // ── Optional: continue-watching progress bar ──────────────────────────
-        // Drawn at the very bottom of the card, above the title overlay.
-        // Using AccentGradient for the filled portion, matching the design spec
-        // `.card .progress > i { background: var(--accent-gradient) }`.
-        if (progress != null) {
-            val clampedProgress = progress.coerceIn(0f, 1f)
-            // Track — full-width 4 dp bar at the bottom of the card.
-            // styles.css .card .progress: rgba(255,255,255,0.14) — closest named
-            // token is GlassBorderStrong (0.18).  Using a solid token avoids a
-            // hardcoded hex while keeping the track visually subtle.
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .fillMaxWidth()
-                    .height(4.dp)
-                    .background(GlassBorderStrong),
-            ) {
-                // Filled portion — gradient over the track.
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(clampedProgress)
-                        .height(4.dp)
-                        .background(brush = AccentGradient),
-                )
-            }
-        }
-
-        // ── Optional: badge slot (top-left) ──────────────────────────────────
-        // Callers supply arbitrary composable content (e.g. a LIVE pill).
-        if (badge != null) {
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(Spacing.sm),
-            ) {
-                badge()
-            }
-        }
+        )
     }
 }
 

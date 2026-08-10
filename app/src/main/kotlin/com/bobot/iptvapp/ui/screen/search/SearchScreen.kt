@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyRow
@@ -17,6 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -30,11 +32,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.bobot.iptvapp.domain.model.ContentType
@@ -69,10 +73,13 @@ import com.bobot.iptvapp.ui.util.rememberIsTvDevice
  * Filter state is local UI state (no VM change) — it narrows the already-filtered
  * VM results client-side.
  *
+ * @param onNavigateBack     Pops back to the caller — see [SearchContent] for why the
+ *                           affordance is phone-only.
  * @param onNavigateToDetail Opens the detail screen for a clicked result.
  */
 @Composable
 fun SearchScreen(
+    onNavigateBack: () -> Unit,
     onNavigateToDetail: (contentType: String, contentId: String) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SearchViewModel = hiltViewModel(),
@@ -81,6 +88,7 @@ fun SearchScreen(
 
     SearchContent(
         uiState = uiState,
+        onNavigateBack = onNavigateBack,
         onQueryChange = viewModel::onQueryChange,
         onResultClick = { item -> onNavigateToDetail(item.contentType.toDetailContentType(), item.id) },
         onRetry = viewModel::onRetry,
@@ -102,10 +110,24 @@ private enum class SearchFilter { ALL, LIVE, MOVIE, SERIES }
 /**
  * Stateless content — separated from [SearchScreen] so it can be exercised directly in
  * `@Preview`s without a Hilt ViewModel.
+ *
+ * ## Back affordance (QA finding N8)
+ * The header row is rendered on phones only. Search is reached from the home top bar and used to
+ * be the one destination with no way out on a gesture-navigation phone, where Downloads — reached
+ * from the same bar — has always had a "Retour" button. A TV has a physical Back key, and adding
+ * a button there would only insert one more focus stop above the query field.
+ *
+ * ## Explicit downward focus order (QA finding N14)
+ * On TV, a `DOWN` from the query field used to land on the language row, skipping the content-type
+ * chips (which were still reachable by coming back *up* from the languages). Rather than rely on
+ * Compose's geometric focus search across three stacked lazy rows, the field now declares its
+ * `down` target explicitly. [FocusRequester.Default] restores the default search whenever the
+ * type row is not composed — pointing `down` at a requester attached to nothing throws.
  */
 @Composable
 private fun SearchContent(
     uiState: SearchUiState,
+    onNavigateBack: () -> Unit = { },
     onQueryChange: (String) -> Unit,
     onResultClick: (SearchResultItem) -> Unit,
     onRetry: () -> Unit,
@@ -115,7 +137,10 @@ private fun SearchContent(
     val isTv = rememberIsTvDevice()
     val horizontalPadding = if (isTv) LayoutDimens.ContentPaddingTv else LayoutDimens.ContentPaddingPhone
     val queryFocusRequester = remember { FocusRequester() }
+    val typeFilterFocusRequester = remember { FocusRequester() }
     var activeFilter by remember { mutableStateOf(SearchFilter.ALL) }
+
+    val typeFilterRowVisible = uiState.hasAnyResults || uiState.query.isNotBlank()
 
     LaunchedEffect(Unit) {
         runCatching { queryFocusRequester.requestFocus() }
@@ -124,18 +149,38 @@ private fun SearchContent(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(BackgroundBase),
+            .background(BackgroundBase)
+            .statusBarsPadding(),
     ) {
+        if (!isTv) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = horizontalPadding, vertical = Spacing.md),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Spacing.md),
+            ) {
+                FocusableTextButton(label = "Retour", onClick = onNavigateBack)
+                Text(
+                    text = "Recherche",
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = TextPrimary,
+                )
+            }
+        }
+
         // Glass search field
         SearchField(
             query = uiState.query,
             onQueryChange = onQueryChange,
             focusRequester = queryFocusRequester,
+            downFocusRequester =
+                if (typeFilterRowVisible) typeFilterFocusRequester else FocusRequester.Default,
             horizontalPadding = horizontalPadding,
         )
 
         // CategoryChip filter row
-        if (uiState.hasAnyResults || uiState.query.isNotBlank()) {
+        if (typeFilterRowVisible) {
             LazyRow(
                 contentPadding = PaddingValues(
                     horizontal = horizontalPadding,
@@ -148,6 +193,8 @@ private fun SearchContent(
                         label = "Tout",
                         selected = activeFilter == SearchFilter.ALL,
                         onClick = { activeFilter = SearchFilter.ALL },
+                        // The chip a DOWN from the query field must land on — see the KDoc.
+                        modifier = Modifier.focusRequester(typeFilterFocusRequester),
                     )
                 }
                 item {
@@ -261,18 +308,23 @@ private fun SearchLanguageFilterRow(
 
 // ─── Glass search field ──────────────────────────────────────────────────────
 
+/**
+ * @param downFocusRequester Where a `DOWN` from the field goes. Pass [FocusRequester.Default] to
+ *                           fall back to Compose's own focus search — see [SearchContent]'s KDoc
+ *                           (QA finding N14).
+ */
 @Composable
 private fun SearchField(
     query: String,
     onQueryChange: (String) -> Unit,
     focusRequester: FocusRequester,
+    downFocusRequester: FocusRequester,
     horizontalPadding: Dp,
 ) {
     // Wrap in glassSurface to give the field a glass backing
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .statusBarsPadding()
             .padding(horizontal = horizontalPadding, vertical = Spacing.md)
             .glassSurface(shape = RoundedCornerShape(RadiusMd)),
     ) {
@@ -287,6 +339,7 @@ private fun SearchField(
             modifier = Modifier
                 .fillMaxWidth()
                 .focusRequester(focusRequester)
+                .focusProperties { down = downFocusRequester }
                 .dpadFocusEscape(),
         )
     }
@@ -433,6 +486,7 @@ private fun SearchResultsContent(
             searchSection(
                 sectionTitle = "Chaînes",
                 resultItems = uiState.liveResults,
+                stillLoading = uiState.isLoading,
                 horizontalPadding = horizontalPadding,
                 cardWidth = cardWidth,
                 onResultClick = onResultClick,
@@ -443,6 +497,7 @@ private fun SearchResultsContent(
             searchSection(
                 sectionTitle = "Films",
                 resultItems = uiState.movieResults,
+                stillLoading = uiState.isLoading,
                 horizontalPadding = horizontalPadding,
                 cardWidth = cardWidth,
                 onResultClick = onResultClick,
@@ -453,6 +508,7 @@ private fun SearchResultsContent(
             searchSection(
                 sectionTitle = "Séries",
                 resultItems = uiState.seriesResults,
+                stillLoading = uiState.isLoading,
                 horizontalPadding = horizontalPadding,
                 cardWidth = cardWidth,
                 onResultClick = onResultClick,
@@ -487,24 +543,57 @@ private fun SearchErrorBanner(
 
 /**
  * Adds one section (header + a single lazy row) to the enclosing [LazyColumn].
- * No-ops when [resultItems] is empty.
  * Uses vertical [LayoutDimens.LazyRowFocusPadding] on the LazyRow so focused card
  * glow/scale is not clipped at the row boundaries.
+ *
+ * ## Per-section progress (QA finding N9)
+ * The search walks the catalog category by category, so the three sections fill in one after the
+ * other. The section used to be skipped entirely while it was still empty, which is why results
+ * seemed to pop in at random with nothing to explain the wait.
+ *
+ * While [stillLoading] is `true` the section is therefore always rendered: its header carries a
+ * thin indeterminate bar, and an empty section shows "Recherche en cours…" instead of vanishing.
+ * Once the search settles, an empty section disappears exactly as before — a permanently empty
+ * "Séries" header would be noise.
  */
 private fun LazyListScope.searchSection(
     sectionTitle: String,
     resultItems: List<SearchResultItem>,
+    stillLoading: Boolean,
     horizontalPadding: Dp,
     cardWidth: Dp,
     onResultClick: (SearchResultItem) -> Unit,
 ) {
-    if (resultItems.isEmpty()) return
+    if (resultItems.isEmpty() && !stillLoading) return
 
     item(key = "section-$sectionTitle") {
         SectionTitle(
             title = sectionTitle,
             modifier = Modifier.padding(horizontal = horizontalPadding, vertical = Spacing.xs),
+            trailingAction = if (stillLoading) {
+                {
+                    LinearProgressIndicator(
+                        color = AccentSolid,
+                        trackColor = BackgroundElevated,
+                        modifier = Modifier.width(56.dp),
+                    )
+                }
+            } else {
+                null
+            },
         )
+    }
+
+    if (resultItems.isEmpty()) {
+        item(key = "pending-$sectionTitle") {
+            Text(
+                text = "Recherche en cours…",
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary,
+                modifier = Modifier.padding(horizontal = horizontalPadding, vertical = Spacing.sm),
+            )
+        }
+        return
     }
 
     item(key = "row-$sectionTitle") {

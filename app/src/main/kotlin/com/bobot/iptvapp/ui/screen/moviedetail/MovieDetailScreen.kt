@@ -43,6 +43,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.bobot.iptvapp.domain.model.DownloadState
 import com.bobot.iptvapp.domain.model.Movie
+import com.bobot.iptvapp.domain.util.displayTitle
 import com.bobot.iptvapp.ui.components.CategoryChip
 import com.bobot.iptvapp.ui.components.FocusableTextButton
 import com.bobot.iptvapp.ui.components.GhostButton
@@ -317,7 +318,7 @@ private fun MovieDetailHero(movie: Movie, horizontalPadding: Dp) {
 
         AsyncImage(
             model = movie.posterUrl,
-            contentDescription = movie.title,
+            contentDescription = movie.displayTitle(),
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),
             placeholder = placeholder,
@@ -353,7 +354,7 @@ private fun MovieDetailHero(movie: Movie, horizontalPadding: Dp) {
             )
             Spacer(modifier = Modifier.height(Spacing.xs))
             Text(
-                text = movie.title,
+                text = movie.displayTitle(),
                 style = MaterialTheme.typography.headlineLarge,
                 color = TextPrimary,
             )

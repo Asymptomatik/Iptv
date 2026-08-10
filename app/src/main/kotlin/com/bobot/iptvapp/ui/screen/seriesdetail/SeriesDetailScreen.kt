@@ -57,6 +57,8 @@ import com.bobot.iptvapp.domain.model.DownloadState
 import com.bobot.iptvapp.domain.model.OfflineDownload
 import com.bobot.iptvapp.domain.model.Season
 import com.bobot.iptvapp.domain.model.Series
+import com.bobot.iptvapp.domain.util.displayLabel
+import com.bobot.iptvapp.domain.util.displayTitle
 import com.bobot.iptvapp.ui.components.CategoryChip
 import com.bobot.iptvapp.ui.components.FocusableTextButton
 import com.bobot.iptvapp.ui.components.GhostButton
@@ -364,7 +366,7 @@ private fun SeriesDetailHero(series: Series, horizontalPadding: Dp) {
 
         AsyncImage(
             model = series.coverUrl,
-            contentDescription = series.title,
+            contentDescription = series.displayTitle(),
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),
             placeholder = placeholder,
@@ -398,7 +400,7 @@ private fun SeriesDetailHero(series: Series, horizontalPadding: Dp) {
             )
             Spacer(modifier = Modifier.height(Spacing.xs))
             Text(
-                text = series.title,
+                text = series.displayTitle(),
                 style = MaterialTheme.typography.headlineLarge,
                 color = TextPrimary,
             )
@@ -450,7 +452,7 @@ private fun SeriesSeasonSelector(
     ) {
         items(seasons, key = { it.seasonNumber }) { season ->
             CategoryChip(
-                label = season.name?.takeIf { it.isNotBlank() } ?: "Saison ${season.seasonNumber}",
+                label = season.displayLabel(),
                 selected = season.seasonNumber == selectedSeasonNumber,
                 onClick = { onSeasonSelected(season.seasonNumber) },
             )
