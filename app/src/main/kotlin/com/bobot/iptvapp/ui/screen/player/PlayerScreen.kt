@@ -74,6 +74,7 @@ import com.bobot.iptvapp.ui.theme.BackgroundSunken
 import com.bobot.iptvapp.ui.theme.CardDimens
 import com.bobot.iptvapp.ui.theme.IptvAppTheme
 import com.bobot.iptvapp.ui.theme.SemanticError
+import com.bobot.iptvapp.ui.theme.SemanticLive
 import com.bobot.iptvapp.ui.theme.Spacing
 import com.bobot.iptvapp.ui.theme.TextPrimary
 import com.bobot.iptvapp.ui.theme.TextSecondary
@@ -303,6 +304,7 @@ fun PlayerScreen(
             ) {
                 PlayerCenterControls(
                     isPlaying = uiState.isPlaying,
+                    isLive = uiState.isLive,
                     onSeekBackward = viewModel::seekBackward,
                     onSeekForward = viewModel::seekForward,
                     onTogglePlayPause = viewModel::togglePlayPause,
@@ -427,6 +429,12 @@ private fun PlayerControlsOverlay(
     val durationKnown = uiState.durationMs > 0
     val sliderRange = if (durationKnown) uiState.durationMs.toFloat() else 1f
 
+    // QA finding N5: a live channel has no seekable timeline. The scrub bar used to render
+    // permanently disabled at 0 %, the position label froze the moment playback paused and the
+    // duration label never appeared — three widgets promising a timeline that does not exist.
+    // On live we drop all three and show the same "EN DIRECT" pill the live detail screen uses.
+    val isLive = uiState.isLive
+
     // Glass overlay scrim — gradient from transparent at top to dark at bottom
     Box(
         modifier = modifier
@@ -441,46 +449,48 @@ private fun PlayerControlsOverlay(
 
             // ── Scrub bar ──────────────────────────────────────────────────────
             // Custom track: white rgba bg track + AccentSolid active track colour (M3 Slider takes a Color, not a Brush).
-            Slider(
-                value = if (durationKnown) {
-                    displayedPositionMs.coerceIn(0L, sliderRange.toLong()).toFloat()
-                } else {
-                    0f
-                },
-                onValueChange = {
-                    onUserInteracted()
-                    dragPositionMs = it.toLong()
-                },
-                onValueChangeFinished = {
-                    dragPositionMs?.let(onSeekTo)
-                    dragPositionMs = null
-                },
-                valueRange = 0f..sliderRange,
-                enabled = durationKnown,
-                colors = SliderDefaults.colors(
-                    thumbColor = Color.White,
-                    activeTrackColor = AccentSolid,
-                    inactiveTrackColor = Color.White.copy(alpha = 0.25f),
-                    disabledThumbColor = Color.White.copy(alpha = 0.38f),
-                    disabledActiveTrackColor = AccentSolid.copy(alpha = 0.38f),
-                    disabledInactiveTrackColor = Color.White.copy(alpha = 0.12f),
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .onKeyEvent { event ->
-                        if (event.type == KeyEventType.KeyDown) {
-                            when (event.key) {
-                                Key.DirectionRight -> { onUserInteracted(); onSeekForward(); true }
-                                Key.DirectionLeft  -> { onUserInteracted(); onSeekBackward(); true }
-                                else               -> false
-                            }
-                        } else {
-                            false
-                        }
+            if (!isLive) {
+                Slider(
+                    value = if (durationKnown) {
+                        displayedPositionMs.coerceIn(0L, sliderRange.toLong()).toFloat()
+                    } else {
+                        0f
                     },
-            )
+                    onValueChange = {
+                        onUserInteracted()
+                        dragPositionMs = it.toLong()
+                    },
+                    onValueChangeFinished = {
+                        dragPositionMs?.let(onSeekTo)
+                        dragPositionMs = null
+                    },
+                    valueRange = 0f..sliderRange,
+                    enabled = durationKnown,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color.White,
+                        activeTrackColor = AccentSolid,
+                        inactiveTrackColor = Color.White.copy(alpha = 0.25f),
+                        disabledThumbColor = Color.White.copy(alpha = 0.38f),
+                        disabledActiveTrackColor = AccentSolid.copy(alpha = 0.38f),
+                        disabledInactiveTrackColor = Color.White.copy(alpha = 0.12f),
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown) {
+                                when (event.key) {
+                                    Key.DirectionRight -> { onUserInteracted(); onSeekForward(); true }
+                                    Key.DirectionLeft  -> { onUserInteracted(); onSeekBackward(); true }
+                                    else               -> false
+                                }
+                            } else {
+                                false
+                            }
+                        },
+                )
 
-            Spacer(modifier = Modifier.height(Spacing.xs))
+                Spacer(modifier = Modifier.height(Spacing.xs))
+            }
 
             // ── Controls row: [time (+ orientation) | reserved right zone] ──
             // The seek/play/seek cluster used to live here as a non-weighted center Row between
@@ -499,11 +509,15 @@ private fun PlayerControlsOverlay(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(Spacing.md),
                 ) {
-                    Text(
-                        text = formatTimeMs(displayedPositionMs),
-                        color = TextSecondary,
-                        style = MaterialTheme.typography.labelMedium,
-                    )
+                    if (isLive) {
+                        PlayerLiveIndicator()
+                    } else {
+                        Text(
+                            text = formatTimeMs(displayedPositionMs),
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
 
                     if (showOrientationButton) {
                         PlayerOrientationToggleButton(
@@ -522,12 +536,14 @@ private fun PlayerControlsOverlay(
                 }
             }
 
-            // Duration label below the controls row
+            // Duration label below the controls row. Suppressed on live even if the player
+            // happens to report a duration: on a live HLS source that value is the length of
+            // the sliding DVR window, not a total the viewer can navigate to.
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End,
             ) {
-                if (durationKnown) {
+                if (durationKnown && !isLive) {
                     Text(
                         text = formatTimeMs(uiState.durationMs),
                         color = TextSecondary,
@@ -550,10 +566,15 @@ private fun PlayerControlsOverlay(
  * [Box]'s `detectTapGestures` tap-to-toggle-controls handler in [PlayerScreen].
  *
  * Uniform across form factors (phone and TV) — no form-factor branching here.
+ *
+ * @param isLive Drops the two seek buttons, leaving play/pause alone in the middle of the screen
+ * (QA finding N5). [PlayerViewModel.seekTo] already refuses to move a live stream, so the buttons
+ * were dead controls; removing them also spares the D-pad two stops that did nothing.
  */
 @Composable
 private fun PlayerCenterControls(
     isPlaying: Boolean,
+    isLive: Boolean,
     onSeekBackward: () -> Unit,
     onSeekForward: () -> Unit,
     onTogglePlayPause: () -> Unit,
@@ -566,11 +587,13 @@ private fun PlayerCenterControls(
         horizontalArrangement = Arrangement.spacedBy(Spacing.lg),
     ) {
         // Seek back 10 s
-        PlayerSeekButton(
-            label = "↺ 10 s",
-            contentDescription = "Reculer de 10 secondes",
-            onClick = { onUserInteracted(); onSeekBackward() },
-        )
+        if (!isLive) {
+            PlayerSeekButton(
+                label = "↺ 10 s",
+                contentDescription = "Reculer de 10 secondes",
+                onClick = { onUserInteracted(); onSeekBackward() },
+            )
+        }
 
         // Play / Pause
         PlayerPlayPauseButton(
@@ -579,10 +602,39 @@ private fun PlayerCenterControls(
         )
 
         // Seek forward 10 s
-        PlayerSeekButton(
-            label = "10 s ↻",
-            contentDescription = "Avancer de 10 secondes",
-            onClick = { onUserInteracted(); onSeekForward() },
+        if (!isLive) {
+            PlayerSeekButton(
+                label = "10 s ↻",
+                contentDescription = "Avancer de 10 secondes",
+                onClick = { onUserInteracted(); onSeekForward() },
+            )
+        }
+    }
+}
+
+/**
+ * "● EN DIRECT" pill shown in place of the position/duration labels while a live channel plays
+ * (QA finding N5). Deliberately the same red-dot-plus-label shape as the hero badge on
+ * [com.bobot.iptvapp.ui.screen.livedetail.LiveDetailScreen], so a channel looks live in the same
+ * way before and during playback.
+ */
+@Composable
+private fun PlayerLiveIndicator(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(SemanticLive),
+        )
+        Text(
+            text = "EN DIRECT",
+            style = MaterialTheme.typography.labelMedium,
+            color = SemanticLive,
         )
     }
 }
@@ -842,6 +894,30 @@ private fun PlayerControlsOverlayPausedPreview() {
     }
 }
 
+@Preview(name = "PlayerControlsOverlay — live", showBackground = true, backgroundColor = 0xFF0A0A0F)
+@Composable
+private fun PlayerControlsOverlayLivePreview() {
+    IptvAppTheme {
+        PlayerControlsOverlay(
+            uiState = PlayerUiState(
+                isPlaying = true,
+                isBuffering = false,
+                currentPositionMs = 65_000L,
+                durationMs = 0L,
+                isLive = true,
+            ),
+            onSeekForward = {},
+            onSeekBackward = {},
+            onSeekTo = {},
+            onUserInteracted = {},
+            showOrientationButton = false,
+            portraitLocked = false,
+            onToggleOrientation = {},
+            onOpenTrackSelector = {},
+        )
+    }
+}
+
 @Preview(
     name = "PlayerControlsOverlay — orientation button (phone)",
     showBackground = true,
@@ -879,6 +955,27 @@ private fun PlayerCenterControlsPreview() {
         ) {
             PlayerCenterControls(
                 isPlaying = true,
+                isLive = false,
+                onSeekBackward = {},
+                onSeekForward = {},
+                onTogglePlayPause = {},
+                onUserInteracted = {},
+            )
+        }
+    }
+}
+
+@Preview(name = "PlayerCenterControls — live (no seek)", showBackground = true, backgroundColor = 0xFF0A0A0F)
+@Composable
+private fun PlayerCenterControlsLivePreview() {
+    IptvAppTheme {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center,
+        ) {
+            PlayerCenterControls(
+                isPlaying = true,
+                isLive = true,
                 onSeekBackward = {},
                 onSeekForward = {},
                 onTogglePlayPause = {},
