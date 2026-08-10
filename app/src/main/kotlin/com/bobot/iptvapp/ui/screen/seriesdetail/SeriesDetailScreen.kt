@@ -58,6 +58,7 @@ import com.bobot.iptvapp.domain.model.OfflineDownload
 import com.bobot.iptvapp.domain.model.Season
 import com.bobot.iptvapp.domain.model.Series
 import com.bobot.iptvapp.domain.util.displayLabel
+import com.bobot.iptvapp.domain.util.StreamTitle
 import com.bobot.iptvapp.domain.util.displayTitle
 import com.bobot.iptvapp.ui.components.CategoryChip
 import com.bobot.iptvapp.ui.components.FocusableTextButton
@@ -515,10 +516,15 @@ private fun SeriesDetailEpisodeRow(
     ) {
         val placeholder = remember { ColorPainter(BackgroundElevated) }
 
+        // Episode titles carry the same provider prefix as the series title (QA finding N4) —
+        // "FR - The Rapture [VOSTFR] - S01E01". Strip it here too, so the row matches the
+        // already-cleaned title shown at the top of the screen.
+        val episodeTitle = StreamTitle.displayTitle(episode.title)
+
         // Landscape thumbnail
         AsyncImage(
             model = episode.coverUrl,
-            contentDescription = episode.title,
+            contentDescription = episodeTitle,
             contentScale = ContentScale.Crop,
             modifier = Modifier
                 .width(120.dp)
@@ -533,7 +539,7 @@ private fun SeriesDetailEpisodeRow(
 
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = episode.title,
+                text = episodeTitle,
                 style = MaterialTheme.typography.titleSmall,
                 color = textColor,
                 maxLines = 2,
