@@ -11,6 +11,8 @@ import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.usecase.FilterCatalogByLanguageUseCase
 import com.bobot.iptvapp.domain.usecase.LoadCategoryScopedCatalogUseCase
 import com.bobot.iptvapp.domain.util.Resource
+import com.bobot.iptvapp.domain.util.displayName
+import com.bobot.iptvapp.domain.util.displayTitle
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
@@ -721,23 +723,27 @@ class SearchViewModel @Inject constructor(
             .orEmpty()
     }
 
+    // Results are labelled with the prefix stripped (QA finding N4), but the *filtering* above
+    // still runs against the raw name — so typing "FR" keeps matching what the provider named
+    // that way, even though no result shows the prefix any more.
+
     private fun toResultItem(channel: Channel) = SearchResultItem(
         id = channel.id,
-        title = channel.name,
+        title = channel.displayName(),
         imageUrl = channel.logoUrl,
         contentType = ContentType.LIVE,
     )
 
     private fun toResultItem(movie: Movie) = SearchResultItem(
         id = movie.id,
-        title = movie.title,
+        title = movie.displayTitle(),
         imageUrl = movie.posterUrl,
         contentType = ContentType.MOVIE,
     )
 
     private fun toResultItem(series: Series) = SearchResultItem(
         id = series.id,
-        title = series.title,
+        title = series.displayTitle(),
         imageUrl = series.coverUrl,
         contentType = ContentType.SERIES,
     )

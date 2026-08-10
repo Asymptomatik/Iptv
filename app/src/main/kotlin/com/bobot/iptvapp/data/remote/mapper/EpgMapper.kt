@@ -26,7 +26,7 @@ import java.util.TimeZone
  * the composite `(channelId, startMillis)` pair as a stable natural key for Room
  * persistence (Task 10).
  */
-fun EpgProgramDto.toDomain(): EpgProgram {
+fun EpgProgramDto.toDomain(fallbackChannelId: String = ""): EpgProgram {
     val startMs = startTimestamp?.toLongOrNull()?.let { it * 1_000L }
         ?: parseEpgDateTime(start)
         ?: 0L
@@ -35,7 +35,7 @@ fun EpgProgramDto.toDomain(): EpgProgram {
         ?: 0L
 
     return EpgProgram(
-        channelId = channelId,
+        channelId = channelId ?: fallbackChannelId,
         title = title.decodeBase64OrSelf(),
         description = description?.decodeBase64OrSelf()?.takeIf { it.isNotBlank() },
         startMillis = startMs,
@@ -45,8 +45,18 @@ fun EpgProgramDto.toDomain(): EpgProgram {
 
 /**
  * Maps the listings inside an [EpgListingDto] to a list of [EpgProgram] domain models.
+ *
+ * Entries with no title are dropped: they render as a blank row in the "à suivre" list, and a
+ * programme the provider could not even name carries nothing for the viewer.
+ *
+ * @param fallbackChannelId Used for entries where the provider omitted `channel_id`. Callers pass
+ * the id they requested the listing for; the default keeps the field empty, which is harmless
+ * since nothing reads [EpgProgram.channelId] back — the screen already knows whose EPG it asked
+ * for. See [EpgProgramDto.channelId] for why the field is nullable at all.
  */
-fun EpgListingDto.toDomain(): List<EpgProgram> = epgListings.map { it.toDomain() }
+fun EpgListingDto.toDomain(fallbackChannelId: String = ""): List<EpgProgram> =
+    epgListings.map { it.toDomain(fallbackChannelId) }
+        .filter { it.title.isNotBlank() }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers

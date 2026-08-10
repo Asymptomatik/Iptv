@@ -16,6 +16,7 @@ import com.bobot.iptvapp.domain.repository.DownloadRepository
 import com.bobot.iptvapp.domain.repository.FavoritesRepository
 import com.bobot.iptvapp.domain.repository.PlaybackProgressRepository
 import com.bobot.iptvapp.domain.util.Resource
+import com.bobot.iptvapp.domain.util.displayTitle
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -182,7 +183,9 @@ class MovieDetailViewModel @Inject constructor(
                 DownloadRequestData(
                     contentType = DownloadContentType.MOVIE,
                     contentId = movie.id,
-                    title = movie.title,
+                    // Stored stripped (QA finding N4) so the Téléchargements list reads the same
+                    // as the card the user tapped.
+                    title = movie.displayTitle(),
                     artworkUrl = movie.posterUrl,
                     streamUrl = streamUrl,
                 ),

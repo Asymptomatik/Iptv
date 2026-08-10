@@ -175,6 +175,7 @@ fun AppNavGraph(
         // ── Search ───────────────────────────────────────────────────────────
         composable<Search> {
             SearchScreen(
+                onNavigateBack = { navController.popBackStack() },
                 onNavigateToDetail = { type, id ->
                     navController.navigate(Detail(contentType = type, contentId = id))
                 },

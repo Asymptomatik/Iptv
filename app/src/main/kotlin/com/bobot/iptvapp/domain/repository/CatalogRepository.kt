@@ -111,11 +111,12 @@ interface CatalogRepository {
     /**
      * Fetches EPG programme entries for a live channel.
      *
-     * For the real Xtream source, [channelId] must be the numeric stream ID
-     * ([Channel.id]), which maps to the `stream_id` query parameter of the
-     * `get_short_epg` endpoint. For the fake source, pass [Channel.epgChannelId].
+     * [channelId] is the numeric stream ID ([Channel.id]), which maps to the `stream_id` query
+     * parameter of the `get_short_epg` endpoint. Both sources take it — the fake used to want
+     * [Channel.epgChannelId] instead, and callers obliging it got an empty EPG from the real
+     * one every time (QA finding N3).
      *
-     * @param channelId Stream identifier for the EPG request.
+     * @param channelId Stream identifier for the EPG request ([Channel.id]).
      * @param limit     Maximum number of programme entries. `null` for server-default.
      * @return [Resource.Success] with the EPG list (may be empty for channels without EPG
      *         data), or [Resource.Error] on network failure.

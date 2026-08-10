@@ -147,7 +147,7 @@ class LiveDetailViewModelTest {
     @Test
     fun `initialize resolves the channel from the live channels list and builds the stream URL`() {
         stubChannels(channelWithEpg)
-        coEvery { catalogRepository.getEpg("bbc.world") } returns Resource.Success(emptyList())
+        coEvery { catalogRepository.getEpg(channelId) } returns Resource.Success(emptyList())
 
         initialize()
 
@@ -161,7 +161,7 @@ class LiveDetailViewModelTest {
     @Test
     fun `initialize resolves the channel from the cache without downloading the whole bouquet`() {
         coEvery { catalogRepository.getCachedChannel(channelId) } returns channelWithEpg
-        coEvery { catalogRepository.getEpg("bbc.world") } returns Resource.Success(emptyList())
+        coEvery { catalogRepository.getEpg(channelId) } returns Resource.Success(emptyList())
 
         initialize()
 
@@ -177,19 +177,19 @@ class LiveDetailViewModelTest {
     @Test
     fun `a cached channel still gets its EPG and favorite state`() {
         coEvery { catalogRepository.getCachedChannel(channelId) } returns channelWithEpg
-        coEvery { catalogRepository.getEpg("bbc.world") } returns Resource.Success(emptyList())
+        coEvery { catalogRepository.getEpg(channelId) } returns Resource.Success(emptyList())
 
         initialize()
 
         // A channel read from Room is not a lesser one: both dependent loads must still run.
-        coVerify(exactly = 1) { catalogRepository.getEpg("bbc.world") }
+        coVerify(exactly = 1) { catalogRepository.getEpg(channelId) }
         verify(exactly = 1) { favoritesRepository.isFavorite(profileId, channelId, ContentType.LIVE) }
     }
 
     @Test
     fun `initialize is idempotent and only collects the channels flow once`() {
         stubChannels(channelWithEpg)
-        coEvery { catalogRepository.getEpg("bbc.world") } returns Resource.Success(emptyList())
+        coEvery { catalogRepository.getEpg(channelId) } returns Resource.Success(emptyList())
 
         initialize()
         viewModel.initialize(channelId)
@@ -201,7 +201,7 @@ class LiveDetailViewModelTest {
     @Test
     fun `initialize leaves the stream URL null when no credentials are configured`() {
         stubChannels(channelWithEpg)
-        coEvery { catalogRepository.getEpg("bbc.world") } returns Resource.Success(emptyList())
+        coEvery { catalogRepository.getEpg(channelId) } returns Resource.Success(emptyList())
         coEvery { credentialsProvider.getCredentials() } returns null
 
         initialize()
@@ -244,7 +244,7 @@ class LiveDetailViewModelTest {
         val current = epgProgram("Now Playing", now - 1_000L, now + 3_600_000L, description = "Synopsis")
         val next = epgProgram("Next", now + 3_600_000L, now + 7_200_000L)
         val nextNext = epgProgram("Next Next", now + 7_200_000L, now + 10_800_000L)
-        coEvery { catalogRepository.getEpg("bbc.world") } returns
+        coEvery { catalogRepository.getEpg(channelId) } returns
             Resource.Success(listOf(next, previous, nextNext, current))
 
         initialize()
@@ -257,8 +257,13 @@ class LiveDetailViewModelTest {
     }
 
     @Test
-    fun `initialize shows the no-EPG message when the channel has no epgChannelId`() {
+    fun `initialize still asks for the EPG when the channel has no epgChannelId`() {
+        // QA finding N3: a missing `epg_channel_id` used to skip the fetch outright. It says
+        // nothing about whether the provider has a schedule — `get_short_epg` keys on the
+        // numeric stream id, which this channel does have — so the request must go out and the
+        // "no programme" message must come from an empty *answer*, not from a guess.
         stubChannels(channelWithoutEpg)
+        coEvery { catalogRepository.getEpg(channelWithoutEpg.id) } returns Resource.Success(emptyList())
 
         initialize(id = channelWithoutEpg.id)
 
@@ -267,13 +272,13 @@ class LiveDetailViewModelTest {
         assertNull(state.currentProgram)
         assertTrue(state.upcomingPrograms.isEmpty())
         assertEquals("Aucun programme disponible", state.epgMessage)
-        coVerify(exactly = 0) { catalogRepository.getEpg(any(), any()) }
+        coVerify(exactly = 1) { catalogRepository.getEpg(channelWithoutEpg.id) }
     }
 
     @Test
     fun `initialize shows the no-EPG message when the EPG fetch returns an empty list`() {
         stubChannels(channelWithEpg)
-        coEvery { catalogRepository.getEpg("bbc.world") } returns Resource.Success(emptyList())
+        coEvery { catalogRepository.getEpg(channelId) } returns Resource.Success(emptyList())
 
         initialize()
 
@@ -286,7 +291,7 @@ class LiveDetailViewModelTest {
     @Test
     fun `initialize shows the no-EPG message when the EPG fetch fails`() {
         stubChannels(channelWithEpg)
-        coEvery { catalogRepository.getEpg("bbc.world") } returns Resource.Error(message = "Erreur EPG")
+        coEvery { catalogRepository.getEpg(channelId) } returns Resource.Error(message = "Erreur EPG")
 
         initialize()
 
@@ -301,7 +306,7 @@ class LiveDetailViewModelTest {
     @Test
     fun `initialize reflects the current favorite state and reacts to later changes`() {
         stubChannels(channelWithEpg)
-        coEvery { catalogRepository.getEpg("bbc.world") } returns Resource.Success(emptyList())
+        coEvery { catalogRepository.getEpg(channelId) } returns Resource.Success(emptyList())
         isFavoriteFlow.value = true
 
         initialize()
@@ -317,7 +322,7 @@ class LiveDetailViewModelTest {
     @Test
     fun `onToggleFavorite delegates to the repository for the active profile and channel at LIVE scope`() {
         stubChannels(channelWithEpg)
-        coEvery { catalogRepository.getEpg("bbc.world") } returns Resource.Success(emptyList())
+        coEvery { catalogRepository.getEpg(channelId) } returns Resource.Success(emptyList())
         initialize()
 
         viewModel.onToggleFavorite()
@@ -329,7 +334,7 @@ class LiveDetailViewModelTest {
     @Test
     fun `onToggleFavorite is a no-op when no profile is active`() {
         stubChannels(channelWithEpg)
-        coEvery { catalogRepository.getEpg("bbc.world") } returns Resource.Success(emptyList())
+        coEvery { catalogRepository.getEpg(channelId) } returns Resource.Success(emptyList())
         coEvery { appPreferencesStore.getActiveProfileId() } returns null
         initialize()
 
@@ -347,7 +352,7 @@ class LiveDetailViewModelTest {
             flowOf(Resource.Error(message = "Hors ligne")),
             flowOf(Resource.Success(listOf(channelWithEpg))),
         )
-        coEvery { catalogRepository.getEpg("bbc.world") } returns Resource.Success(emptyList())
+        coEvery { catalogRepository.getEpg(channelId) } returns Resource.Success(emptyList())
         initialize()
         assertEquals("Hors ligne", viewModel.uiState.value.errorMessage)
 

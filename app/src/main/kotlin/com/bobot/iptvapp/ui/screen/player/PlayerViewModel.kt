@@ -43,6 +43,10 @@ import javax.inject.Inject
  * @property currentPositionMs Last polled playback position, in milliseconds.
  * @property durationMs      Last polled content duration, in milliseconds. `0L` while unknown
  *                           (e.g. live streams, or before the player has prepared metadata).
+ * @property isLive         `true` when the stream has no seekable content window: a live channel,
+ *                           or any media item Media3 reports as live. Everything time-related in
+ *                           [PlayerScreen] keys off this — see [PlayerViewModel.isLiveStream] for
+ *                           why the flag is needed at all (QA finding N5).
  * @property audioTracks     Snapshot of the current stream's audio tracks (from
  *                           [PlayerManager.getAudioTracks]), refreshed on every Media3
  *                           [ExoCommonPlayer.Listener.onTracksChanged] callback and immediately
@@ -69,6 +73,7 @@ data class PlayerUiState(
     val hasError: Boolean = false,
     val currentPositionMs: Long = 0L,
     val durationMs: Long = 0L,
+    val isLive: Boolean = false,
     val audioTracks: List<PlayerTrack> = emptyList(),
     val subtitleTracks: List<PlayerTrack> = emptyList(),
 )
@@ -217,6 +222,7 @@ class PlayerViewModel @Inject constructor(
                 it.copy(
                     isBuffering = playbackState == ExoCommonPlayer.STATE_BUFFERING,
                     durationMs = safeDuration(),
+                    isLive = isLiveStream(),
                 )
             }
 
@@ -366,7 +372,10 @@ class PlayerViewModel @Inject constructor(
         if (player.isPlaying) player.pause() else player.play()
     }
 
-    /** Seeks forward by [SEEK_STEP_MS], clamped to the known content duration. */
+    /**
+     * Seeks forward by [SEEK_STEP_MS], clamped to the known content duration.
+     * A no-op on a live stream — see [seekTo].
+     */
     fun seekForward() {
         seekTo(player.currentPosition + SEEK_STEP_MS)
     }
@@ -379,8 +388,14 @@ class PlayerViewModel @Inject constructor(
     /**
      * Seeks to an absolute [positionMs], clamped to `[0, duration]` when the duration is
      * known. Used both by the progress bar (drag-to-seek) and by [seekForward] / [seekBackward].
+     *
+     * A no-op on a live stream (QA finding N5): a live source reports no duration, so the
+     * clamp below would collapse every seek onto `0L` and yank the viewer back to the start
+     * of the buffer. The UI hides the seek affordances when [PlayerUiState.isLive], but the
+     * D-pad left/right keys reach this method directly, so the guard belongs here too.
      */
     fun seekTo(positionMs: Long) {
+        if (isLiveStream()) return
         val duration = player.duration
         val upperBound = if (duration > 0) duration else Long.MAX_VALUE
         val clamped = positionMs.coerceIn(0L, upperBound)
@@ -548,6 +563,7 @@ class PlayerViewModel @Inject constructor(
                     it.copy(
                         currentPositionMs = player.currentPosition.coerceAtLeast(0L),
                         durationMs = safeDuration(),
+                        isLive = isLiveStream(),
                     )
                 }
 
@@ -634,6 +650,16 @@ class PlayerViewModel @Inject constructor(
      *  unknown (e.g. live streams, or before metadata loads) — clamp that to `0L` so callers
      *  never need to special-case the sentinel value. */
     private fun safeDuration(): Long = player.duration.coerceAtLeast(0L)
+
+    /** Whether the current stream is live — a live channel has no seekable timeline, so the
+     *  UI drops the progress bar, the two time labels and the seek buttons (QA finding N5).
+     *
+     *  Two sources, because neither alone is enough: [contentType] is resolved from the stream
+     *  URL and is authoritative for Xtream live channels even before playback starts, while
+     *  [ExoCommonPlayer.isCurrentMediaItemLive] also catches VOD URLs that a provider actually
+     *  serves as a live HLS window. */
+    private fun isLiveStream(): Boolean =
+        contentType == ContentType.LIVE || player.isCurrentMediaItemLive
 }
 
 /**

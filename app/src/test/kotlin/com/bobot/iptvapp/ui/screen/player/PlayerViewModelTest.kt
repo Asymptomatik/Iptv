@@ -393,6 +393,48 @@ class PlayerViewModelTest {
         verify(exactly = 1) { player.seekTo(500_000L) }
     }
 
+    // ── live streams (QA finding N5) ──────────────────────────────────────────
+
+    @Test
+    fun `seekTo is a no-op on a live stream resolved from the URL`() {
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+        viewModel.initialize("http://example.com:8080/live/u/p/77.ts", "77")
+        testDispatcher.scheduler.runCurrent()
+        every { player.duration } returns 0L
+
+        // Without the guard this would clamp to `0L` and yank the viewer to the start of the
+        // buffer — exactly what the recette reported when pressing "seek −10 s" on a channel.
+        viewModel.seekBackward()
+
+        verify(exactly = 0) { player.seekTo(any<Long>()) }
+    }
+
+    @Test
+    fun `seekTo is a no-op when the player reports a live media item`() {
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+        // A VOD-looking URL the provider actually serves as a live HLS window.
+        viewModel.initialize("http://example.com:8080/movie/u/p/9.mp4", "9")
+        testDispatcher.scheduler.runCurrent()
+        every { player.isCurrentMediaItemLive } returns true
+        every { player.duration } returns 100_000L
+
+        viewModel.seekTo(30_000L)
+
+        verify(exactly = 0) { player.seekTo(any<Long>()) }
+    }
+
+    @Test
+    fun `seekTo still works on video on demand`() {
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+        viewModel.initialize("http://example.com:8080/movie/u/p/9.mp4", "9")
+        testDispatcher.scheduler.runCurrent()
+        every { player.duration } returns 100_000L
+
+        viewModel.seekTo(30_000L)
+
+        verify(exactly = 1) { player.seekTo(30_000L) }
+    }
+
     // ── track selection (audio / subtitle) — Task 4 ──────────────────────────
 
     @Test

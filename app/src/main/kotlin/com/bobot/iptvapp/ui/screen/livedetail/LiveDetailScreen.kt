@@ -44,6 +44,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.bobot.iptvapp.domain.model.Channel
 import com.bobot.iptvapp.domain.model.EpgProgram
+import com.bobot.iptvapp.domain.util.displayName
 import com.bobot.iptvapp.ui.components.FocusableTextButton
 import com.bobot.iptvapp.ui.components.GlassIconButton
 import com.bobot.iptvapp.ui.components.PrimaryButton
@@ -264,7 +265,7 @@ private fun LiveDetailHero(channel: Channel, horizontalPadding: Dp) {
 
         AsyncImage(
             model = channel.logoUrl,
-            contentDescription = channel.name,
+            contentDescription = channel.displayName(),
             contentScale = ContentScale.Fit,
             modifier = Modifier
                 .fillMaxWidth(0.5f)
@@ -315,7 +316,7 @@ private fun LiveDetailHero(channel: Channel, horizontalPadding: Dp) {
             }
             Spacer(modifier = Modifier.height(Spacing.xs))
             Text(
-                text = channel.name,
+                text = channel.displayName(),
                 style = MaterialTheme.typography.headlineLarge,
                 color = TextPrimary,
             )

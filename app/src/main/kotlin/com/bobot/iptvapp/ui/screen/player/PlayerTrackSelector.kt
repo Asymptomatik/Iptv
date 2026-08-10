@@ -77,13 +77,9 @@ internal fun PlayerTracksButton(
     Box(
         contentAlignment = Alignment.Center,
         modifier = modifier
-            .clip(CircleShape)
-            .background(Color.White.copy(alpha = if (isFocused) 0.18f else 0.10f))
-            .border(
-                width = if (isFocused) CardDimens.FocusBorderWidth else 0.dp,
-                color = if (isFocused) AccentSolid else Color.Transparent,
-                shape = CircleShape,
-            )
+            // Same surface as the seek and play/pause buttons — see playerControlSurface
+            // (QA finding N10).
+            .playerControlSurface(isFocused)
             .onFocusChanged { focusState -> isFocused = focusState.isFocused }
             .clickable(onClickLabel = "Audio et sous-titres", onClick = onClick)
             .padding(horizontal = Spacing.sm2, vertical = Spacing.sm),

@@ -20,6 +20,7 @@ import com.bobot.iptvapp.domain.repository.PlaybackProgressRepository
 import com.bobot.iptvapp.domain.usecase.FilterCatalogByLanguageUseCase
 import com.bobot.iptvapp.domain.usecase.LoadCategoryScopedCatalogUseCase
 import com.bobot.iptvapp.domain.util.displayName
+import com.bobot.iptvapp.domain.util.displayTitle
 import com.bobot.iptvapp.domain.util.languageTag
 import com.bobot.iptvapp.domain.util.Resource
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -1369,23 +1370,26 @@ class HomeViewModel @Inject constructor(
         )
     }
 
+    // Cards show the title with its provider prefix stripped (QA finding N4) — see [StreamTitle].
+    // Only the label changes; ids, images and the strings matched by search stay on the raw value.
+
     private fun toCardItem(channel: Channel) = HomeCardItem(
         id = channel.id,
-        title = channel.name,
+        title = channel.displayName(),
         imageUrl = channel.logoUrl,
         contentType = ContentType.LIVE,
     )
 
     private fun toCardItem(movie: Movie) = HomeCardItem(
         id = movie.id,
-        title = movie.title,
+        title = movie.displayTitle(),
         imageUrl = movie.posterUrl,
         contentType = ContentType.MOVIE,
     )
 
     private fun toCardItem(series: Series) = HomeCardItem(
         id = series.id,
-        title = series.title,
+        title = series.displayTitle(),
         imageUrl = series.coverUrl,
         contentType = ContentType.SERIES,
     )
@@ -1402,7 +1406,7 @@ class HomeViewModel @Inject constructor(
         )
         return HomeCardItem(
             id = movie.id,
-            title = movie.title,
+            title = movie.displayTitle(),
             imageUrl = movie.posterUrl,
             contentType = ContentType.MOVIE,
             resumeStreamUrl = streamUrl,
@@ -1424,7 +1428,7 @@ class HomeViewModel @Inject constructor(
         )
         return HomeCardItem(
             id = episode.id,
-            title = series.title,
+            title = series.displayTitle(),
             imageUrl = series.coverUrl,
             contentType = ContentType.SERIES,
             resumeStreamUrl = streamUrl,

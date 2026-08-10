@@ -192,4 +192,32 @@ class EpgMapperTest {
         // Expected: 1705327200000 ms
         assertEquals(1_705_327_200_000L, result)
     }
+
+    // ── Providers that omit fields (QA finding N3) ────────────────────────────
+
+    @Test
+    fun `toDomain falls back to the requested channel id when the provider omits channel_id`() {
+        val dto = EpgProgramDto(
+            title = "The News",
+            startTimestamp = "1705327200",
+            stopTimestamp = "1705330800",
+        )
+
+        assertEquals("101", dto.toDomain(fallbackChannelId = "101").channelId)
+    }
+
+    @Test
+    fun `toDomain drops entries the provider could not even name`() {
+        val listing = EpgListingDto(
+            epgListings = listOf(
+                EpgProgramDto(title = "The News", startTimestamp = "1705327200", stopTimestamp = "1705330800"),
+                EpgProgramDto(title = "", startTimestamp = "1705330800", stopTimestamp = "1705334400"),
+            ),
+        )
+
+        val result = listing.toDomain(fallbackChannelId = "101")
+
+        assertEquals(1, result.size)
+        assertEquals("The News", result.first().title)
+    }
 }

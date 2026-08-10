@@ -93,24 +93,21 @@ data class LiveDetailUiState(
  * [Channel] has no plot/description field of its own (confirmed by reading [Channel] in full).
  * The brief's "description chaîne" requirement is satisfied using the current EPG programme's
  * [EpgProgram.title] / [EpgProgram.description] as the descriptive content — not an invented
- * channel-level field. When a channel has no EPG data at all (null [Channel.epgChannelId], an
- * empty [CatalogRepository.getEpg] result, or a failed fetch), [LiveDetailScreen] falls back to
+ * channel-level field. When a channel has no EPG data at all (an empty
+ * [CatalogRepository.getEpg] result, or a failed fetch), [LiveDetailScreen] falls back to
  * showing just the channel name/logo with no description, per [LiveDetailUiState.epgMessage].
  *
  * ## EPG fetch (current / upcoming split)
- * [CatalogRepository.getEpg] is only called when [Channel.epgChannelId] is non-null, passing
- * [Channel.epgChannelId] (not [Channel.id]) as the `channelId` argument — matching the interface's
- * own KDoc ("For the fake source, pass Channel.epgChannelId") and this project's environment,
- * which always runs against [com.bobot.iptvapp.data.source.fake.FakeXtreamSource] here
- * (`BuildConfig.USE_MOCK_DATA = true`, no real Xtream account configured in this execution
- * context).
+ * [CatalogRepository.getEpg] is always called, and always with [Channel.id] — the numeric
+ * `stream_id` the Xtream `get_short_epg` endpoint keys on.
  *
- * **Known pre-existing inconsistency (carried forward, not fixed here)**:
- * [com.bobot.iptvapp.data.source.RemoteXtreamSource.getShortEpg]'s own KDoc contradicts
- * [CatalogRepository.getEpg]'s contract, stating the real Xtream `get_short_epg` endpoint
- * actually expects [Channel.id], not [Channel.epgChannelId]. This predates Task 20 and only
- * matters once the real Xtream source path is ever exercised (never yet, in this project's
- * history) — flagged here for visibility, out of scope to fix in this task.
+ * That was not always so. Until QA finding N3 this passed [Channel.epgChannelId] (the XMLTV id,
+ * e.g. `"cnn.us"`) and skipped the call altogether when that field was null, which matched the
+ * [com.bobot.iptvapp.data.source.fake.FakeXtreamSource] this screen was written against but
+ * contradicted [com.bobot.iptvapp.data.source.RemoteXtreamSource.getShortEpg]. Against a real
+ * provider the endpoint answered every request with an empty listing, so the recette found the
+ * EPG section blank on every channel. The fake now keys on [Channel.id] too, and resolves the
+ * XMLTV id itself, so both sources agree on what a `channelId` argument means here.
  *
  * The returned list is sorted defensively ascending by [EpgProgram.startMillis] (the fake source
  * already returns 4 chronologically-ordered slots, but input order is not assumed). The "now
@@ -288,15 +285,11 @@ class LiveDetailViewModel @Inject constructor(
 
     /** See class KDoc "EPG fetch (current / upcoming split)". */
     private suspend fun loadEpg(channel: Channel) {
-        val epgChannelId = channel.epgChannelId
-        if (epgChannelId == null) {
-            _uiState.update {
-                it.copy(isEpgLoading = false, currentProgram = null, upcomingPrograms = emptyList(), epgMessage = NO_EPG_MESSAGE)
-            }
-            return
-        }
-
-        when (val result = catalogRepository.getEpg(epgChannelId)) {
+        // QA finding N3: this used to pass `channel.epgChannelId` and to skip the fetch entirely
+        // when that field was null. Both were wrong against a real provider — `get_short_epg`
+        // keys on the numeric `stream_id`, so an XMLTV id like "cnn.us" returned an empty list
+        // every time, and channels whose provider omits `epg_channel_id` never even asked.
+        when (val result = catalogRepository.getEpg(channel.id)) {
             is Resource.Success -> {
                 val programs = result.data.sortedBy { it.startMillis }
                 if (programs.isEmpty()) {

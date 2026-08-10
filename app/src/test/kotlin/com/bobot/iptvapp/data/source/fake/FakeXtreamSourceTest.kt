@@ -111,8 +111,8 @@ class FakeXtreamSourceTest {
         val hourStart = now - (now % hourMs)
         val hourEnd = hourStart + hourMs
 
-        val programs = source.getShortEpg("bbc.world", limit = null)
-        assertTrue("Expected at least 2 EPG slots for bbc.world", programs.size >= 2)
+        val programs = source.getShortEpg("101", limit = null)
+        assertTrue("Expected at least 2 EPG slots for channel 101 (bbc.world)", programs.size >= 2)
 
         // Index 1 is the "now playing" slot (started at top of current hour)
         val nowPlaying = programs[1]
@@ -138,27 +138,28 @@ class FakeXtreamSourceTest {
 
     @Test
     fun `getShortEpg returns exactly 4 slots for known channel with no limit`() = runTest {
-        val programs = source.getShortEpg("espn", limit = null)
+        val programs = source.getShortEpg("201", limit = null)
         assertEquals("Should return 4 EPG slots for known channel", 4, programs.size)
     }
 
     @Test
     fun `getShortEpg respects limit parameter`() = runTest {
-        val programs = source.getShortEpg("bbc.world", limit = 2)
+        val programs = source.getShortEpg("101", limit = 2)
         assertEquals("Should respect limit = 2", 2, programs.size)
     }
 
     @Test
     fun `getShortEpg returns empty list for unknown channelId`() = runTest {
-        val programs = source.getShortEpg("unknown.channel.xyz")
+        val programs = source.getShortEpg("999999")
         assertTrue("Unknown channel should return empty EPG list", programs.isEmpty())
     }
 
     @Test
     fun `getShortEpg returns empty list for channel with no epgChannelId mapping`() = runTest {
-        // "Netflix Channel" has epgChannelId = null, hence no EPG data in the fake source.
-        // The key "netflix.channel" is not in EPG_DATA so getShortEpg returns empty.
-        val programs = source.getShortEpg("netflix.channel")
+        // "Netflix Channel" (stream id 302) has epgChannelId = null, so the fake has nothing to
+        // look its schedule up by and returns empty — the "provider knows the channel but has no
+        // programme data for it" case.
+        val programs = source.getShortEpg("302")
         assertTrue(programs.isEmpty())
     }
 
