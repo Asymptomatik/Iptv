@@ -485,6 +485,7 @@ private fun SearchResultsContent(
         if (showLive) {
             searchSection(
                 sectionTitle = "Chaînes",
+                logoArtwork = true,
                 resultItems = uiState.liveResults,
                 stillLoading = uiState.isLoading,
                 horizontalPadding = horizontalPadding,
@@ -559,6 +560,8 @@ private fun SearchErrorBanner(
 private fun LazyListScope.searchSection(
     sectionTitle: String,
     resultItems: List<SearchResultItem>,
+    /** `true` for the channel section: logos are fitted rather than cropped. */
+    logoArtwork: Boolean = false,
     stillLoading: Boolean,
     horizontalPadding: Dp,
     cardWidth: Dp,
@@ -610,6 +613,7 @@ private fun LazyListScope.searchSection(
                     imageUrl = resultItem.imageUrl,
                     onClick = { onResultClick(resultItem) },
                     modifier = Modifier.width(cardWidth),
+                    logoArtwork = logoArtwork,
                 )
             }
         }

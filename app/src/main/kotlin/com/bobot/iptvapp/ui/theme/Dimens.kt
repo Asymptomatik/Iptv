@@ -57,6 +57,13 @@ object CardDimens {
     const val BannerAspectRatio = 16f / 9f
 
     /**
+     * Inset applied around logo artwork (channel cards).  Channel logos are wide and are drawn
+     * with [androidx.compose.ui.layout.ContentScale.Fit] inside a portrait card, so without an
+     * inset they touch the card edges.
+     */
+    val LogoArtworkPadding = 12.dp
+
+    /**
      * Uniform card corner radius — matches [AppShapes.large] (Cinematic Glass lg = 20 dp).
      * Updated from V1 (8 dp) to V2 "Cinematic Glass" (20 dp).
      */

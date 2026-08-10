@@ -1201,6 +1201,8 @@ private fun HomeCategoryRow(
                 onClick = { onCardClick(cardItem) },
                 modifier = cardModifier,
                 landscape = isContinueWatching,
+                // Channel logos are fitted, not cropped — cropping leaves only a fragment.
+                logoArtwork = isLive,
                 badge = liveBadge,
                 // No progress fraction in HomeCardItem — skip rather than invent data.
                 progress = null,
@@ -1247,6 +1249,8 @@ private fun HomeCategoryGridRow(
                 imageUrl = cardItem.imageUrl,
                 onClick = { onCardClick(cardItem) },
                 modifier = cardModifier,
+                // Channel logos are fitted, not cropped — cropping leaves only a fragment.
+                logoArtwork = isLive,
                 badge = liveBadge,
                 progress = null,
             )

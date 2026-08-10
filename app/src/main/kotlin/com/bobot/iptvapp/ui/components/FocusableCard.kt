@@ -120,6 +120,11 @@ import com.bobot.iptvapp.ui.theme.TextPrimary
  *                           LIVE pill).  When `null` (default) nothing is placed there.
  * @param landscape          When `true` the card uses a 16:9 aspect ratio instead of the
  *                           default 2:3 portrait ratio.  Defaults to `false`.
+ * @param logoArtwork        When `true` the artwork is fitted inside the card instead of being
+ *                           cropped to fill it.  Set it for channel logos: they are wide, often
+ *                           square-ish, and `ContentScale.Crop` inside a 2:3 portrait box zooms
+ *                           until only a fragment of the logo is left ("TF1" rendered as a bare
+ *                           "F").  Posters, which are authored at 2:3, keep the cropping default.
  */
 @Composable
 fun FocusableCard(
@@ -132,6 +137,7 @@ fun FocusableCard(
     progress: Float? = null,
     badge: (@Composable () -> Unit)? = null,
     landscape: Boolean = false,
+    logoArtwork: Boolean = false,
 ) {
     var isFocused by remember { mutableStateOf(false) }
 
@@ -271,10 +277,17 @@ fun FocusableCard(
             AsyncImage(
                 model              = imageUrl,
                 contentDescription = contentDescription ?: title,
-                contentScale       = ContentScale.Crop,
+                contentScale       = if (logoArtwork) ContentScale.Fit else ContentScale.Crop,
                 modifier           = Modifier
                     .fillMaxWidth()
-                    .aspectRatio(aspectRatio),
+                    .aspectRatio(aspectRatio)
+                    .then(
+                        if (logoArtwork) {
+                            Modifier.padding(CardDimens.LogoArtworkPadding)
+                        } else {
+                            Modifier
+                        },
+                    ),
                 placeholder        = placeholderPainter,
                 error              = errorPainter,
                 fallback           = placeholderPainter,
