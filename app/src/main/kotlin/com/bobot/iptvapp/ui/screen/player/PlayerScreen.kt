@@ -66,6 +66,9 @@ import androidx.media3.common.Player as ExoCommonPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.bobot.iptvapp.ui.components.GhostButton
 import com.bobot.iptvapp.ui.components.GlassSurface
 import com.bobot.iptvapp.ui.components.PrimaryButton
@@ -125,6 +128,25 @@ fun PlayerScreen(
         window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         onDispose {
             window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    // Immersive playback: hide the status and navigation bars for as long as the player is on
+    // screen. The app is edge-to-edge (see MainActivity), which only lets the content draw
+    // *behind* the bars — the clock, wifi and battery icons keep sitting on top of the picture
+    // unless they are explicitly hidden. BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE keeps them one
+    // edge swipe away instead of leaving the viewer stranded, and they are restored on exit so
+    // the rest of the app keeps its normal chrome.
+    DisposableEffect(Unit) {
+        val insetsController = (view.context as? Activity)
+            ?.window
+            ?.let { WindowCompat.getInsetsController(it, view) }
+        insetsController?.apply {
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            hide(WindowInsetsCompat.Type.systemBars())
+        }
+        onDispose {
+            insetsController?.show(WindowInsetsCompat.Type.systemBars())
         }
     }
 
@@ -215,11 +237,17 @@ fun PlayerScreen(
         modifier = modifier
             .fillMaxSize()
             .background(BackgroundSunken)
-            // Plain tap-detection (not `clickable`) so this full-screen surface does not become
-            // a focusable stop that would disrupt D-pad/TV focus navigation between the
-            // controls' buttons and slider.
+            // Tap toggles the controls: a tap anywhere the controls themselves do not consume
+            // (the buttons and the slider do) hides them while they are showing, and brings them
+            // back while they are hidden. Plain tap-detection (not `clickable`) so this
+            // full-screen surface does not become a focusable stop that would disrupt D-pad/TV
+            // focus navigation between the controls' buttons and slider.
             .pointerInput(Unit) {
-                detectTapGestures(onTap = { onUserInteracted() })
+                detectTapGestures(
+                    onTap = {
+                        if (controlsVisible) controlsVisible = false else onUserInteracted()
+                    },
+                )
             }
             .focusRequester(revealFocusRequester)
             .focusProperties { canFocus = !controlsVisible }
