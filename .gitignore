@@ -65,3 +65,6 @@ C:\\Users\\bobot\\AppData\\Local\\Temp\\adb_scratch\\phone_logcat.txt
 # ── Local agent tooling (per-machine state, never shared) ─────────────────
 .codex/
 .tokensave/
+
+# ── Graphify knowledge graph (rebuilt locally via `graphify update .`) ────
+graphify-out/
