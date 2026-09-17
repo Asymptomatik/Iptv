@@ -4,13 +4,14 @@ import androidx.media3.common.util.UnstableApi
 import com.bobot.iptvapp.data.local.dao.DownloadDao
 import com.bobot.iptvapp.data.local.entity.DownloadEntity
 import com.bobot.iptvapp.data.local.mapper.toDomain
+import com.bobot.iptvapp.data.preferences.LogoutPurgeMarkerStore
 import com.bobot.iptvapp.di.IoDispatcher
 import com.bobot.iptvapp.domain.model.DownloadRequestData
 import com.bobot.iptvapp.domain.model.DownloadRequestId
 import com.bobot.iptvapp.domain.model.DownloadState
 import com.bobot.iptvapp.domain.model.OfflineDownload
 import com.bobot.iptvapp.domain.repository.DownloadRepository
-import com.bobot.iptvapp.download.IptvDownloadService
+import com.bobot.iptvapp.download.DownloadCommander
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOn
@@ -18,10 +19,16 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
+/**
+ * @param logoutPurgeMarkerStore Consulted before every [enqueue]. A purge walks a fixed sequence of
+ *   stores; a row inserted behind a step that has already run would outlive the logout that was
+ *   meant to remove it, so new work is refused for as long as one is owed.
+ */
 @UnstableApi
 class DownloadRepositoryImpl @Inject constructor(
     private val downloadDao: DownloadDao,
-    private val downloadService: IptvDownloadService.Commander,
+    private val downloadService: DownloadCommander,
+    private val logoutPurgeMarkerStore: LogoutPurgeMarkerStore,
     @IoDispatcher private val ioDispatcher: CoroutineDispatcher,
 ) : DownloadRepository {
     override fun observeDownloads(): Flow<List<OfflineDownload>> = downloadDao.observeAll()
@@ -32,7 +39,8 @@ class DownloadRepositoryImpl @Inject constructor(
         .map { it?.toDomain() }
         .flowOn(ioDispatcher)
 
-    override suspend fun enqueue(request: DownloadRequestData): String = withContext(ioDispatcher) {
+    override suspend fun enqueue(request: DownloadRequestData): String? = withContext(ioDispatcher) {
+        if (logoutPurgeMarkerStore.isPurgePending()) return@withContext null
         val downloadId = DownloadRequestId.create(request.contentType, request.contentId)
         val now = System.currentTimeMillis()
         downloadDao.upsert(

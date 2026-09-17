@@ -7,6 +7,7 @@ import com.bobot.iptvapp.data.source.CatalogException
 import com.bobot.iptvapp.data.source.CredentialsProvider
 import com.bobot.iptvapp.domain.model.ContentType
 import com.bobot.iptvapp.domain.model.XtreamCredentials
+import com.bobot.iptvapp.domain.logout.LogoutPurger
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.util.Resource
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -119,6 +120,7 @@ class SettingsViewModel @Inject constructor(
     private val catalogRepository: CatalogRepository,
     private val credentialsProvider: CredentialsProvider,
     private val appPreferencesStore: AppPreferencesStore,
+    private val logoutPurger: LogoutPurger,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SettingsUiState())
@@ -327,18 +329,51 @@ class SettingsViewModel @Inject constructor(
     }
 
     /**
-     * Clears the persisted credentials and flips [SettingsUiState.isLoggedOut] once the clear
-     * completes. [SettingsScreen] observes this one-shot signal to navigate back to the
-     * Onboarding route with a fully cleared back stack, so the next app launch starts a clean
-     * onboarding flow.
+     * Hands the whole teardown to [logoutPurger] and flips [SettingsUiState.isLoggedOut] only if it
+     * comes back clean. [SettingsScreen] observes that one-shot signal to navigate back to the
+     * Onboarding route with a fully cleared back stack.
+     *
+     * Deliberately *not* done here: clearing the credentials. They are the purge's last step, after
+     * the Media3 index, the Media3 cache and the Room caches are provably empty — clearing them
+     * from here too would let the screen declare a logout that the local stores never completed.
+     *
+     * A failure leaves the pending marker set by the purger in place, keeps the user on Settings
+     * with the credentials still valid, and shows a message inviting a retry; pressing
+     * "Se déconnecter" again resumes the same purge, which is idempotent by contract.
      */
     fun onLogout() {
-        _uiState.update { it.copy(isLogoutConfirmationVisible = false) }
+        _uiState.update {
+            it.copy(
+                isLogoutConfirmationVisible = false,
+                isLoading = true,
+                errorMessage = null,
+                infoMessage = null,
+            )
+        }
         viewModelScope.launch {
-            credentialsProvider.clearCredentials()
-            _uiState.update { it.copy(isLoggedOut = true) }
+            try {
+                logoutPurger.logOut()
+                _uiState.update { it.copy(isLoading = false, isLoggedOut = true) }
+            } catch (failure: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        errorMessage = logoutErrorMessageFor(failure),
+                        messageSection = SettingsMessageSection.ACTIONS,
+                    )
+                }
+            }
         }
     }
+
+    /**
+     * Maps a purge failure to a French message that tells the user the state they are actually in:
+     * still connected, nothing half-broken to repair by hand, and the action is worth retrying.
+     */
+    private fun logoutErrorMessageFor(failure: Exception): String =
+        "La déconnexion n'a pas pu supprimer toutes les données locales" +
+            (failure.message?.let { " ($it)" } ?: "") +
+            ". Vous êtes toujours connecté ; veuillez réessayer."
 
     /**
      * Arms the logout confirmation (QA finding M2: "Déconnexion" used to clear the credentials on

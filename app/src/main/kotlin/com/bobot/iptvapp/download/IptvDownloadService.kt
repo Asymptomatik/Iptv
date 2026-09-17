@@ -65,20 +65,22 @@ class IptvDownloadService : DownloadService(
 
     /** Commands route through DownloadService so foreground execution is started when needed. */
     @Singleton
-    class Commander @Inject constructor(@ApplicationContext private val context: Context) {
-        fun enqueue(downloadId: String, streamUrl: String) {
+    class Commander @Inject constructor(
+        @ApplicationContext private val context: Context,
+    ) : DownloadCommander {
+        override fun enqueue(downloadId: String, streamUrl: String) {
             val request = DownloadRequest.Builder(downloadId, Uri.parse(streamUrl))
                 .build()
             sendAddDownload(context, IptvDownloadService::class.java, request, true)
         }
 
-        fun pause(downloadId: String) =
+        override fun pause(downloadId: String) =
             sendSetStopReason(context, IptvDownloadService::class.java, downloadId, PAUSE_STOP_REASON, true)
 
-        fun resume(downloadId: String) =
+        override fun resume(downloadId: String) =
             sendSetStopReason(context, IptvDownloadService::class.java, downloadId, Download.STOP_REASON_NONE, true)
 
-        fun remove(downloadId: String) =
+        override fun remove(downloadId: String) =
             sendRemoveDownload(context, IptvDownloadService::class.java, downloadId, true)
 
         private companion object {

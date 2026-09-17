@@ -4,6 +4,8 @@ import com.bobot.iptvapp.data.preferences.AppPreferencesStore
 import com.bobot.iptvapp.data.source.CatalogException
 import com.bobot.iptvapp.data.source.InMemoryCredentialsProvider
 import com.bobot.iptvapp.domain.model.ContentType
+import com.bobot.iptvapp.domain.logout.FakeLogoutPurger
+import com.bobot.iptvapp.domain.logout.LogoutPurgeException
 import com.bobot.iptvapp.domain.model.XtreamCredentials
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.util.Resource
@@ -14,6 +16,7 @@ import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
 import io.mockk.verify
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -58,6 +61,7 @@ class SettingsViewModelTest {
     private lateinit var catalogRepository: CatalogRepository
     private lateinit var credentialsProvider: InMemoryCredentialsProvider
     private lateinit var appPreferencesStore: AppPreferencesStore
+    private lateinit var logoutPurger: FakeLogoutPurger
     private lateinit var viewModel: SettingsViewModel
 
     private val existingCredentials = XtreamCredentials(
@@ -72,6 +76,7 @@ class SettingsViewModelTest {
         catalogRepository = mockk()
         credentialsProvider = InMemoryCredentialsProvider()
         appPreferencesStore = mockk()
+        logoutPurger = FakeLogoutPurger()
         every { appPreferencesStore.observeWifiOnlyDownloads() } returns flowOf(false)
         coEvery { appPreferencesStore.setWifiOnlyDownloads(any()) } just Runs
         coEvery { catalogRepository.invalidatePersistentCache(any()) } just Runs
@@ -95,6 +100,7 @@ class SettingsViewModelTest {
             catalogRepository = catalogRepository,
             credentialsProvider = credentialsProvider,
             appPreferencesStore = appPreferencesStore,
+            logoutPurger = logoutPurger,
         )
         testDispatcher.scheduler.runCurrent()
     }
@@ -367,7 +373,10 @@ class SettingsViewModelTest {
     // ── onLogout ──────────────────────────────────────────────────────────────
 
     @Test
-    fun `onLogout clears credentials and flips isLoggedOut`() = runTest(testDispatcher) {
+    fun `onLogout flips isLoggedOut once the purge succeeds`() = runTest(testDispatcher) {
+        // Clearing the credentials themselves is no longer this ViewModel's job — it is the last
+        // step of the purge, asserted in DefaultLogoutPurgerTest. What is asserted here is that
+        // the navigation signal is emitted only on a purge that came back clean.
         seedCredentials(existingCredentials)
         createViewModel()
 
@@ -375,6 +384,125 @@ class SettingsViewModelTest {
         testDispatcher.scheduler.runCurrent()
 
         assertTrue(viewModel.uiState.value.isLoggedOut)
-        assertNull(credentialsProvider.getCredentials())
+        assertNull(viewModel.uiState.value.errorMessage)
+    }
+
+    // ── onLogout: purge delegation (slice 7) ──────────────────────────────────
+
+    @Test
+    fun `onLogout delegates the whole teardown to the logout purger`() = runTest(testDispatcher) {
+        seedCredentials(existingCredentials)
+        createViewModel()
+
+        viewModel.onLogout()
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(1, logoutPurger.logOutCount)
+    }
+
+    @Test
+    fun `onLogout does not clear the credentials behind the purger's back`() = runTest(testDispatcher) {
+        // The purge clears credentials *last*, after the local stores are empty. A ViewModel that
+        // also cleared them directly would defeat that ordering, so with a purger that clears
+        // nothing the credentials must still be there.
+        seedCredentials(existingCredentials)
+        createViewModel()
+
+        viewModel.onLogout()
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(existingCredentials, credentialsProvider.getCredentials())
+    }
+
+    @Test
+    fun `a failed purge keeps the user logged in and shows a retryable French error`() = runTest(testDispatcher) {
+        seedCredentials(existingCredentials)
+        createViewModel()
+        logoutPurger.failOnceWith = LogoutPurgeException("Échec du vidage du cache.")
+
+        viewModel.onLogout()
+        testDispatcher.scheduler.runCurrent()
+
+        val state = viewModel.uiState.value
+        assertFalse(state.isLoggedOut)
+        assertFalse(state.isLoading)
+        assertEquals(SettingsMessageSection.ACTIONS, state.messageSection)
+        val error = state.errorMessage
+        assertTrue("expected a French, retryable error, got: $error", error != null && error.contains("réessayer"))
+        assertEquals(existingCredentials, credentialsProvider.getCredentials())
+    }
+
+    @Test
+    fun `retrying after a failed purge logs the user out`() = runTest(testDispatcher) {
+        seedCredentials(existingCredentials)
+        createViewModel()
+        logoutPurger.failOnceWith = LogoutPurgeException("Échec transitoire.")
+
+        viewModel.onLogout()
+        testDispatcher.scheduler.runCurrent()
+        assertFalse(viewModel.uiState.value.isLoggedOut)
+
+        viewModel.onLogout()
+        testDispatcher.scheduler.runCurrent()
+
+        val state = viewModel.uiState.value
+        assertTrue(state.isLoggedOut)
+        assertNull(state.errorMessage)
+        assertEquals(2, logoutPurger.logOutCount)
+    }
+
+    @Test
+    fun `the loading state is held for as long as the purge runs`() = runTest(testDispatcher) {
+        val gate = CompletableDeferred<Unit>()
+        logoutPurger = FakeLogoutPurger(gate = gate)
+        seedCredentials(existingCredentials)
+        createViewModel()
+
+        viewModel.onLogout()
+        testDispatcher.scheduler.runCurrent()
+        assertTrue("the purge is still running", viewModel.uiState.value.isLoading)
+        assertFalse(viewModel.uiState.value.isLoggedOut)
+
+        gate.complete(Unit)
+        testDispatcher.scheduler.runCurrent()
+
+        assertFalse(viewModel.uiState.value.isLoading)
+        assertTrue(viewModel.uiState.value.isLoggedOut)
+    }
+
+    @Test
+    fun `confirming logout closes the confirmation dialog`() = runTest(testDispatcher) {
+        seedCredentials(existingCredentials)
+        createViewModel()
+        viewModel.onLogoutRequested()
+
+        viewModel.onLogout()
+        testDispatcher.scheduler.runCurrent()
+
+        assertFalse(viewModel.uiState.value.isLogoutConfirmationVisible)
+    }
+
+    // ── confirmation copy (slice 8) ───────────────────────────────────────────
+
+    @Test
+    fun `the logout confirmation announces that local downloads are deleted`() {
+        // Acceptance criterion 10. The old copy promised the opposite ("téléchargements sont
+        // conservés"), which is now a lie the user cannot undo.
+        assertTrue(
+            "the confirmation must name downloads: $LOGOUT_CONFIRMATION_MESSAGE",
+            LOGOUT_CONFIRMATION_MESSAGE.contains("téléchargements"),
+        )
+        assertTrue(
+            "the confirmation must announce deletion: $LOGOUT_CONFIRMATION_MESSAGE",
+            LOGOUT_CONFIRMATION_MESSAGE.contains("supprim"),
+        )
+        // Profiles and favorites genuinely do survive, so "conservés" on its own is fine; what
+        // must be gone is the old promise that *downloads* survive.
+        val downloadsSentence = LOGOUT_CONFIRMATION_MESSAGE.split(". ")
+            .single { it.contains("téléchargements") }
+        assertTrue(
+            "the sentence about downloads must announce deletion, not survival: $downloadsSentence",
+            downloadsSentence.contains("supprim") && !downloadsSentence.contains("conserv"),
+        )
     }
 }
