@@ -2,9 +2,13 @@ package com.bobot.iptvapp.di
 
 import com.bobot.iptvapp.data.logout.DefaultLogoutPurger
 import com.bobot.iptvapp.data.logout.LocalCachePurger
+import com.bobot.iptvapp.data.logout.LogoutFinalizer
+import com.bobot.iptvapp.data.logout.SessionCacheInvalidator
 import com.bobot.iptvapp.data.logout.RoomLocalCachePurger
+import com.bobot.iptvapp.data.preferences.DataStoreLogoutFinalizer
 import com.bobot.iptvapp.data.preferences.DataStoreLogoutPurgeMarkerStore
 import com.bobot.iptvapp.data.preferences.LogoutPurgeMarkerStore
+import com.bobot.iptvapp.data.repository.CatalogRepositoryImpl
 import com.bobot.iptvapp.domain.logout.LogoutPurger
 import com.bobot.iptvapp.download.DownloadCommander
 import com.bobot.iptvapp.download.IptvDownloadService
@@ -51,6 +55,19 @@ abstract class LogoutModule {
     @Binds
     @Singleton
     abstract fun bindLocalCachePurger(impl: RoomLocalCachePurger): LocalCachePurger
+
+    /**
+     * The repository is already the single owner of the in-memory catalogue memos and of the fetch
+     * generations that make a late result unpublishable, so the purge invalidates through it rather
+     * than keeping a second copy of that state it would have to hold in sync.
+     */
+    @Binds
+    @Singleton
+    abstract fun bindSessionCacheInvalidator(impl: CatalogRepositoryImpl): SessionCacheInvalidator
+
+    @Binds
+    @Singleton
+    abstract fun bindLogoutFinalizer(impl: DataStoreLogoutFinalizer): LogoutFinalizer
 
     @Binds
     @Singleton

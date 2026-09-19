@@ -41,6 +41,10 @@ class LiveMedia3DownloadIndexGateway @Inject constructor(
         // purge is not done until those are gone too.
         downloadManager.downloadIndex.getDownloads().use { it.count }
     }
+
+    override suspend fun containsDownload(downloadId: String): Boolean = withContext(ioDispatcher) {
+        downloadManager.downloadIndex.getDownload(downloadId) != null
+    }
 }
 
 /**

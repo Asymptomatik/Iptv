@@ -49,6 +49,8 @@ class FakeEpgDao : EpgDao {
         programs.clear()
     }
 
+    override suspend fun countAll(): Int = programs.size
+
     private fun programsOf(accountKey: String, channelId: String): List<EpgProgramEntity> =
         programs.values
             .filter { it.accountKey == accountKey && it.channelId == channelId }

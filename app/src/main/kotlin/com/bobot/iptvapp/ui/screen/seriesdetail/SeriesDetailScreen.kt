@@ -60,6 +60,7 @@ import com.bobot.iptvapp.domain.model.Series
 import com.bobot.iptvapp.domain.util.displayLabel
 import com.bobot.iptvapp.domain.util.StreamTitle
 import com.bobot.iptvapp.domain.util.displayTitle
+import com.bobot.iptvapp.ui.components.DownloadMessageBanner
 import com.bobot.iptvapp.ui.components.CategoryChip
 import com.bobot.iptvapp.ui.components.FocusableTextButton
 import com.bobot.iptvapp.ui.components.GhostButton
@@ -125,6 +126,7 @@ fun SeriesDetailScreen(
         onSeasonSelected = viewModel::onSelectSeason,
         onFavoriteClick = viewModel::onToggleFavorite,
         onRetry = viewModel::onRetry,
+        onDownloadMessageShown = viewModel::onDownloadMessageShown,
         modifier = modifier,
     )
 }
@@ -139,6 +141,7 @@ private fun SeriesDetailContent(
     onSeasonSelected: (Int) -> Unit,
     onFavoriteClick: () -> Unit,
     onRetry: () -> Unit,
+    onDownloadMessageShown: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Box(
@@ -165,6 +168,14 @@ private fun SeriesDetailContent(
             )
             else -> SeriesDetailErrorState(message = null, onRetry = onRetry)
         }
+
+        // Same placement as the film sheet's — see
+        // [com.bobot.iptvapp.ui.screen.moviedetail.MovieDetailScreen].
+        DownloadMessageBanner(
+            message = uiState.downloadMessage,
+            onShown = onDownloadMessageShown,
+            modifier = Modifier.align(Alignment.BottomCenter),
+        )
     }
 }
 

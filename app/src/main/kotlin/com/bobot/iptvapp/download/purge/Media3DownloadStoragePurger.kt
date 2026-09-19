@@ -25,26 +25,65 @@ class Media3DownloadStoragePurger @Inject constructor(
         index.removeAllDownloads()
 
         var waitedMillis = 0L
+        var remaining: Int
         while (true) {
-            if (index.countIndexedDownloads() == 0) return
+            remaining = index.countIndexedDownloads()
+            if (remaining == 0) return
             if (waitedMillis >= AWAIT_EMPTY_TIMEOUT_MILLIS) break
             delay(AWAIT_EMPTY_POLL_MILLIS)
             waitedMillis += AWAIT_EMPTY_POLL_MILLIS
         }
 
+        // The count the wait actually gave up on, not a fresh read: re-reading here would be one
+        // more I/O call on a path that is already failing, and an index that drains on that very
+        // read would produce a "still contains 0 entries" message contradicting itself.
         throw LogoutPurgeException(
             "L'index de téléchargement Media3 contient encore " +
-                "${index.countIndexedDownloads()} entrée(s) après ${AWAIT_EMPTY_TIMEOUT_MILLIS} ms.",
+                "$remaining entrée(s) après ${AWAIT_EMPTY_TIMEOUT_MILLIS} ms.",
         )
     }
 
     /**
-     * Evicts key by key through the live instance. The keys are snapshotted first because
-     * [Media3CacheGateway.removeResource] mutates the very set [Media3CacheGateway.cachedKeys]
-     * reports.
+     * Evicts key by key through the live instance, then re-reads the cache until it observes it
+     * empty on [REQUIRED_CONSECUTIVE_EMPTY_READS] consecutive reads — the same contract as
+     * [removeAllDownloadsAndAwaitEmptyIndex], strengthened for the same [Media3CacheGateway] the
+     * player's own `CacheDataSource` writes through.
+     *
+     * A single empty read is not evidence the cache stays empty: it shares this [cache] instance
+     * with active playback, which can create a span in the instant right after that read returns —
+     * a purge that trusted one read could announce success with the previous account's bytes about
+     * to land on disk. Requiring [REQUIRED_CONSECUTIVE_EMPTY_READS] reads in a row, one poll
+     * interval apart, gives that writer a window to show up before the purge commits to "empty".
+     *
+     * On timeout, the *last* pass may have just emptied the cache with its final removal — reporting
+     * the count from before that removal would fail a purge that actually just succeeded, so the
+     * failure path re-reads once more before deciding.
      */
     override suspend fun evictCachedResources() {
-        cache.cachedKeys().toList().forEach { cache.removeResource(it) }
+        var waitedMillis = 0L
+        var consecutiveEmptyReads = 0
+        while (true) {
+            val keys = cache.cachedKeys()
+            if (keys.isEmpty()) {
+                consecutiveEmptyReads++
+                if (consecutiveEmptyReads >= REQUIRED_CONSECUTIVE_EMPTY_READS) return
+            } else {
+                consecutiveEmptyReads = 0
+                keys.toList().forEach { cache.removeResource(it) }
+            }
+            if (waitedMillis >= AWAIT_EMPTY_TIMEOUT_MILLIS) break
+            delay(AWAIT_EMPTY_POLL_MILLIS)
+            waitedMillis += AWAIT_EMPTY_POLL_MILLIS
+        }
+
+        // A fresh read, not the last pass's stale count: that pass may have just emptied the cache
+        // with a removal the loop above never got to re-observe before giving up on time.
+        val residual = cache.cachedKeys()
+        if (residual.isEmpty()) return
+        throw LogoutPurgeException(
+            "Le cache de téléchargement Media3 contient encore " +
+                "${residual.size} ressource(s) après ${AWAIT_EMPTY_TIMEOUT_MILLIS} ms.",
+        )
     }
 
     override suspend fun hasStorageResidue(): Boolean =
@@ -56,5 +95,8 @@ class Media3DownloadStoragePurger @Inject constructor(
 
         /** Gap between two index checks while waiting. */
         internal const val AWAIT_EMPTY_POLL_MILLIS = 50L
+
+        /** See [evictCachedResources]'s KDoc for why a single empty read is not enough. */
+        internal const val REQUIRED_CONSECUTIVE_EMPTY_READS = 2
     }
 }

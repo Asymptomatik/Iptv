@@ -48,4 +48,8 @@ class RoomLocalCachePurger @Inject constructor(
     override suspend fun countDownloadResidue(): Int = withContext(ioDispatcher) {
         downloadDao.countAll()
     }
+
+    override suspend fun countCatalogResidue(): Int = withContext(ioDispatcher) {
+        catalogCacheDao.countAllCatalogRows() + epgDao.countAll()
+    }
 }

@@ -7,6 +7,7 @@ import com.bobot.iptvapp.data.local.entity.CatalogSyncEntity.Companion.SCOPE_ALL
 import com.bobot.iptvapp.data.local.entity.CatalogSyncEntity.Companion.SCOPE_CATEGORIES
 import com.bobot.iptvapp.data.local.mapper.toDomain
 import com.bobot.iptvapp.data.local.mapper.toEntity
+import com.bobot.iptvapp.data.logout.SessionCacheInvalidator
 import com.bobot.iptvapp.data.source.CatalogDataSource
 import com.bobot.iptvapp.data.source.CredentialsProvider
 import com.bobot.iptvapp.di.ApplicationScope
@@ -29,6 +30,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
@@ -144,7 +146,7 @@ class CatalogRepositoryImpl @Inject constructor(
     @IoDispatcher private val ioDispatcher: CoroutineDispatcher,
     private val credentialsProvider: CredentialsProvider,
     @ApplicationScope private val applicationScope: CoroutineScope,
-) : CatalogRepository {
+) : CatalogRepository, SessionCacheInvalidator {
 
     // ── Session cache ─────────────────────────────────────────────────────────
     //
@@ -192,6 +194,74 @@ class CatalogRepositoryImpl @Inject constructor(
 
         /** [generation] as captured when [inFlight] started. Guarded by [mutex]. */
         var inFlightGeneration: Int = 0
+
+        /**
+         * ## Publish synchronization
+         *
+         * A plain JVM monitor, not [mutex]: [invalidateCache] bumps [generation] from a non-`suspend`
+         * function and cannot take a coroutine [Mutex], while every producer's publish check is a
+         * suspend function reaching a non-suspending instant (a generation compare plus an in-memory
+         * memo write) — the one piece of state both sides can synchronize on without either becoming
+         * incompatible with the other.
+         *
+         * Checking the generation under this lock closes a narrower race than the naive "check after
+         * fetch" already did: a plain unsynchronized read-compare can still interleave with
+         * [invalidateCache]'s bump-then-clear between the read and the memo write that follows it,
+         * resurrecting a memo entry moments after a purge cleared it. Synchronizing both sides on the
+         * same lock rules that out — see [claimPublish].
+         */
+        val publishLock = Any()
+
+        /**
+         * Producers currently committed to a Room write after [claimPublish] let them through,
+         * incremented inside [publishLock] and decremented once that write (or its absence) is
+         * resolved. [awaitDrain] polls this to zero after a bump, so the purge's Room-clear step is
+         * guaranteed to run only after every write a check let through *before* the bump has actually
+         * landed — the gap a bare generation check cannot close on its own, since passing it and
+         * finishing the Room write are two different instants.
+         */
+        val pendingRoomWrites = AtomicInteger(0)
+    }
+
+    /**
+     * Atomically, under [CategoryFetchState.publishLock]: compares [capturedGeneration] against the
+     * live generation and, only if still current, runs [writeMemo] and — when [commitRoomWrite] is
+     * `true` — reserves a Room write by incrementing [CategoryFetchState.pendingRoomWrites] before
+     * the lock is released. Returns whether the check passed.
+     *
+     * A caller that receives `true` with [commitRoomWrite] set must perform its Room write and then
+     * call [CategoryFetchState.pendingRoomWrites]`.decrementAndGet()` in a `finally`, or
+     * [awaitDrain] would wait for a write that will never resolve.
+     */
+    private inline fun CategoryFetchState.claimPublish(
+        capturedGeneration: Int,
+        commitRoomWrite: Boolean,
+        writeMemo: () -> Unit,
+    ): Boolean = synchronized(publishLock) {
+        val current = generation.get() == capturedGeneration
+        if (current) {
+            writeMemo()
+            if (commitRoomWrite) pendingRoomWrites.incrementAndGet()
+        }
+        current
+    }
+
+    /**
+     * Waits until every Room write [claimPublish] let through for [state] has landed, or
+     * [AWAIT_DRAIN_TIMEOUT_MILLIS] elapses. Called after [invalidateCache] has already bumped the
+     * generation, so nothing new can be claimed while this waits out what was claimed before.
+     *
+     * Bounded rather than unconditional: a Room write that never resolves (a genuinely stuck I/O
+     * call) must not hang the purge forever — [DefaultLogoutPurger]'s replay-then-fail residue check
+     * is the backstop for that case, exactly as it is for every other store.
+     */
+    private suspend fun awaitDrain(state: CategoryFetchState) {
+        var waitedMillis = 0L
+        while (state.pendingRoomWrites.get() > 0) {
+            if (waitedMillis >= AWAIT_DRAIN_TIMEOUT_MILLIS) return
+            delay(AWAIT_DRAIN_POLL_MILLIS)
+            waitedMillis += AWAIT_DRAIN_POLL_MILLIS
+        }
     }
 
     private val liveCategoriesFetch = CategoryFetchState()
@@ -292,11 +362,23 @@ class CatalogRepositoryImpl @Inject constructor(
                 return@flow
             }
             try {
+                val generation = liveCategoriesFetch.generation.get()
                 val result = dataSource.getLiveChannels(null)
-                cachedAllChannels = result
-                persistQuietly(accountKey) { key ->
-                    catalogCacheDao.upsertChannels(result.toEntity(key))
-                    markSynced(key, ContentType.LIVE, SCOPE_ALL)
+                // A logout/invalidation that landed while this fetch was in flight bumped this
+                // generation and already nulled cachedAllChannels — see [invalidateCache]. Writing
+                // the stale result back here would resurrect the previous account's list right
+                // after the purge cleared it, so a mismatch discards the write (the caller still
+                // gets its answer; only the shared cache is protected). See [claimPublish] for why
+                // the check and the memo write are synchronized together.
+                if (liveCategoriesFetch.claimPublish(generation, commitRoomWrite = true) { cachedAllChannels = result }) {
+                    try {
+                        persistQuietly(accountKey) { key ->
+                            catalogCacheDao.upsertChannels(result.toEntity(key))
+                            markSynced(key, ContentType.LIVE, SCOPE_ALL)
+                        }
+                    } finally {
+                        liveCategoriesFetch.pendingRoomWrites.decrementAndGet()
+                    }
                 }
                 emit(Resource.Success(result))
             } catch (t: Throwable) {
@@ -317,10 +399,17 @@ class CatalogRepositoryImpl @Inject constructor(
                     catalogCacheDao.getChannelsByCategory(key.value, categoryId).toDomain()
                 }?.let { emit(Resource.Success(it)); return@flow }
                 try {
+                    val generation = liveCategoriesFetch.generation.get()
                     val result = dataSource.getLiveChannels(categoryId)
-                    persistQuietly(accountKey) { key ->
-                        catalogCacheDao.upsertChannels(result.toEntity(key))
-                        markSynced(key, ContentType.LIVE, categoryId)
+                    if (liveCategoriesFetch.claimPublish(generation, commitRoomWrite = true) {}) {
+                        try {
+                            persistQuietly(accountKey) { key ->
+                                catalogCacheDao.upsertChannels(result.toEntity(key))
+                                markSynced(key, ContentType.LIVE, categoryId)
+                            }
+                        } finally {
+                            liveCategoriesFetch.pendingRoomWrites.decrementAndGet()
+                        }
                     }
                     emit(Resource.Success(result))
                 } catch (t: Throwable) {
@@ -346,11 +435,18 @@ class CatalogRepositoryImpl @Inject constructor(
                 return@flow
             }
             try {
+                val generation = vodCategoriesFetch.generation.get()
                 val result = dataSource.getMovies(null)
-                cachedAllMovies = result
-                persistQuietly(accountKey) { key ->
-                    catalogCacheDao.upsertMovies(result.toEntity(key))
-                    markSynced(key, ContentType.MOVIE, SCOPE_ALL)
+                // See [getLiveChannels] for why a generation mismatch discards the write.
+                if (vodCategoriesFetch.claimPublish(generation, commitRoomWrite = true) { cachedAllMovies = result }) {
+                    try {
+                        persistQuietly(accountKey) { key ->
+                            catalogCacheDao.upsertMovies(result.toEntity(key))
+                            markSynced(key, ContentType.MOVIE, SCOPE_ALL)
+                        }
+                    } finally {
+                        vodCategoriesFetch.pendingRoomWrites.decrementAndGet()
+                    }
                 }
                 emit(Resource.Success(result))
             } catch (t: Throwable) {
@@ -369,10 +465,17 @@ class CatalogRepositoryImpl @Inject constructor(
                     catalogCacheDao.getMoviesByCategory(key.value, categoryId).toDomain()
                 }?.let { emit(Resource.Success(it)); return@flow }
                 try {
+                    val generation = vodCategoriesFetch.generation.get()
                     val result = dataSource.getMovies(categoryId)
-                    persistQuietly(accountKey) { key ->
-                        catalogCacheDao.upsertMovies(result.toEntity(key))
-                        markSynced(key, ContentType.MOVIE, categoryId)
+                    if (vodCategoriesFetch.claimPublish(generation, commitRoomWrite = true) {}) {
+                        try {
+                            persistQuietly(accountKey) { key ->
+                                catalogCacheDao.upsertMovies(result.toEntity(key))
+                                markSynced(key, ContentType.MOVIE, categoryId)
+                            }
+                        } finally {
+                            vodCategoriesFetch.pendingRoomWrites.decrementAndGet()
+                        }
                     }
                     emit(Resource.Success(result))
                 } catch (t: Throwable) {
@@ -398,11 +501,18 @@ class CatalogRepositoryImpl @Inject constructor(
                 return@flow
             }
             try {
+                val generation = seriesCategoriesFetch.generation.get()
                 val result = dataSource.getSeriesList(null)
-                cachedAllSeries = result
-                persistQuietly(accountKey) { key ->
-                    catalogCacheDao.upsertSeries(result.toEntity(key))
-                    markSynced(key, ContentType.SERIES, SCOPE_ALL)
+                // See [getLiveChannels] for why a generation mismatch discards the write.
+                if (seriesCategoriesFetch.claimPublish(generation, commitRoomWrite = true) { cachedAllSeries = result }) {
+                    try {
+                        persistQuietly(accountKey) { key ->
+                            catalogCacheDao.upsertSeries(result.toEntity(key))
+                            markSynced(key, ContentType.SERIES, SCOPE_ALL)
+                        }
+                    } finally {
+                        seriesCategoriesFetch.pendingRoomWrites.decrementAndGet()
+                    }
                 }
                 emit(Resource.Success(result))
             } catch (t: Throwable) {
@@ -421,10 +531,17 @@ class CatalogRepositoryImpl @Inject constructor(
                     catalogCacheDao.getSeriesByCategory(key.value, categoryId).toDomain()
                 }?.let { emit(Resource.Success(it)); return@flow }
                 try {
+                    val generation = seriesCategoriesFetch.generation.get()
                     val result = dataSource.getSeriesList(categoryId)
-                    persistQuietly(accountKey) { key ->
-                        catalogCacheDao.upsertSeries(result.toEntity(key))
-                        markSynced(key, ContentType.SERIES, categoryId)
+                    if (seriesCategoriesFetch.claimPublish(generation, commitRoomWrite = true) {}) {
+                        try {
+                            persistQuietly(accountKey) { key ->
+                                catalogCacheDao.upsertSeries(result.toEntity(key))
+                                markSynced(key, ContentType.SERIES, categoryId)
+                            }
+                        } finally {
+                            seriesCategoriesFetch.pendingRoomWrites.decrementAndGet()
+                        }
                     }
                     emit(Resource.Success(result))
                 } catch (t: Throwable) {
@@ -463,13 +580,29 @@ class CatalogRepositoryImpl @Inject constructor(
      * "Series detail write-through") before returning — best-effort, via
      * [persistSeriesDetailQuietly].
      *
+     * Guarded by [seriesCategoriesFetch]'s generation, the same counter [invalidateCache] bumps for
+     * [ContentType.SERIES]: a fetch already in flight when a logout starts must not write the
+     * previous account's series metadata back into Room after the purge has cleared it. There is no
+     * dedicated state for series *detail* — reusing the categories counter costs nothing extra,
+     * since [invalidateCache] already bumps it for every series-related write on logout.
+     *
      * Runs on [ioDispatcher] via [withContext] — see [getMovieDetail] for rationale.
      */
     override suspend fun getSeriesDetail(seriesId: String): Resource<Series> =
         withContext(ioDispatcher) {
             try {
+                val generation = seriesCategoriesFetch.generation.get()
                 val result = dataSource.getSeriesInfo(seriesId)
-                currentAccountKey()?.let { accountKey -> persistSeriesDetailQuietly(accountKey, result) }
+                val accountKey = currentAccountKey()
+                if (accountKey != null &&
+                    seriesCategoriesFetch.claimPublish(generation, commitRoomWrite = true) {}
+                ) {
+                    try {
+                        persistSeriesDetailQuietly(accountKey, result)
+                    } finally {
+                        seriesCategoriesFetch.pendingRoomWrites.decrementAndGet()
+                    }
+                }
                 Resource.Success(result)
             } catch (t: Throwable) {
                 rethrowIfCancellation(t)
@@ -944,15 +1077,18 @@ class CatalogRepositoryImpl @Inject constructor(
                     catalogCacheDao.getCategoriesByType(key.value, contentType.name).toDomain()
                 }
                 val fresh = cached ?: fetch()
-                val publishable = state.mutex.withLock {
-                    (state.generation.get() == generation).also { if (it) writeMemo(fresh) }
-                }
                 // Same gate for Room: a result the memo refused is the previous account's and has no
                 // business landing in the offline cache either. See "Invalidation generations".
                 // Skipped outright for a cached result — rewriting Room with what it just returned
                 // would only push the marker forward and keep the slice alive for ever.
-                if (cached == null && publishable && accountKey != null) {
-                    persistCategoriesQuietly(accountKey, contentType, fresh)
+                val willWriteRoom = cached == null && accountKey != null
+                val publishable = state.claimPublish(generation, commitRoomWrite = willWriteRoom) { writeMemo(fresh) }
+                if (publishable && willWriteRoom) {
+                    try {
+                        persistCategoriesQuietly(accountKey!!, contentType, fresh)
+                    } finally {
+                        state.pendingRoomWrites.decrementAndGet()
+                    }
                 }
                 result = Resource.Success(fresh)
             } catch (cancellation: CancellationException) {
@@ -985,6 +1121,20 @@ class CatalogRepositoryImpl @Inject constructor(
     }
 
     /**
+     * [SessionCacheInvalidator]'s side of [invalidateCaches] — same bump-and-clear, reached from the
+     * logout orchestrator instead of from a screen, plus a drain [invalidateCaches] alone does not
+     * need: a screen-triggered invalidation has no store being cleared right behind it, but the
+     * purge's next step does (see [DefaultLogoutPurger.purgeEveryStore]), so this additionally waits
+     * out every Room write a check already let through before the bump — see [awaitDrain].
+     */
+    override suspend fun invalidateSessionCaches() {
+        invalidateCaches()
+        awaitDrain(liveCategoriesFetch)
+        awaitDrain(vodCategoriesFetch)
+        awaitDrain(seriesCategoriesFetch)
+    }
+
+    /**
      * Clearing the memo is not enough on its own: a categories request may be in flight right now
      * (this is called from the application-scoped credentials observer, which cancels nothing), and
      * it would otherwise complete afterwards and repopulate the cache it was meant to invalidate —
@@ -1000,17 +1150,17 @@ class CatalogRepositoryImpl @Inject constructor(
      */
     override fun invalidateCache(type: ContentType) {
         when (type) {
-            ContentType.LIVE -> {
+            ContentType.LIVE -> synchronized(liveCategoriesFetch.publishLock) {
                 liveCategoriesFetch.generation.incrementAndGet()
                 cachedLiveCategories = null
                 cachedAllChannels = null
             }
-            ContentType.MOVIE -> {
+            ContentType.MOVIE -> synchronized(vodCategoriesFetch.publishLock) {
                 vodCategoriesFetch.generation.incrementAndGet()
                 cachedVodCategories = null
                 cachedAllMovies = null
             }
-            ContentType.SERIES -> {
+            ContentType.SERIES -> synchronized(seriesCategoriesFetch.publishLock) {
                 seriesCategoriesFetch.generation.incrementAndGet()
                 cachedSeriesCategories = null
                 cachedAllSeries = null
@@ -1041,5 +1191,9 @@ class CatalogRepositoryImpl @Inject constructor(
          * through [invalidatePersistentCache].
          */
         const val CATALOG_CACHE_TTL_MILLIS = 24L * 60 * 60 * 1000
+
+        /** See [awaitDrain]. */
+        const val AWAIT_DRAIN_TIMEOUT_MILLIS = 5_000L
+        const val AWAIT_DRAIN_POLL_MILLIS = 50L
     }
 }

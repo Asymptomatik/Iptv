@@ -265,4 +265,8 @@ class FakeCatalogCacheDao : CatalogCacheDao {
         onGlobalClear?.invoke()
         syncMarkers.clear()
     }
+
+    override suspend fun countAllCatalogRows(): Int =
+        categories.size + channels.size + movies.size + series.size +
+            seasons.size + episodes.size + syncMarkers.size
 }

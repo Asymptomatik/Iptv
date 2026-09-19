@@ -91,4 +91,8 @@ interface EpgDao {
     /** Deletes all EPG programme rows, across every account. */
     @Query("DELETE FROM epg_programs")
     suspend fun clearAll()
+
+    /** Rows left across every account. Backs the logout purge's residue check. */
+    @Query("SELECT COUNT(*) FROM epg_programs")
+    suspend fun countAll(): Int
 }

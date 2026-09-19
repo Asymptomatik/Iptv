@@ -45,6 +45,7 @@ import com.bobot.iptvapp.domain.model.DownloadState
 import com.bobot.iptvapp.domain.model.Movie
 import com.bobot.iptvapp.domain.util.displayTitle
 import com.bobot.iptvapp.ui.components.CategoryChip
+import com.bobot.iptvapp.ui.components.DownloadMessageBanner
 import com.bobot.iptvapp.ui.components.FocusableTextButton
 import com.bobot.iptvapp.ui.components.GhostButton
 import com.bobot.iptvapp.ui.components.GlassIconButton
@@ -94,6 +95,7 @@ fun MovieDetailScreen(
         onPauseDownload = viewModel::onPauseDownload,
         onResumeDownload = viewModel::onResumeDownload,
         onRetry = viewModel::onRetry,
+        onDownloadMessageShown = viewModel::onDownloadMessageShown,
         modifier = modifier,
     )
 }
@@ -107,6 +109,7 @@ private fun MovieDetailContent(
     onPauseDownload: () -> Unit = {},
     onResumeDownload: () -> Unit = {},
     onRetry: () -> Unit,
+    onDownloadMessageShown: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Box(
@@ -132,6 +135,14 @@ private fun MovieDetailContent(
             )
             else -> MovieDetailErrorState(message = null, onRetry = onRetry)
         }
+
+        // Last child of the Box so it draws over the sheet, anchored low to stay clear of the
+        // hero artwork and the action row it is reporting on.
+        DownloadMessageBanner(
+            message = uiState.downloadMessage,
+            onShown = onDownloadMessageShown,
+            modifier = Modifier.align(Alignment.BottomCenter),
+        )
     }
 }
 

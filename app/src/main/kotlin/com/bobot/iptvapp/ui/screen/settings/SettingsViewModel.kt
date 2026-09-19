@@ -2,14 +2,16 @@ package com.bobot.iptvapp.ui.screen.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.bobot.iptvapp.data.logout.LogoutCoordinator
 import com.bobot.iptvapp.data.preferences.AppPreferencesStore
 import com.bobot.iptvapp.data.source.CatalogException
 import com.bobot.iptvapp.data.source.CredentialsProvider
 import com.bobot.iptvapp.domain.model.ContentType
 import com.bobot.iptvapp.domain.model.XtreamCredentials
-import com.bobot.iptvapp.domain.logout.LogoutPurger
+import com.bobot.iptvapp.domain.logout.LogoutPurgeState
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.util.Resource
+import com.bobot.iptvapp.ui.util.CREDENTIALS_REFUSED_MESSAGE
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -44,10 +46,12 @@ import javax.inject.Inject
  * @property messageSection     Which block of the screen [errorMessage] / [infoMessage] belong
  *                               to, so the confirmation is rendered next to the control that
  *                               produced it (QA finding N12). Ignored when both messages are null.
- * @property isLoggedOut        One-shot success signal. Becomes `true` exactly once
- *                               [SettingsViewModel.onLogout] finishes clearing the persisted
- *                               credentials; [SettingsScreen] observes this to trigger navigation
- *                               back to the Onboarding route with a fully cleared back stack.
+ * @property isLoggedOut        One-shot success signal. Becomes `true` when the purge this screen
+ *                               is watching reports [LogoutPurgeState.Completed] — which may well
+ *                               be a purge a *previous* instance of this screen asked for, since
+ *                               the purge outlives the ViewModel that started it. [SettingsScreen]
+ *                               observes this to trigger navigation back to the Onboarding route
+ *                               with a fully cleared back stack.
  * @property isWifiOnlyDownloads Whether downloads are restricted to Wi-Fi networks — mirrors
  *                               [com.bobot.iptvapp.data.preferences.AppPreferencesStore.observeWifiOnlyDownloads],
  *                               collected in the [SettingsViewModel] init block and toggled via
@@ -114,13 +118,15 @@ data class SettingsUiState(
  *                             to invalidate catalog caches (Task 8/9).
  * @param credentialsProvider  Used to read, persist, and clear credentials (Task 9).
  * @param appPreferencesStore  Used to read and persist the Wi-Fi-only downloads preference.
+ * @param logoutCoordinator    Starts the logout purge outside this ViewModel's lifecycle and
+ *                             publishes its outcome — see [onLogout].
  */
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
     private val catalogRepository: CatalogRepository,
     private val credentialsProvider: CredentialsProvider,
     private val appPreferencesStore: AppPreferencesStore,
-    private val logoutPurger: LogoutPurger,
+    private val logoutCoordinator: LogoutCoordinator,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SettingsUiState())
@@ -151,6 +157,46 @@ class SettingsViewModel @Inject constructor(
                 _uiState.update { it.copy(isWifiOnlyDownloads = enabled) }
             }
         }
+
+        viewModelScope.launch {
+            var isFirstEmission = true
+            logoutCoordinator.state.collect { purge ->
+                // A logout that had *already* completed when this screen was created is not this
+                // screen's business. The user signed back in and re-opened Settings; replaying
+                // "logged out" would eject them to onboarding without having asked for anything.
+                // A completion arriving *after* that is the outcome of a purge this screen (or the
+                // one it replaced, mid-purge) is legitimately waiting on.
+                val isAlreadyConsumedLogout =
+                    isFirstEmission && purge is LogoutPurgeState.Completed
+                isFirstEmission = false
+                if (!isAlreadyConsumedLogout) applyPurgeState(purge)
+            }
+        }
+    }
+
+    private fun applyPurgeState(purge: LogoutPurgeState) = when (purge) {
+        // Nothing owed and nothing running: whatever the form is showing is about the form.
+        LogoutPurgeState.Idle -> Unit
+
+        // Includes a purge started elsewhere — a startup recovery, or the screen instance this one
+        // replaced. The controls stay disabled either way: the stores are being emptied underneath.
+        LogoutPurgeState.Running ->
+            _uiState.update { it.copy(isLoading = true) }
+
+        LogoutPurgeState.Completed ->
+            _uiState.update { it.copy(isLoading = false, isLoggedOut = true) }
+
+        // Sticky on purpose, unlike the completion above: as long as the coordinator reports a
+        // failure the install still owes a purge, so the message is still true for a screen opened
+        // later, and the retry it invites is the same idempotent purge.
+        is LogoutPurgeState.Failed ->
+            _uiState.update {
+                it.copy(
+                    isLoading = false,
+                    errorMessage = logoutErrorMessageFor(purge.failure),
+                    messageSection = SettingsMessageSection.ACTIONS,
+                )
+            }
     }
 
     /** Updates the server URL field and clears any previously shown message. */
@@ -218,9 +264,44 @@ class SettingsViewModel @Inject constructor(
         _uiState.update { it.copy(isLoading = true, errorMessage = null, infoMessage = null) }
 
         viewModelScope.launch {
-            credentialsProvider.setCredentials(newCredentials)
+            // Same exclusion as the onboarding form's, for the same reason — see
+            // [CREDENTIALS_REFUSED_MESSAGE]. Réglages is the one screen from which a logout can be
+            // started, so it is also the likeliest place for a credentials save to arrive on top of
+            // one.
+            val generation = logoutCoordinator.runUnlessPurgeOwed {
+                credentialsProvider.setCredentials(newCredentials)
+                logoutCoordinator.sessionGeneration
+            }
+            if (generation == null) {
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        errorMessage = CREDENTIALS_REFUSED_MESSAGE,
+                        messageSection = SettingsMessageSection.CREDENTIALS,
+                    )
+                }
+                return@launch
+            }
 
-            when (val result = catalogRepository.authenticate()) {
+            val result = catalogRepository.authenticate()
+
+            if (logoutCoordinator.sessionGeneration != generation) {
+                // A purge settled while authenticate() was in flight — see LogoutCoordinator's
+                // class KDoc "Why a credentials write is refused on a stale generation, not
+                // committed or rolled back". Neither branch below is safe to run: it would either
+                // announce a session the purge already wiped, or overwrite whatever the purge
+                // left behind.
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        errorMessage = CREDENTIALS_REFUSED_MESSAGE,
+                        messageSection = SettingsMessageSection.CREDENTIALS,
+                    )
+                }
+                return@launch
+            }
+
+            when (result) {
                 is Resource.Success -> {
                     lastKnownGoodCredentials = newCredentials
                     _uiState.update {
@@ -329,9 +410,17 @@ class SettingsViewModel @Inject constructor(
     }
 
     /**
-     * Hands the whole teardown to [logoutPurger] and flips [SettingsUiState.isLoggedOut] only if it
-     * comes back clean. [SettingsScreen] observes that one-shot signal to navigate back to the
-     * Onboarding route with a fully cleared back stack.
+     * *Requests* the teardown and returns. [SettingsUiState.isLoggedOut] is not flipped here — it
+     * is flipped by the [logoutCoordinator] state collector in [init], because the purge is not
+     * this screen's to own.
+     *
+     * That indirection is the fix for the bug this replaces. The purge used to run in
+     * [viewModelScope], so navigating away or rotating the device while it waited the Media3 index
+     * out cancelled it mid-sequence: pending marker set, credentials still on disk, downloads
+     * silently refused from then on, and no error shown anywhere. Now the work belongs to the
+     * coordinator's process-lifetime scope; leaving this screen only stops the *watching*, and the
+     * next Settings instance picks the outcome back up from
+     * [LogoutCoordinator.state][com.bobot.iptvapp.data.logout.LogoutCoordinator.state].
      *
      * Deliberately *not* done here: clearing the credentials. They are the purge's last step, after
      * the Media3 index, the Media3 cache and the Room caches are provably empty — clearing them
@@ -350,27 +439,14 @@ class SettingsViewModel @Inject constructor(
                 infoMessage = null,
             )
         }
-        viewModelScope.launch {
-            try {
-                logoutPurger.logOut()
-                _uiState.update { it.copy(isLoading = false, isLoggedOut = true) }
-            } catch (failure: Exception) {
-                _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        errorMessage = logoutErrorMessageFor(failure),
-                        messageSection = SettingsMessageSection.ACTIONS,
-                    )
-                }
-            }
-        }
+        viewModelScope.launch { logoutCoordinator.logOut() }
     }
 
     /**
      * Maps a purge failure to a French message that tells the user the state they are actually in:
      * still connected, nothing half-broken to repair by hand, and the action is worth retrying.
      */
-    private fun logoutErrorMessageFor(failure: Exception): String =
+    private fun logoutErrorMessageFor(failure: Throwable): String =
         "La déconnexion n'a pas pu supprimer toutes les données locales" +
             (failure.message?.let { " ($it)" } ?: "") +
             ". Vous êtes toujours connecté ; veuillez réessayer."

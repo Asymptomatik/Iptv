@@ -29,7 +29,6 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -91,22 +90,19 @@ internal const val LOGOUT_CONFIRMATION_MESSAGE: String =
  * All settings logic (ViewModel, callbacks) unchanged.
  *
  * @param onNavigateToProfiles Invoked when "Gérer les profils" is clicked.
- * @param onLoggedOut          Invoked once, after logout clears persisted credentials.
+ *
+ * Routing back to onboarding after a logout is no longer this screen's responsibility: this
+ * ViewModel may not even be alive when the purge that logout kicked off actually settles, so the
+ * root observes [com.bobot.iptvapp.data.logout.LogoutCoordinator.state] directly instead (see
+ * [com.bobot.iptvapp.MainViewModel]).
  */
 @Composable
 fun SettingsScreen(
     onNavigateToProfiles: () -> Unit,
-    onLoggedOut: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-
-    LaunchedEffect(uiState.isLoggedOut) {
-        if (uiState.isLoggedOut) {
-            onLoggedOut()
-        }
-    }
 
     SettingsContent(
         uiState = uiState,

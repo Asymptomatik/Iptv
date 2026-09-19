@@ -16,6 +16,7 @@ import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.repository.DownloadRepository
 import com.bobot.iptvapp.domain.repository.FavoritesRepository
 import com.bobot.iptvapp.domain.util.Resource
+import com.bobot.iptvapp.ui.util.DOWNLOAD_REFUSED_MESSAGE
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -59,6 +60,7 @@ data class SeriesDetailUiState(
     val selectedSeasonNumber: Int? = null,
     val hasCredentials: Boolean = true,
     val episodeDownloads: Map<String, OfflineDownload> = emptyMap(),
+    val downloadMessage: String? = null,
 ) {
     /**
      * Episodes of the season matching [selectedSeasonNumber] within [series], already sorted
@@ -205,26 +207,45 @@ class SeriesDetailViewModel @Inject constructor(
     fun onDownloadEpisode(episode: Episode) {
         val streamUrl = buildEpisodeStreamUrl(episode) ?: return
         viewModelScope.launch {
-            downloadRepository.enqueue(
-                DownloadRequestData(
-                    contentType = DownloadContentType.EPISODE,
-                    contentId = episode.id,
-                    title = episode.title,
-                    artworkUrl = episode.coverUrl,
-                    streamUrl = streamUrl,
-                ),
-            )
+            // `null` means refused, not failed — see [DownloadRepository.enqueue]. Same branch as
+            // [com.bobot.iptvapp.ui.screen.moviedetail.MovieDetailViewModel.onDownloadClick]: a
+            // silently ignored tap is indistinguishable from a slow one.
+            if (downloadRepository.enqueue(
+                    DownloadRequestData(
+                        contentType = DownloadContentType.EPISODE,
+                        contentId = episode.id,
+                        title = episode.title,
+                        artworkUrl = episode.coverUrl,
+                        streamUrl = streamUrl,
+                    ),
+                ) == null
+            ) {
+                showDownloadMessage(DOWNLOAD_REFUSED_MESSAGE)
+            }
         }
     }
 
     fun onPauseEpisodeDownload(episode: Episode) {
         val downloadId = _uiState.value.episodeDownloads[episode.id]?.downloadId ?: return
-        viewModelScope.launch { downloadRepository.pause(downloadId) }
+        viewModelScope.launch {
+            if (!downloadRepository.pause(downloadId)) showDownloadMessage(DOWNLOAD_REFUSED_MESSAGE)
+        }
     }
 
     fun onResumeEpisodeDownload(episode: Episode) {
         val downloadId = _uiState.value.episodeDownloads[episode.id]?.downloadId ?: return
-        viewModelScope.launch { downloadRepository.resume(downloadId) }
+        viewModelScope.launch {
+            if (!downloadRepository.resume(downloadId)) showDownloadMessage(DOWNLOAD_REFUSED_MESSAGE)
+        }
+    }
+
+    /** Acknowledges [SeriesDetailUiState.downloadMessage] once shown, so it is not shown twice. */
+    fun onDownloadMessageShown() {
+        _uiState.update { it.copy(downloadMessage = null) }
+    }
+
+    private fun showDownloadMessage(message: String) {
+        _uiState.update { it.copy(downloadMessage = message) }
     }
 
     /**

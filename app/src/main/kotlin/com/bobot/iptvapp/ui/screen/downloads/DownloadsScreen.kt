@@ -37,6 +37,7 @@ import coil.compose.AsyncImage
 import com.bobot.iptvapp.domain.model.DownloadState
 import com.bobot.iptvapp.domain.model.OfflineDownload
 import com.bobot.iptvapp.domain.util.StreamTitle
+import com.bobot.iptvapp.ui.components.DownloadMessageBanner
 import com.bobot.iptvapp.ui.components.FocusableTextButton
 import com.bobot.iptvapp.ui.components.GhostButton
 import com.bobot.iptvapp.ui.components.GlassSurface
@@ -71,6 +72,7 @@ fun DownloadsScreen(
         onPause = viewModel::pause,
         onResume = viewModel::resume,
         onRemove = viewModel::remove,
+        onActionMessageShown = viewModel::onActionMessageShown,
         modifier = modifier,
     )
 }
@@ -83,6 +85,7 @@ internal fun DownloadsContent(
     onPause: (String) -> Unit,
     onResume: (String) -> Unit,
     onRemove: (String) -> Unit,
+    onActionMessageShown: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val horizontalPadding = if (rememberIsTvDevice()) {
@@ -111,6 +114,13 @@ internal fun DownloadsContent(
                 color = TextPrimary,
             )
         }
+
+        // Above the list rather than over it: this screen is a list all the way down, so a floating
+        // banner would sit on top of a row the user may be reaching for.
+        DownloadMessageBanner(
+            message = uiState.actionMessage,
+            onShown = onActionMessageShown,
+        )
 
         when {
             uiState.isLoading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

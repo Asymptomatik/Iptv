@@ -3,6 +3,7 @@ package com.bobot.iptvapp.ui.screen.downloads
 import com.bobot.iptvapp.domain.model.DownloadContentType
 import com.bobot.iptvapp.domain.model.DownloadState
 import com.bobot.iptvapp.domain.model.OfflineDownload
+import com.bobot.iptvapp.ui.util.DOWNLOAD_REFUSED_MESSAGE
 import com.bobot.iptvapp.domain.repository.DownloadRepository
 import io.mockk.Runs
 import io.mockk.coEvery
@@ -19,6 +20,7 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 
@@ -56,7 +58,7 @@ class DownloadsViewModelTest {
     @Test
     fun `pause delegates to repository for the selected download`() {
         every { repository.observeDownloads() } returns downloads
-        coEvery { repository.pause("MOVIE:42") } just Runs
+        coEvery { repository.pause("MOVIE:42") } returns true
         val viewModel = DownloadsViewModel(repository)
 
         viewModel.pause("MOVIE:42")
@@ -67,7 +69,7 @@ class DownloadsViewModelTest {
 
     @Test
     fun `resume delegates to repository for the selected download`() {
-        coEvery { repository.resume("MOVIE:42") } just Runs
+        coEvery { repository.resume("MOVIE:42") } returns true
         val viewModel = DownloadsViewModel(repository)
 
         viewModel.resume("MOVIE:42")
@@ -85,6 +87,36 @@ class DownloadsViewModelTest {
         testDispatcher.scheduler.runCurrent()
 
         coVerify(exactly = 1) { repository.remove("MOVIE:42") }
+    }
+
+    @Test
+    fun `a refused pause or resume is reported instead of silently swallowed`() {
+        coEvery { repository.pause("MOVIE:42") } returns false
+        coEvery { repository.resume("MOVIE:42") } returns false
+        val viewModel = DownloadsViewModel(repository)
+
+        viewModel.pause("MOVIE:42")
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(DOWNLOAD_REFUSED_MESSAGE, viewModel.uiState.value.actionMessage)
+
+        viewModel.onActionMessageShown()
+        testDispatcher.scheduler.runCurrent()
+        assertNull(viewModel.uiState.value.actionMessage)
+
+        viewModel.resume("MOVIE:42")
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(DOWNLOAD_REFUSED_MESSAGE, viewModel.uiState.value.actionMessage)
+    }
+
+    @Test
+    fun `an accepted action says nothing at all`() {
+        coEvery { repository.pause("MOVIE:42") } returns true
+        val viewModel = DownloadsViewModel(repository)
+
+        viewModel.pause("MOVIE:42")
+        testDispatcher.scheduler.runCurrent()
+
+        assertNull(viewModel.uiState.value.actionMessage)
     }
 
     private fun download(downloadId: String, state: DownloadState) = OfflineDownload(

@@ -1,6 +1,8 @@
 package com.bobot.iptvapp.ui.screen.settings
 
+import com.bobot.iptvapp.data.logout.LogoutCoordinator
 import com.bobot.iptvapp.data.preferences.AppPreferencesStore
+import com.bobot.iptvapp.data.preferences.FakeLogoutPurgeMarkerStore
 import com.bobot.iptvapp.data.source.CatalogException
 import com.bobot.iptvapp.data.source.InMemoryCredentialsProvider
 import com.bobot.iptvapp.domain.model.ContentType
@@ -9,6 +11,7 @@ import com.bobot.iptvapp.domain.logout.LogoutPurgeException
 import com.bobot.iptvapp.domain.model.XtreamCredentials
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.util.Resource
+import com.bobot.iptvapp.ui.util.CREDENTIALS_REFUSED_MESSAGE
 import io.mockk.Runs
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -17,9 +20,15 @@ import io.mockk.just
 import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
@@ -54,6 +63,7 @@ import org.junit.Test
  * effects — including the "restore previous credentials on failure" behaviour unique to this
  * ViewModel — can be asserted directly instead of via mock verification.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class SettingsViewModelTest {
 
     private val testDispatcher = StandardTestDispatcher()
@@ -63,6 +73,27 @@ class SettingsViewModelTest {
     private lateinit var appPreferencesStore: AppPreferencesStore
     private lateinit var logoutPurger: FakeLogoutPurger
     private lateinit var viewModel: SettingsViewModel
+
+    /**
+     * Stands in for the `@ApplicationScope` singleton scope. It is deliberately *not* the test's
+     * own scope: the point of the coordinator is that the purge does not belong to whoever asked
+     * for it, and a purge parented to the caller would make that impossible to observe.
+     */
+    private val applicationScope = CoroutineScope(SupervisorJob() + testDispatcher)
+    private val markerStore = FakeLogoutPurgeMarkerStore()
+
+    /**
+     * Built on first use so a test can install a gated [FakeLogoutPurger] beforehand, and shared by
+     * every [SettingsViewModel] the test creates — one process has exactly one coordinator, which
+     * is what lets a recreated screen still learn how a purge it did not start ended.
+     */
+    private val logoutCoordinator: LogoutCoordinator by lazy {
+        LogoutCoordinator(
+            logoutPurger = logoutPurger,
+            markerStore = markerStore,
+            applicationScope = applicationScope,
+        )
+    }
 
     private val existingCredentials = XtreamCredentials(
         baseUrl = "http://old.example.com:8080",
@@ -85,6 +116,7 @@ class SettingsViewModelTest {
     @After
     fun tearDown() {
         Dispatchers.resetMain()
+        applicationScope.cancel()
     }
 
     /** Plain suspend helper — see class KDoc for how call sites wrap this in `runTest`. */
@@ -100,7 +132,7 @@ class SettingsViewModelTest {
             catalogRepository = catalogRepository,
             credentialsProvider = credentialsProvider,
             appPreferencesStore = appPreferencesStore,
-            logoutPurger = logoutPurger,
+            logoutCoordinator = logoutCoordinator,
         )
         testDispatcher.scheduler.runCurrent()
     }
@@ -190,6 +222,36 @@ class SettingsViewModelTest {
         assertTrue(state.errorMessage!!.isNotBlank())
         coVerify(exactly = 0) { catalogRepository.authenticate() }
     }
+
+    // ── onSaveCredentials — a purge still owed ───────────────────────────────
+
+    @Test
+    fun `saving credentials while a purge is still owed is refused rather than persisted`() =
+        runTest(testDispatcher) {
+            seedCredentials(existingCredentials)
+            createViewModel()
+            // Réglages is where a logout is started, so it is also where a save is likeliest to
+            // arrive on top of one that has not finished.
+            markerStore.markPurgePending()
+            coEvery { catalogRepository.authenticate() } returns Resource.Success(Unit)
+
+            viewModel.onServerUrlChange("http://new.example.com:8080")
+            viewModel.onUsernameChange("newuser")
+            viewModel.onPasswordChange("newpass")
+
+            viewModel.onSaveCredentials()
+            testDispatcher.scheduler.runCurrent()
+
+            val state = viewModel.uiState.value
+            assertFalse("the form must not stay stuck spinning on a refusal", state.isLoading)
+            assertEquals(CREDENTIALS_REFUSED_MESSAGE, state.errorMessage)
+            assertEquals(
+                "the store the purge is about to finalize must still hold only the old account",
+                existingCredentials,
+                credentialsProvider.getCredentials(),
+            )
+            coVerify(exactly = 0) { catalogRepository.authenticate() }
+        }
 
     // ── onSaveCredentials — success path ─────────────────────────────────────
 
@@ -381,7 +443,7 @@ class SettingsViewModelTest {
         createViewModel()
 
         viewModel.onLogout()
-        testDispatcher.scheduler.runCurrent()
+        advanceUntilIdle()
 
         assertTrue(viewModel.uiState.value.isLoggedOut)
         assertNull(viewModel.uiState.value.errorMessage)
@@ -395,7 +457,7 @@ class SettingsViewModelTest {
         createViewModel()
 
         viewModel.onLogout()
-        testDispatcher.scheduler.runCurrent()
+        advanceUntilIdle()
 
         assertEquals(1, logoutPurger.logOutCount)
     }
@@ -409,7 +471,7 @@ class SettingsViewModelTest {
         createViewModel()
 
         viewModel.onLogout()
-        testDispatcher.scheduler.runCurrent()
+        advanceUntilIdle()
 
         assertEquals(existingCredentials, credentialsProvider.getCredentials())
     }
@@ -421,7 +483,7 @@ class SettingsViewModelTest {
         logoutPurger.failOnceWith = LogoutPurgeException("Échec du vidage du cache.")
 
         viewModel.onLogout()
-        testDispatcher.scheduler.runCurrent()
+        advanceUntilIdle()
 
         val state = viewModel.uiState.value
         assertFalse(state.isLoggedOut)
@@ -439,11 +501,11 @@ class SettingsViewModelTest {
         logoutPurger.failOnceWith = LogoutPurgeException("Échec transitoire.")
 
         viewModel.onLogout()
-        testDispatcher.scheduler.runCurrent()
+        advanceUntilIdle()
         assertFalse(viewModel.uiState.value.isLoggedOut)
 
         viewModel.onLogout()
-        testDispatcher.scheduler.runCurrent()
+        advanceUntilIdle()
 
         val state = viewModel.uiState.value
         assertTrue(state.isLoggedOut)
@@ -459,12 +521,12 @@ class SettingsViewModelTest {
         createViewModel()
 
         viewModel.onLogout()
-        testDispatcher.scheduler.runCurrent()
+        advanceUntilIdle()
         assertTrue("the purge is still running", viewModel.uiState.value.isLoading)
         assertFalse(viewModel.uiState.value.isLoggedOut)
 
         gate.complete(Unit)
-        testDispatcher.scheduler.runCurrent()
+        advanceUntilIdle()
 
         assertFalse(viewModel.uiState.value.isLoading)
         assertTrue(viewModel.uiState.value.isLoggedOut)
@@ -477,10 +539,146 @@ class SettingsViewModelTest {
         viewModel.onLogoutRequested()
 
         viewModel.onLogout()
-        testDispatcher.scheduler.runCurrent()
+        advanceUntilIdle()
 
         assertFalse(viewModel.uiState.value.isLogoutConfirmationVisible)
     }
+
+    // ── onLogout: the purge is not this screen's to own (review finding H1) ───
+
+    @Test
+    fun `a Settings screen that replaces the one which asked still learns the purge succeeded`() =
+        runTest(testDispatcher) {
+            // The user presses "Se déconnecter", then navigates away while the purge is running.
+            // The ViewModel that asked is gone; the one that takes its place must not be left
+            // believing the user is still signed in.
+            val gate = CompletableDeferred<Unit>()
+            logoutPurger = FakeLogoutPurger(gate = gate)
+            seedCredentials(existingCredentials)
+            createViewModel()
+            viewModel.onLogout()
+            advanceUntilIdle()
+
+            createViewModel()
+            gate.complete(Unit)
+            advanceUntilIdle()
+
+            assertTrue(viewModel.uiState.value.isLoggedOut)
+        }
+
+    @Test
+    fun `a Settings screen opened while a purge runs shows it as in progress`() =
+        runTest(testDispatcher) {
+            val gate = CompletableDeferred<Unit>()
+            logoutPurger = FakeLogoutPurger(gate = gate)
+            seedCredentials(existingCredentials)
+            createViewModel()
+            viewModel.onLogout()
+            advanceUntilIdle()
+
+            createViewModel()
+
+            assertTrue(
+                "a purge is running, so the screen's actions must stay disabled",
+                viewModel.uiState.value.isLoading,
+            )
+            gate.complete(Unit)
+            advanceUntilIdle()
+        }
+
+    @Test
+    fun `a Settings screen opened after a consumed logout is not sent to onboarding again`() =
+        runTest(testDispatcher) {
+            seedCredentials(existingCredentials)
+            createViewModel()
+            viewModel.onLogout()
+            advanceUntilIdle()
+            assertTrue(viewModel.uiState.value.isLoggedOut)
+
+            // The user signs in again and comes back to Settings. The previous logout is history.
+            createViewModel()
+
+            assertFalse(viewModel.uiState.value.isLoggedOut)
+        }
+
+    // ── onSaveCredentials — H5: a purge finishing mid-authenticate() must not be committed or
+    //    rolled back over ─────────────────────────────────────────────────────
+
+    @Test
+    fun `a purge that completes while authenticate is in flight refuses the success instead of announcing it`() =
+        runTest(testDispatcher) {
+            seedCredentials(existingCredentials)
+            createViewModel()
+            val gate = CompletableDeferred<Unit>()
+            coEvery { catalogRepository.authenticate() } coAnswers {
+                gate.await()
+                Resource.Success(Unit)
+            }
+
+            viewModel.onServerUrlChange("http://new.example.com:8080")
+            viewModel.onUsernameChange("newuser")
+            viewModel.onPasswordChange("newpass")
+
+            viewModel.onSaveCredentials()
+            testDispatcher.scheduler.runCurrent()
+            // The tentative write landed and authenticate() is now parked on the gate.
+            assertTrue(viewModel.uiState.value.isLoading)
+
+            // A purge starts and finishes entirely while this attempt is still mid-authenticate() —
+            // models a logout started from this very screen settling in the exact window
+            // runUnlessPurgeOwed cannot cover, since it only excludes the tentative write.
+            applicationScope.launch { logoutCoordinator.logOut() }
+            testDispatcher.scheduler.runCurrent()
+
+            gate.complete(Unit)
+            testDispatcher.scheduler.runCurrent()
+
+            val state = viewModel.uiState.value
+            assertFalse(
+                "a session the purge already superseded must never be announced as saved",
+                state.infoMessage != null,
+            )
+            assertFalse(state.isLoading)
+            assertEquals(CREDENTIALS_REFUSED_MESSAGE, state.errorMessage)
+        }
+
+    @Test
+    fun `a purge that completes while authenticate is in flight refuses the rollback instead of overwriting a settled session`() =
+        runTest(testDispatcher) {
+            seedCredentials(existingCredentials)
+            createViewModel()
+            val gate = CompletableDeferred<Unit>()
+            coEvery { catalogRepository.authenticate() } coAnswers {
+                gate.await()
+                Resource.Error(throwable = CatalogException.AuthenticationFailed())
+            }
+
+            viewModel.onServerUrlChange("http://bad.example.com:8080")
+            viewModel.onUsernameChange("baduser")
+            viewModel.onPasswordChange("badpass")
+
+            viewModel.onSaveCredentials()
+            testDispatcher.scheduler.runCurrent()
+            val tentativeWrite = credentialsProvider.getCredentials()
+            assertEquals(
+                XtreamCredentials(baseUrl = "http://bad.example.com:8080", username = "baduser", password = "badpass"),
+                tentativeWrite,
+            )
+
+            applicationScope.launch { logoutCoordinator.logOut() }
+            testDispatcher.scheduler.runCurrent()
+
+            gate.complete(Unit)
+            testDispatcher.scheduler.runCurrent()
+
+            assertEquals(
+                "a stale attempt's failure must not overwrite credentials a purge already " +
+                    "settled — the store must be left exactly as the purge (not this attempt) left it",
+                tentativeWrite,
+                credentialsProvider.getCredentials(),
+            )
+            assertEquals(CREDENTIALS_REFUSED_MESSAGE, viewModel.uiState.value.errorMessage)
+        }
 
     // ── confirmation copy (slice 8) ───────────────────────────────────────────
 

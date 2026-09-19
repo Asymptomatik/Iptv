@@ -25,6 +25,21 @@ interface Media3DownloadIndexGateway {
      * completed download is gone from the latter while still holding its index row and its bytes.
      */
     suspend fun countIndexedDownloads(): Int
+
+    /**
+     * Whether [downloadId] is observably present in the live index yet.
+     *
+     * [com.bobot.iptvapp.download.IptvDownloadService.Commander.enqueue] hands Media3 a command
+     * through `DownloadService`'s intent machinery, which is asynchronous relative to the call that
+     * sends it — unlike [removeAllDownloads], which goes straight to the singleton
+     * [androidx.media3.exoplayer.offline.DownloadManager]. Without this check, a request could
+     * report success before Media3 has actually filed it, race a concurrent purge's
+     * [removeAllDownloads] on the same account, and land in the index only afterwards — a
+     * credential-bearing transfer surviving a logout the app already believes is complete. Polling
+     * this until `true` closes that window from the enqueue side, symmetrically to how
+     * [countIndexedDownloads] closes it from the purge side.
+     */
+    suspend fun containsDownload(downloadId: String): Boolean
 }
 
 /**

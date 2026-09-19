@@ -1,6 +1,7 @@
 package com.bobot.iptvapp.data.local.dao
 
 import com.bobot.iptvapp.data.local.entity.DownloadEntity
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
@@ -11,7 +12,8 @@ import kotlinx.coroutines.flow.map
  * Rows live in a [MutableStateFlow] so [observeAll] / [observe] emit on every write, which is what
  * the UI-facing tests need. [failOnClear] simulates an I/O failure on [clearAll] so the logout
  * orchestrator's "a failed step keeps the pending marker" behaviour can be exercised without
- * mocking the DAO.
+ * mocking the DAO. [gateGet] models a caller — typically
+ * [com.bobot.iptvapp.download.DownloadTracker] — suspended between its `get` and its `upsert`.
  */
 class FakeDownloadDao : DownloadDao {
 
@@ -24,13 +26,19 @@ class FakeDownloadDao : DownloadDao {
     var clearAllCount: Int = 0
         private set
 
+    /** When set, [get] suspends on it before returning — modelling a read stalled mid-flight. */
+    var gateGet: CompletableDeferred<Unit>? = null
+
     val currentRows: List<DownloadEntity> get() = rows.value.values.toList()
 
     override suspend fun upsert(download: DownloadEntity) {
         rows.value = rows.value + (download.downloadId to download)
     }
 
-    override suspend fun get(downloadId: String): DownloadEntity? = rows.value[downloadId]
+    override suspend fun get(downloadId: String): DownloadEntity? {
+        gateGet?.await()
+        return rows.value[downloadId]
+    }
 
     override fun observe(downloadId: String): Flow<DownloadEntity?> = rows.map { it[downloadId] }
 

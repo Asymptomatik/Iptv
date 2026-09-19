@@ -34,4 +34,16 @@ interface LocalCachePurger {
      * is the signal that a local purge is still owed.
      */
     suspend fun countDownloadResidue(): Int
+
+    /**
+     * Number of rows left across the catalogue and EPG tables.
+     *
+     * The download index is not the only store a purge can lose a race against. A catalogue fetch
+     * issued before the logout completes *after* it and writes the previous account's channels,
+     * movies or series back — the same late-write shape [countDownloadResidue] exists for, one
+     * layer up. [com.bobot.iptvapp.data.repository.CatalogRepositoryImpl] refuses those writes at
+     * the source; this is the orchestrator's independent confirmation, so a producer that slips
+     * through keeps the pending marker set instead of being announced as a completed logout.
+     */
+    suspend fun countCatalogResidue(): Int
 }

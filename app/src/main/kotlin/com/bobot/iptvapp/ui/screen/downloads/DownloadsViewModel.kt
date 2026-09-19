@@ -4,18 +4,27 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.bobot.iptvapp.domain.model.OfflineDownload
 import com.bobot.iptvapp.domain.repository.DownloadRepository
+import com.bobot.iptvapp.ui.util.DOWNLOAD_REFUSED_MESSAGE
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
-/** Reactive state for the offline downloads library. */
+/**
+ * Reactive state for the offline downloads library.
+ *
+ * @property actionMessage Transient feedback about the last queue action, or `null`. Kept here
+ *   rather than thrown away like the action's result used to be: a pause or resume refused because
+ *   a logout purge is running looks exactly like a button that does not work.
+ */
 data class DownloadsUiState(
     val downloads: List<OfflineDownload> = emptyList(),
     val isLoading: Boolean = true,
+    val actionMessage: String? = null,
 )
 
 /** Presents the persisted Media3 download queue and forwards queue actions to its repository. */
@@ -24,21 +33,37 @@ class DownloadsViewModel @Inject constructor(
     private val downloadRepository: DownloadRepository,
 ) : ViewModel() {
 
-    val uiState: StateFlow<DownloadsUiState> = downloadRepository.observeDownloads()
-        .map { downloads -> DownloadsUiState(downloads = downloads, isLoading = false) }
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.Eagerly,
-            initialValue = DownloadsUiState(),
-        )
+    private val actionMessage = MutableStateFlow<String?>(null)
 
-    fun pause(downloadId: String) = runAction { downloadRepository.pause(downloadId) }
+    val uiState: StateFlow<DownloadsUiState> = combine(
+        downloadRepository.observeDownloads(),
+        actionMessage,
+    ) { downloads, message ->
+        DownloadsUiState(downloads = downloads, isLoading = false, actionMessage = message)
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.Eagerly,
+        initialValue = DownloadsUiState(),
+    )
 
-    fun resume(downloadId: String) = runAction { downloadRepository.resume(downloadId) }
+    fun pause(downloadId: String) = runRefusableAction { downloadRepository.pause(downloadId) }
 
-    fun remove(downloadId: String) = runAction { downloadRepository.remove(downloadId) }
+    fun resume(downloadId: String) = runRefusableAction { downloadRepository.resume(downloadId) }
 
-    private fun runAction(action: suspend () -> Unit) {
-        viewModelScope.launch { action() }
+    /** Unguarded, like the repository call it forwards to — see [DownloadRepository.remove]. */
+    fun remove(downloadId: String) {
+        viewModelScope.launch { downloadRepository.remove(downloadId) }
+    }
+
+    /** Acknowledges [DownloadsUiState.actionMessage] once shown, so it is not shown twice. */
+    fun onActionMessageShown() {
+        actionMessage.value = null
+    }
+
+    /** @param action returns `false` when the purge barrier refused it, never on a real failure. */
+    private fun runRefusableAction(action: suspend () -> Boolean) {
+        viewModelScope.launch {
+            if (!action()) actionMessage.value = DOWNLOAD_REFUSED_MESSAGE
+        }
     }
 }

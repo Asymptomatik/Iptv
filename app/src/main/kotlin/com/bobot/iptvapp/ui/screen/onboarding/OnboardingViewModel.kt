@@ -2,11 +2,13 @@ package com.bobot.iptvapp.ui.screen.onboarding
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.bobot.iptvapp.data.logout.LogoutCoordinator
 import com.bobot.iptvapp.data.source.CatalogException
 import com.bobot.iptvapp.data.source.CredentialsProvider
 import com.bobot.iptvapp.domain.model.XtreamCredentials
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.util.Resource
+import com.bobot.iptvapp.ui.util.CREDENTIALS_REFUSED_MESSAGE
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -75,11 +77,17 @@ data class OnboardingUiState(
  *
  * @param catalogRepository   Used to call the real Xtream `authenticate()` endpoint (Task 8).
  * @param credentialsProvider Used to persist (or roll back) the entered credentials (Task 9).
+ * @param logoutCoordinator   Excludes a sign-in from a logout purge that is running or still owed.
+ *   A fresh install is not the only way to reach this screen: an interrupted purge leaves the app
+ *   routed back here with the marker still set, and [LogoutCoordinator.startRecovery] finishing it
+ *   in the background — which is exactly the window in which this form could otherwise write the
+ *   new account's credentials into the store the purge is about to finalize.
  */
 @HiltViewModel
 class OnboardingViewModel @Inject constructor(
     private val catalogRepository: CatalogRepository,
     private val credentialsProvider: CredentialsProvider,
+    private val logoutCoordinator: LogoutCoordinator,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(OnboardingUiState())
@@ -129,11 +137,32 @@ class OnboardingViewModel @Inject constructor(
         _uiState.update { it.copy(isLoading = true, errorMessage = null) }
 
         viewModelScope.launch {
-            credentialsProvider.setCredentials(
-                XtreamCredentials(baseUrl = baseUrl, username = username, password = password),
-            )
+            val generation = logoutCoordinator.runUnlessPurgeOwed {
+                credentialsProvider.setCredentials(
+                    XtreamCredentials(baseUrl = baseUrl, username = username, password = password),
+                )
+                logoutCoordinator.sessionGeneration
+            }
+            if (generation == null) {
+                _uiState.update {
+                    it.copy(isLoading = false, errorMessage = CREDENTIALS_REFUSED_MESSAGE)
+                }
+                return@launch
+            }
 
-            when (val result = catalogRepository.authenticate()) {
+            val result = catalogRepository.authenticate()
+
+            if (logoutCoordinator.sessionGeneration != generation) {
+                // A purge settled while authenticate() was in flight — see
+                // LogoutCoordinator's class KDoc "Why a credentials write is refused on a stale
+                // generation, not committed or rolled back". Neither branch below is safe to run.
+                _uiState.update {
+                    it.copy(isLoading = false, errorMessage = CREDENTIALS_REFUSED_MESSAGE)
+                }
+                return@launch
+            }
+
+            when (result) {
                 is Resource.Success -> {
                     _uiState.update { it.copy(isLoading = false, isAuthenticated = true) }
                 }
