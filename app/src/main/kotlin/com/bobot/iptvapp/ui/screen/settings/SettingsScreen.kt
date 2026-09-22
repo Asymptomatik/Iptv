@@ -29,7 +29,6 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -71,6 +70,18 @@ import com.bobot.iptvapp.ui.theme.TextSecondary
 import com.bobot.iptvapp.ui.util.rememberIsTvDevice
 
 /**
+ * Body of the logout confirmation dialog.
+ *
+ * Hoisted out of the composable so the wording itself is assertable from a JVM unit test: this
+ * copy is a promise about what logging out destroys, and the destruction is irreversible, so it
+ * must not be able to drift away from what the purge actually does.
+ */
+internal const val LOGOUT_CONFIRMATION_MESSAGE: String =
+    "Les identifiants de ce serveur seront effacés et il faudra les saisir à nouveau. " +
+        "Tous les téléchargements hors ligne de ce compte seront supprimés de cet appareil. " +
+        "Vos profils et vos favoris sont conservés."
+
+/**
  * Settings screen (Task 15, reskinned Task 11) — "Cinematic Glass" V2.
  *
  * Glass sections: fields wrapped in glassSurface Box containers.
@@ -79,22 +90,19 @@ import com.bobot.iptvapp.ui.util.rememberIsTvDevice
  * All settings logic (ViewModel, callbacks) unchanged.
  *
  * @param onNavigateToProfiles Invoked when "Gérer les profils" is clicked.
- * @param onLoggedOut          Invoked once, after logout clears persisted credentials.
+ *
+ * Routing back to onboarding after a logout is no longer this screen's responsibility: this
+ * ViewModel may not even be alive when the purge that logout kicked off actually settles, so the
+ * root observes [com.bobot.iptvapp.data.logout.LogoutCoordinator.state] directly instead (see
+ * [com.bobot.iptvapp.MainViewModel]).
  */
 @Composable
 fun SettingsScreen(
     onNavigateToProfiles: () -> Unit,
-    onLoggedOut: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-
-    LaunchedEffect(uiState.isLoggedOut) {
-        if (uiState.isLoggedOut) {
-            onLoggedOut()
-        }
-    }
 
     SettingsContent(
         uiState = uiState,
@@ -155,13 +163,11 @@ private fun SettingsContent(
     val isTv = rememberIsTvDevice()
     var editingField by remember { mutableStateOf<SettingsField?>(null) }
 
-    // QA finding M2 — "Déconnexion" used to clear the credentials on a single press. Only the
-    // server credentials go; profiles, favorites, resume positions and downloads all survive.
+    // QA finding M2 — "Déconnexion" used to clear the credentials on a single press.
     if (uiState.isLogoutConfirmationVisible) {
         ConfirmDialog(
             title = "Se déconnecter ?",
-            message = "Les identifiants de ce serveur seront effacés et il faudra les saisir à " +
-                "nouveau. Vos profils, favoris et téléchargements sont conservés.",
+            message = LOGOUT_CONFIRMATION_MESSAGE,
             confirmLabel = "Se déconnecter",
             onConfirm = onConfirmLogout,
             onDismiss = onDismissLogoutConfirmation,

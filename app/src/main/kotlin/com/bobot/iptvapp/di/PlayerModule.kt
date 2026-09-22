@@ -1,5 +1,6 @@
 package com.bobot.iptvapp.di
 
+import com.bobot.iptvapp.data.logout.ActivePlaybackStopper
 import com.bobot.iptvapp.player.ExoPlayerManager
 import com.bobot.iptvapp.player.PlayerManager
 import dagger.Binds
@@ -31,4 +32,9 @@ abstract class PlayerModule {
     @Binds
     @Singleton
     abstract fun bindPlayerManager(impl: ExoPlayerManager): PlayerManager
+
+    /** Bound to the same [ExoPlayerManager] singleton as [bindPlayerManager] — see its KDoc. */
+    @Binds
+    @Singleton
+    abstract fun bindActivePlaybackStopper(impl: ExoPlayerManager): ActivePlaybackStopper
 }

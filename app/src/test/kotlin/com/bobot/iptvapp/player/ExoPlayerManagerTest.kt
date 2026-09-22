@@ -12,6 +12,12 @@ import androidx.media3.exoplayer.ExoPlayer
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -69,6 +75,7 @@ class ExoPlayerManagerTest {
 
     @Before
     fun setUp() {
+        Dispatchers.setMain(StandardTestDispatcher())
         context = mockk(relaxed = true)
         mediaSourceFactory = mockk(relaxed = true)
         player = mockk(relaxed = true)
@@ -89,6 +96,20 @@ class ExoPlayerManagerTest {
         val field = ExoPlayerManager::class.java.getDeclaredField("exoPlayer")
         field.isAccessible = true
         field.set(target, player)
+    }
+
+    @After
+    fun tearDown() {
+        Dispatchers.resetMain()
+    }
+
+    // ── ActivePlaybackStopper (review finding H2) ────────────────────────────
+
+    @Test
+    fun `stopActivePlayback releases the player`() = runTest {
+        manager.stopActivePlayback()
+
+        verify { player.release() }
     }
 
     // ── fixture builders ─────────────────────────────────────────────────────

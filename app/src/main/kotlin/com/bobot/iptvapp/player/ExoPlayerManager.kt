@@ -9,9 +9,12 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import com.bobot.iptvapp.data.logout.ActivePlaybackStopper
 import com.bobot.iptvapp.domain.model.ExternalSubtitle
 import com.bobot.iptvapp.domain.util.LanguageLabel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 /**
@@ -54,7 +57,7 @@ import javax.inject.Inject
 class ExoPlayerManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val mediaSourceFactory: IptvMediaSourceFactory,
-) : PlayerManager {
+) : PlayerManager, ActivePlaybackStopper {
 
     private var exoPlayer: ExoPlayer? = null
 
@@ -82,6 +85,17 @@ class ExoPlayerManager @Inject constructor(
     override fun release() {
         exoPlayer?.release()
         exoPlayer = null
+    }
+
+    /**
+     * [ActivePlaybackStopper]'s hook for the logout purge: releases the player from a background
+     * purge coroutine. `ExoPlayer` asserts calls come from the thread it was created on (the main
+     * thread here — see [createPlayer]), so this hops there rather than calling [release] directly;
+     * [LiveMedia3Gateways][com.bobot.iptvapp.download.purge.LiveMedia3Gateways] does the same for
+     * `DownloadManager` calls made off the main thread.
+     */
+    override suspend fun stopActivePlayback() {
+        withContext(Dispatchers.Main.immediate) { release() }
     }
 
     // ── Track exposure & selection (Task 2) ─────────────────────────────────

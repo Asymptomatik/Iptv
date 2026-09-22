@@ -15,6 +15,7 @@ import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.repository.DownloadRepository
 import com.bobot.iptvapp.domain.repository.FavoritesRepository
 import com.bobot.iptvapp.domain.util.Resource
+import com.bobot.iptvapp.ui.util.DOWNLOAD_REFUSED_MESSAGE
 import io.mockk.Runs
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -131,8 +132,8 @@ class SeriesDetailViewModelTest {
         every { downloadRepository.observeDownloads() } returns downloadFlow
         coEvery { favoritesRepository.toggleFavorite(any(), any(), any()) } just Runs
         coEvery { downloadRepository.enqueue(any()) } returns "EPISODE:e1"
-        coEvery { downloadRepository.pause(any()) } just Runs
-        coEvery { downloadRepository.resume(any()) } just Runs
+        coEvery { downloadRepository.pause(any()) } returns true
+        coEvery { downloadRepository.resume(any()) } returns true
     }
 
     @After
@@ -336,6 +337,57 @@ class SeriesDetailViewModelTest {
         testDispatcher.scheduler.runCurrent()
 
         coVerify(exactly = 1) { downloadRepository.resume("EPISODE:e1") }
+    }
+
+    @Test
+    fun `a refused episode download tells the user why instead of doing nothing visible`() {
+        coEvery { catalogRepository.getSeriesDetail(seriesId) } returns Resource.Success(series)
+        // `null` is a refusal, not a failure — a purge is running or owed.
+        coEvery { downloadRepository.enqueue(any()) } returns null
+        initialize()
+
+        viewModel.onDownloadEpisode(season1Episodes[0])
+        testDispatcher.scheduler.runCurrent()
+
+        val state = viewModel.uiState.value
+        assertEquals(DOWNLOAD_REFUSED_MESSAGE, state.downloadMessage)
+        assertNull(
+            "the sheet still has its content; only one button press did not take",
+            state.errorMessage,
+        )
+        assertEquals(series, state.series)
+    }
+
+    @Test
+    fun `a refused pause and a refused resume report the same way as a refused download`() {
+        coEvery { catalogRepository.getSeriesDetail(seriesId) } returns Resource.Success(series)
+        coEvery { downloadRepository.pause(any()) } returns false
+        coEvery { downloadRepository.resume(any()) } returns false
+        downloadFlow.value = listOf(downloadOf(state = DownloadState.DOWNLOADING))
+        initialize()
+
+        viewModel.onPauseEpisodeDownload(season1Episodes[0])
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(DOWNLOAD_REFUSED_MESSAGE, viewModel.uiState.value.downloadMessage)
+
+        viewModel.onDownloadMessageShown()
+        assertNull(viewModel.uiState.value.downloadMessage)
+
+        viewModel.onResumeEpisodeDownload(season1Episodes[0])
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(DOWNLOAD_REFUSED_MESSAGE, viewModel.uiState.value.downloadMessage)
+    }
+
+    @Test
+    fun `an accepted episode download says nothing at all`() {
+        coEvery { catalogRepository.getSeriesDetail(seriesId) } returns Resource.Success(series)
+        coEvery { downloadRepository.enqueue(any()) } returns "EPISODE:e1"
+        initialize()
+
+        viewModel.onDownloadEpisode(season1Episodes[0])
+        testDispatcher.scheduler.runCurrent()
+
+        assertNull(viewModel.uiState.value.downloadMessage)
     }
 
     // ── Favorites ──────────────────────────────────────────────────────────────

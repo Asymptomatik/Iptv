@@ -3,6 +3,7 @@ package com.bobot.iptvapp
 import android.app.Application
 import com.bobot.iptvapp.download.DownloadRequirementsController
 import com.bobot.iptvapp.download.DownloadTracker
+import com.bobot.iptvapp.download.LogoutPurgeRecoveryController
 import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
 
@@ -24,4 +25,10 @@ import javax.inject.Inject
 class IptvApplication : Application() {
     @Inject lateinit var downloadTracker: DownloadTracker
     @Inject lateinit var downloadRequirementsController: DownloadRequirementsController
+
+    /**
+     * Injected purely so Hilt builds it: its constructor resumes a logout purge left pending by a
+     * previous run, and cleans up installs logged out before that purge existed.
+     */
+    @Inject lateinit var logoutPurgeRecoveryController: LogoutPurgeRecoveryController
 }

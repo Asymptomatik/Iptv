@@ -17,6 +17,7 @@ import com.bobot.iptvapp.domain.repository.FavoritesRepository
 import com.bobot.iptvapp.domain.repository.PlaybackProgressRepository
 import com.bobot.iptvapp.domain.util.Resource
 import com.bobot.iptvapp.domain.util.displayTitle
+import com.bobot.iptvapp.ui.util.DOWNLOAD_REFUSED_MESSAGE
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -51,6 +52,11 @@ import javax.inject.Inject
  *                          when no Xtream credentials are configured (should not normally happen
  *                          once onboarding is complete, but the play button is disabled rather
  *                          than crashing — see [MovieDetailViewModel] KDoc "Missing credentials").
+ * @property downloadMessage Transient feedback about the last download action, or `null`. Separate
+ *                          from [errorMessage] on purpose: [errorMessage] means "this screen has no
+ *                          content", and reusing it would replace a perfectly good movie sheet with
+ *                          an error state over a refused button press. This one is shown *over* the
+ *                          content and cleared by [MovieDetailViewModel.onDownloadMessageShown].
  */
 data class MovieDetailUiState(
     val isLoading: Boolean = true,
@@ -60,6 +66,7 @@ data class MovieDetailUiState(
     val canResume: Boolean = false,
     val streamUrl: String? = null,
     val download: OfflineDownload? = null,
+    val downloadMessage: String? = null,
 )
 
 /**
@@ -179,28 +186,47 @@ class MovieDetailViewModel @Inject constructor(
         val movie = _uiState.value.movie ?: return
         val streamUrl = _uiState.value.streamUrl ?: return
         viewModelScope.launch {
-            downloadRepository.enqueue(
-                DownloadRequestData(
-                    contentType = DownloadContentType.MOVIE,
-                    contentId = movie.id,
-                    // Stored stripped (QA finding N4) so the Téléchargements list reads the same
-                    // as the card the user tapped.
-                    title = movie.displayTitle(),
-                    artworkUrl = movie.posterUrl,
-                    streamUrl = streamUrl,
-                ),
-            )
+            // A `null` id is a refusal, not a crash — see [DownloadRepository.enqueue]. Without
+            // this branch the button simply did nothing and the user had no way to tell a refused
+            // download from a slow one.
+            if (downloadRepository.enqueue(
+                    DownloadRequestData(
+                        contentType = DownloadContentType.MOVIE,
+                        contentId = movie.id,
+                        // Stored stripped (QA finding N4) so the Téléchargements list reads the
+                        // same as the card the user tapped.
+                        title = movie.displayTitle(),
+                        artworkUrl = movie.posterUrl,
+                        streamUrl = streamUrl,
+                    ),
+                ) == null
+            ) {
+                showDownloadMessage(DOWNLOAD_REFUSED_MESSAGE)
+            }
         }
     }
 
     fun onPauseDownload() {
         val downloadId = _uiState.value.download?.downloadId ?: return
-        viewModelScope.launch { downloadRepository.pause(downloadId) }
+        viewModelScope.launch {
+            if (!downloadRepository.pause(downloadId)) showDownloadMessage(DOWNLOAD_REFUSED_MESSAGE)
+        }
     }
 
     fun onResumeDownload() {
         val downloadId = _uiState.value.download?.downloadId ?: return
-        viewModelScope.launch { downloadRepository.resume(downloadId) }
+        viewModelScope.launch {
+            if (!downloadRepository.resume(downloadId)) showDownloadMessage(DOWNLOAD_REFUSED_MESSAGE)
+        }
+    }
+
+    /** Acknowledges [MovieDetailUiState.downloadMessage] once shown, so it is not shown twice. */
+    fun onDownloadMessageShown() {
+        _uiState.update { it.copy(downloadMessage = null) }
+    }
+
+    private fun showDownloadMessage(message: String) {
+        _uiState.update { it.copy(downloadMessage = message) }
     }
 
     // ─── Internal ────────────────────────────────────────────────────────────────

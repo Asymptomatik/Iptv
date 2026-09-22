@@ -16,6 +16,7 @@ import com.bobot.iptvapp.domain.repository.DownloadRepository
 import com.bobot.iptvapp.domain.repository.FavoritesRepository
 import com.bobot.iptvapp.domain.repository.PlaybackProgressRepository
 import com.bobot.iptvapp.domain.util.Resource
+import com.bobot.iptvapp.ui.util.DOWNLOAD_REFUSED_MESSAGE
 import io.mockk.Runs
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -112,8 +113,8 @@ class MovieDetailViewModelTest {
         every { downloadRepository.observeDownload(any()) } returns downloadFlow
         coEvery { favoritesRepository.toggleFavorite(any(), any(), any()) } just Runs
         coEvery { downloadRepository.enqueue(any()) } returns "MOVIE:$movieId"
-        coEvery { downloadRepository.pause(any()) } just Runs
-        coEvery { downloadRepository.resume(any()) } just Runs
+        coEvery { downloadRepository.pause(any()) } returns true
+        coEvery { downloadRepository.resume(any()) } returns true
     }
 
     @After
@@ -374,6 +375,59 @@ class MovieDetailViewModelTest {
         testDispatcher.scheduler.runCurrent()
 
         coVerify(exactly = 1) { downloadRepository.resume("MOVIE:$movieId") }
+    }
+
+    // ── Refused download commands ─────────────────────────────────────────────
+
+    @Test
+    fun `a refused download tells the user why instead of doing nothing visible`() {
+        coEvery { catalogRepository.getMovieDetail(movieId) } returns Resource.Success(movie)
+        // `null` is a refusal, not a failure — a purge is running or owed.
+        coEvery { downloadRepository.enqueue(any()) } returns null
+        initialize()
+
+        viewModel.onDownloadClick()
+        testDispatcher.scheduler.runCurrent()
+
+        val state = viewModel.uiState.value
+        assertEquals(DOWNLOAD_REFUSED_MESSAGE, state.downloadMessage)
+        assertNull(
+            "the sheet still has its content; only one button press did not take",
+            state.errorMessage,
+        )
+        assertEquals(movie, state.movie)
+    }
+
+    @Test
+    fun `a refused pause and a refused resume report the same way as a refused download`() {
+        coEvery { catalogRepository.getMovieDetail(movieId) } returns Resource.Success(movie)
+        coEvery { downloadRepository.pause(any()) } returns false
+        coEvery { downloadRepository.resume(any()) } returns false
+        downloadFlow.value = downloadOf(state = DownloadState.DOWNLOADING)
+        initialize()
+
+        viewModel.onPauseDownload()
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(DOWNLOAD_REFUSED_MESSAGE, viewModel.uiState.value.downloadMessage)
+
+        viewModel.onDownloadMessageShown()
+        assertNull(viewModel.uiState.value.downloadMessage)
+
+        viewModel.onResumeDownload()
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(DOWNLOAD_REFUSED_MESSAGE, viewModel.uiState.value.downloadMessage)
+    }
+
+    @Test
+    fun `an accepted download says nothing at all`() {
+        coEvery { catalogRepository.getMovieDetail(movieId) } returns Resource.Success(movie)
+        coEvery { downloadRepository.enqueue(any()) } returns "MOVIE:$movieId"
+        initialize()
+
+        viewModel.onDownloadClick()
+        testDispatcher.scheduler.runCurrent()
+
+        assertNull(viewModel.uiState.value.downloadMessage)
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

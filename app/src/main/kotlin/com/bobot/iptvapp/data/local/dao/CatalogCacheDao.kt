@@ -306,4 +306,26 @@ interface CatalogCacheDao {
     /** Deletes all sync markers, across every account. Backs the full-logout purge. */
     @Query("DELETE FROM catalog_sync")
     suspend fun clearAllSyncMarkers()
+
+    /**
+     * Total rows left across every catalogue table, all accounts included.
+     *
+     * One query rather than seven so the logout purge's residue check costs a single round-trip:
+     * the caller only needs to know whether *anything* survived, and a fetch that was in flight
+     * during the purge can land in any of these tables. `catalog_sync` counts too — a freshness
+     * marker outliving its rows is exactly the "fresh-looking cache with nothing behind it" the
+     * clears above exist to prevent.
+     */
+    @Query(
+        """
+        SELECT (SELECT COUNT(*) FROM categories)
+             + (SELECT COUNT(*) FROM channels)
+             + (SELECT COUNT(*) FROM movies)
+             + (SELECT COUNT(*) FROM series)
+             + (SELECT COUNT(*) FROM seasons)
+             + (SELECT COUNT(*) FROM episodes)
+             + (SELECT COUNT(*) FROM catalog_sync)
+        """
+    )
+    suspend fun countAllCatalogRows(): Int
 }

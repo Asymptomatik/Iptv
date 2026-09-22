@@ -190,22 +190,6 @@ fun AppNavGraph(
                     // return to Settings, so no popUpTo is applied here (per this task's spec).
                     navController.navigate(Profiles)
                 },
-                onLoggedOut = {
-                    navController.navigate(Onboarding) {
-                        // Equivalent of the classic `popUpTo(0)` "clear everything" trick: the
-                        // root NavGraph's own id is never a real back-stack entry, so popping up
-                        // to it (inclusive) removes every destination currently on the stack —
-                        // including the start destination itself — leaving a clean stack with
-                        // only the freshly navigated-to Onboarding destination. This differs from
-                        // the onboarding->profiles pop above (`popUpTo<Onboarding>`), which only
-                        // pops back to a *named* destination still present on the stack; logout
-                        // must clear unconditionally regardless of how deep the user has
-                        // navigated (Home, Detail, Player, Search, Settings, …).
-                        popUpTo(navController.graph.id) {
-                            inclusive = true
-                        }
-                    }
-                },
             )
         }
     }

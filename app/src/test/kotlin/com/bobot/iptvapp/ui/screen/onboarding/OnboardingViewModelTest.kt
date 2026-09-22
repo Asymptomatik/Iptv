@@ -1,14 +1,23 @@
 package com.bobot.iptvapp.ui.screen.onboarding
 
+import com.bobot.iptvapp.data.logout.LogoutCoordinator
+import com.bobot.iptvapp.data.preferences.FakeLogoutPurgeMarkerStore
 import com.bobot.iptvapp.data.source.CatalogException
 import com.bobot.iptvapp.data.source.InMemoryCredentialsProvider
 import com.bobot.iptvapp.domain.model.XtreamCredentials
+import com.bobot.iptvapp.domain.logout.LogoutPurger
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.util.Resource
+import com.bobot.iptvapp.ui.util.CREDENTIALS_REFUSED_MESSAGE
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -50,21 +59,39 @@ class OnboardingViewModelTest {
     private lateinit var credentialsProvider: InMemoryCredentialsProvider
     private lateinit var viewModel: OnboardingViewModel
 
+    /**
+     * Real [LogoutCoordinator] over a fake marker store rather than a mock: what this screen has to
+     * respect is the coordinator's actual refusal rule, and a mocked `runUnlessPurgeOwed` would let
+     * the test pass against a guard that never consults anything.
+     */
+    private lateinit var applicationScope: CoroutineScope
+    private lateinit var markerStore: FakeLogoutPurgeMarkerStore
+    private lateinit var logoutCoordinator: LogoutCoordinator
+
     @Before
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
 
         catalogRepository = mockk()
         credentialsProvider = InMemoryCredentialsProvider()
+        applicationScope = CoroutineScope(SupervisorJob() + testDispatcher)
+        markerStore = FakeLogoutPurgeMarkerStore()
+        logoutCoordinator = LogoutCoordinator(
+            logoutPurger = mockk<LogoutPurger>(relaxed = true),
+            markerStore = markerStore,
+            applicationScope = applicationScope,
+        )
 
         viewModel = OnboardingViewModel(
             catalogRepository = catalogRepository,
             credentialsProvider = credentialsProvider,
+            logoutCoordinator = logoutCoordinator,
         )
     }
 
     @After
     fun tearDown() {
+        applicationScope.cancel()
         Dispatchers.resetMain()
     }
 
@@ -112,6 +139,56 @@ class OnboardingViewModelTest {
         assertTrue(state.errorMessage!!.isNotBlank())
         coVerify(exactly = 0) { catalogRepository.authenticate() }
     }
+
+    // ── onSubmit — a purge still owed ─────────────────────────────────────────
+
+    @Test
+    fun `a sign-in submitted while a purge is still owed is refused rather than persisted`() =
+        runTest(testDispatcher) {
+            // The state an interrupted purge leaves behind: the marker survived the process that
+            // set it, and recovery has not finished (or not started) yet.
+            markerStore.markPurgePending()
+            coEvery { catalogRepository.authenticate() } returns Resource.Success(Unit)
+            fillValidForm()
+
+            viewModel.onSubmit()
+            testDispatcher.scheduler.runCurrent()
+
+            val state = viewModel.uiState.value
+            assertFalse("a refused sign-in must not route the user into the app", state.isAuthenticated)
+            assertFalse("the form must become usable again, not stay stuck spinning", state.isLoading)
+            assertEquals(CREDENTIALS_REFUSED_MESSAGE, state.errorMessage)
+            assertNull(
+                "the new account's credentials must not land in the store the purge is about to " +
+                    "finalize",
+                credentialsProvider.getCredentials(),
+            )
+            coVerify(exactly = 0) { catalogRepository.authenticate() }
+        }
+
+    @Test
+    fun `the same sign-in succeeds once the purge that was owed has been settled`() =
+        runTest(testDispatcher) {
+            markerStore.markPurgePending()
+            coEvery { catalogRepository.authenticate() } returns Resource.Success(Unit)
+            fillValidForm()
+
+            viewModel.onSubmit()
+            testDispatcher.scheduler.runCurrent()
+            assertNull(credentialsProvider.getCredentials())
+
+            // The refusal is a state, not a verdict on the credentials: nothing about the form has
+            // to change for the retry to work once the install owes nothing.
+            markerStore.clearPurgePending()
+            viewModel.onSubmit()
+            testDispatcher.scheduler.runCurrent()
+
+            assertTrue(viewModel.uiState.value.isAuthenticated)
+            assertEquals(
+                XtreamCredentials(baseUrl = "http://example.com:8080", username = "user", password = "pass"),
+                credentialsProvider.getCredentials(),
+            )
+        }
 
     // ── onSubmit — success path ───────────────────────────────────────────────
 
@@ -213,4 +290,72 @@ class OnboardingViewModelTest {
 
         coVerify(exactly = 1) { catalogRepository.authenticate() }
     }
+
+    // ── H5: a purge finishing mid-authenticate() must not be committed or rolled back over ────
+
+    @Test
+    fun `a purge that completes while authenticate is in flight refuses the success instead of announcing it`() =
+        runTest(testDispatcher) {
+            val gate = CompletableDeferred<Unit>()
+            coEvery { catalogRepository.authenticate() } coAnswers {
+                gate.await()
+                Resource.Success(Unit)
+            }
+            fillValidForm()
+
+            viewModel.onSubmit()
+            testDispatcher.scheduler.runCurrent()
+            // The tentative write landed and authenticate() is now parked on the gate.
+            assertTrue(viewModel.uiState.value.isLoading)
+
+            // A purge starts and finishes entirely while this attempt is still mid-authenticate() —
+            // models a logout (or a recovery) settling in the exact window this attempt cannot
+            // observe via runUnlessPurgeOwed alone, since that only excludes the tentative write.
+            applicationScope.launch { logoutCoordinator.logOut() }
+            testDispatcher.scheduler.runCurrent()
+
+            gate.complete(Unit)
+            testDispatcher.scheduler.runCurrent()
+
+            val state = viewModel.uiState.value
+            assertFalse(
+                "a session the purge already superseded must never be announced as authenticated",
+                state.isAuthenticated,
+            )
+            assertFalse(state.isLoading)
+            assertEquals(CREDENTIALS_REFUSED_MESSAGE, state.errorMessage)
+        }
+
+    @Test
+    fun `a purge that completes while authenticate is in flight refuses the rollback instead of clearing a settled session`() =
+        runTest(testDispatcher) {
+            val gate = CompletableDeferred<Unit>()
+            coEvery { catalogRepository.authenticate() } coAnswers {
+                gate.await()
+                Resource.Error(throwable = CatalogException.AuthenticationFailed())
+            }
+            fillValidForm()
+
+            viewModel.onSubmit()
+            testDispatcher.scheduler.runCurrent()
+            val tentativeWrite = credentialsProvider.getCredentials()
+            assertEquals(
+                XtreamCredentials(baseUrl = "http://example.com:8080", username = "user", password = "pass"),
+                tentativeWrite,
+            )
+
+            applicationScope.launch { logoutCoordinator.logOut() }
+            testDispatcher.scheduler.runCurrent()
+
+            gate.complete(Unit)
+            testDispatcher.scheduler.runCurrent()
+
+            assertEquals(
+                "a stale attempt's failure must not clear credentials a purge already settled — " +
+                    "the store must be left exactly as the purge (not this attempt) left it",
+                tentativeWrite,
+                credentialsProvider.getCredentials(),
+            )
+            assertEquals(CREDENTIALS_REFUSED_MESSAGE, viewModel.uiState.value.errorMessage)
+        }
 }
