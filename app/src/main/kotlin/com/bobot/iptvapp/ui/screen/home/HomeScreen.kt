@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
@@ -50,8 +52,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.painter.ColorPainter
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
@@ -148,6 +152,19 @@ private fun ContentType.toDetailContentType(): String = when (this) {
  *  - [MOVIES] — only [HomeUiState.movieRows].
  *  - [SERIES] — only [HomeUiState.seriesRows].
  */
+/**
+ * Semantics test tag on the floating [HomeHeader], used by the geometry regression test that
+ * checks both catalog rows (language/category chips) and the Home hero never render under it.
+ */
+internal const val HOME_HEADER_TEST_TAG = "home_header"
+
+/**
+ * Semantics test tag on [HomeHero]'s own visual bounds (the clipped image container), used by the
+ * same geometry regression test to assert the hero itself — not just non-hero catalog content —
+ * clears [HomeHeader] by at least [Spacing.sm] instead of starting at y=0 behind it.
+ */
+internal const val HOME_HERO_TEST_TAG = "home_hero"
+
 internal enum class HomeTab(val label: String) {
     HOME("Accueil"),
     LIVE("Chaines"),
@@ -276,7 +293,7 @@ private fun HomeUiState.isLoadingFor(tab: HomeTab): Boolean {
  * effect) is a no-op.
  */
 @Composable
-private fun HomeContent(
+internal fun HomeContent(
     uiState: HomeUiState,
     onCardClick: (HomeCardItem) -> Unit,
     onNavigateToDetail: (contentType: String, contentId: String) -> Unit,
@@ -363,8 +380,9 @@ private fun HomeHeader(
     onNavigateToSettings: () -> Unit,
     onNavigateToDownloads: () -> Unit,
     collapseFraction: Float,
+    modifier: Modifier = Modifier,
 ) {
-    Column(modifier = Modifier.fillMaxWidth()) {
+    Column(modifier = modifier.fillMaxWidth()) {
         HomeTopBar(
             selectedTab = selectedTab,
             onNavigateToSearch = onNavigateToSearch,
@@ -598,7 +616,9 @@ private fun HomeEmptyState() {
 /**
  * Renders the optional hero banner ([HomeHero]) followed by the [selectedTab]'s category rows,
  * inside a single [LazyColumn]. The header ([HomeHeader]: title row + [HomeTabBar]) floats as
- * an overlay above the hero so the hero image extends edge-to-edge behind it.
+ * an overlay above the list, which is inset by the header's measured height (see
+ * [headerClearance]) so the hero's own top content — not just the category rows below it —
+ * clears the header instead of rendering underneath it.
  *
  * ## Task 1 — home tabs
  * Only [selectedTab]'s sections are added to the [LazyColumn] (see [HomeUiState.rowsFor] /
@@ -666,6 +686,22 @@ private fun HomeRowsContent(
     val listState = rememberSaveable(selectedTab, saver = LazyListState.Saver) { LazyListState() }
     val density = LocalDensity.current
     val collapseThresholdPx = remember(density) { with(density) { 200.dp.toPx() } }
+
+    // Header clearance for all tabs, including the hero and catalog rows — bug fix. [HomeHeader]'s actual rendered
+    // height (title row + tab bar, including the status-bar inset baked into [HomeTopBar]'s own
+    // .statusBarsPadding()) does not match a fixed TopBarHeight + TabRowHeight estimate: on a
+    // typical device the header renders ~126dp tall against a ~104dp estimate, leaving the top
+    // ~22dp of the language/category chip rows underneath it. Measured live via
+    // onGloballyPositioned on the floating [HomeHeader] below and fed back here as the
+    // [LazyColumn]'s top inset, plus [Spacing.sm] of breathing room. Falls back to the old
+    // estimate for the first frame, before the header has ever been measured.
+    var measuredHeaderHeightPx by remember { mutableIntStateOf(0) }
+    val statusBarInsetPx = WindowInsets.statusBars.getTop(density)
+    val fallbackHeaderHeightPx = statusBarInsetPx +
+        with(density) { (LayoutDimens.TopBarHeight + LayoutDimens.TabRowHeight).roundToPx() }
+    val headerClearance = with(density) {
+        (if (measuredHeaderHeightPx > 0) measuredHeaderHeightPx else fallbackHeaderHeightPx).toDp()
+    } + Spacing.sm
     val scrolledCollapseFraction by remember {
         derivedStateOf {
             if (listState.firstVisibleItemIndex > 0) {
@@ -736,16 +772,18 @@ private fun HomeRowsContent(
             // y=0, under the header) and parked the chip rows behind the opaque bar.
             //
             // Padding the *layout* instead of prepending an item shrinks the viewport itself, so no
-            // scroll position — focus-driven or manual — can put content under the header. Only the
-            // hero tab keeps the full-bleed overlay, which is the whole point of the hero.
-            modifier = if (heroItem != null) {
-                Modifier.fillMaxSize()
-            } else {
-                Modifier
-                    .fillMaxSize()
-                    .statusBarsPadding()
-                    .padding(top = LayoutDimens.TopBarHeight + LayoutDimens.TabRowHeight)
-            },
+            // scroll position — focus-driven or manual — can put content under the header. This
+            // applies to every tab, including HOME: the hero used to keep a full-bleed overlay
+            // under the header, but that let the header render over the hero's own top content
+            // (measured on a physical device: header bottom=581px, hero top=0px, a -581px gap
+            // against the required 28px clearance) — not an intentional overlap.
+            //
+            // headerClearance is the *actual measured* header height (already inclusive of the
+            // status-bar inset — see its definition above), so no separate .statusBarsPadding()
+            // is applied here; adding one on top would double-count the inset.
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(top = headerClearance),
             contentPadding = PaddingValues(bottom = Spacing.xl),
         ) {
             if (heroItem != null) {
@@ -897,7 +935,10 @@ private fun HomeRowsContent(
             }
         }
 
-        // Header floats above the LazyColumn so the hero image extends full-bleed underneath
+        // Header floats above the LazyColumn; every list viewport clears its measured height.
+        // onGloballyPositioned measures its real height and feeds it into headerClearance above,
+        // so catalog content always clears it exactly regardless of font scale, locale, or
+        // device-specific status-bar height.
         HomeHeader(
             selectedTab = selectedTab,
             onTabSelected = onTabSelected,
@@ -905,6 +946,9 @@ private fun HomeRowsContent(
             onNavigateToSettings = onNavigateToSettings,
             onNavigateToDownloads = onNavigateToDownloads,
             collapseFraction = topBarCollapseFraction,
+            modifier = Modifier
+                .testTag(HOME_HEADER_TEST_TAG)
+                .onGloballyPositioned { coordinates -> measuredHeaderHeightPx = coordinates.size.height },
         )
     }
 }
@@ -1012,6 +1056,9 @@ private fun LazyListScope.homeLanguageFilterRow(
 
     item(key = key) {
         LazyRow(
+            // Test tag — geometry regression test for the header-overlap bug (see
+            // HOME_HEADER_TEST_TAG) locates the first catalog-tab chip row by its key.
+            modifier = Modifier.testTag(key),
             contentPadding = PaddingValues(
                 horizontal = horizontalPadding,
                 vertical = LayoutDimens.LazyRowFocusPadding,
@@ -1297,7 +1344,7 @@ private fun LiveBadge() {
  *  3. Content column: eyebrow label + large title + chips row + actions row
  *
  * Uses [RadiusXl] (28 dp) for the hero shape per styles.css (.hero border-radius: --radius-xl).
- * The top-bar overlays this composable, so no top padding is added here.
+ * The measured header clearance is applied by HomeRowsContent before this composable.
  */
 @Composable
 private fun HomeHero(
@@ -1334,9 +1381,9 @@ private fun HomeHero(
         ),
     )
 
-    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-        // 16:9 by default, but never shorter than a floor that guarantees the
-        // bottom-aligned hero content clears the floating top bar above it.
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth().testTag(HOME_HERO_TEST_TAG)) {
+        // 16:9 by default, but never shorter than a floor that keeps the
+        // bottom-aligned hero content readable.
         val heroHeight = maxOf(maxWidth * (9f / 16f), 360.dp)
 
         Box(
@@ -1371,18 +1418,16 @@ private fun HomeHero(
         )
 
         // 4. Hero content — aligned to bottom-start, max 62% width per styles.css.
-        // Top inset reserves the status bar + floating header zone (title row + tab bar,
-        // Task 1) so the hero title never overlaps the "Accueil / Recherche / Reglages" +
-        // tabs overlay.
+        // The LazyColumn already starts below the measured headerClearance (status bar +
+        // floating title row + tab bar), so this Box no longer needs to reserve that space
+        // itself.
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .statusBarsPadding()
                 .padding(
                     start = Spacing.xxl,
                     end = Spacing.xxl,
                     bottom = Spacing.xxl,
-                    top = LayoutDimens.TopBarHeight + LayoutDimens.TabRowHeight,
                 ),
             contentAlignment = Alignment.BottomStart,
         ) {
