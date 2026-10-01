@@ -11,11 +11,13 @@ import com.bobot.iptvapp.domain.model.DownloadRequestData
 import com.bobot.iptvapp.domain.model.Episode
 import com.bobot.iptvapp.domain.model.OfflineDownload
 import com.bobot.iptvapp.domain.model.Series
+import com.bobot.iptvapp.domain.model.SubtitleSearchContext
 import com.bobot.iptvapp.domain.model.XtreamCredentials
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.repository.DownloadRepository
 import com.bobot.iptvapp.domain.repository.FavoritesRepository
 import com.bobot.iptvapp.domain.util.Resource
+import com.bobot.iptvapp.domain.util.subtitleSearchContext
 import com.bobot.iptvapp.ui.util.DOWNLOAD_REFUSED_MESSAGE
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
@@ -268,6 +270,13 @@ class SeriesDetailViewModel @Inject constructor(
             containerExtension = extension,
         )
     }
+
+    /**
+     * What the player needs for an online subtitle search on [episode], named after the series
+     * currently loaded in [uiState]. Synchronous for the same reason as [buildEpisodeStreamUrl].
+     */
+    fun subtitleSearchContextFor(episode: Episode): SubtitleSearchContext? =
+        episode.subtitleSearchContext(_uiState.value.series)
 
     // ─── Internal ────────────────────────────────────────────────────────────────
 

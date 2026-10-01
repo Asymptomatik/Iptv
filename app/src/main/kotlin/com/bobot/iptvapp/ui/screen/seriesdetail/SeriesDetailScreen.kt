@@ -57,6 +57,7 @@ import com.bobot.iptvapp.domain.model.DownloadState
 import com.bobot.iptvapp.domain.model.OfflineDownload
 import com.bobot.iptvapp.domain.model.Season
 import com.bobot.iptvapp.domain.model.Series
+import com.bobot.iptvapp.domain.model.SubtitleSearchContext
 import com.bobot.iptvapp.domain.util.displayLabel
 import com.bobot.iptvapp.domain.util.StreamTitle
 import com.bobot.iptvapp.domain.util.displayTitle
@@ -105,7 +106,7 @@ import kotlinx.coroutines.isActive
 @Composable
 fun SeriesDetailScreen(
     seriesId: String,
-    onNavigateToPlayer: (streamUrl: String, streamId: String) -> Unit,
+    onNavigateToPlayer: (streamUrl: String, streamId: String, subtitleSearchContext: SubtitleSearchContext?) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SeriesDetailViewModel = hiltViewModel(),
 ) {
@@ -118,7 +119,9 @@ fun SeriesDetailScreen(
     SeriesDetailContent(
         uiState = uiState,
         onEpisodeClick = { episode ->
-            viewModel.buildEpisodeStreamUrl(episode)?.let { url -> onNavigateToPlayer(url, episode.id) }
+            viewModel.buildEpisodeStreamUrl(episode)?.let { url ->
+                onNavigateToPlayer(url, episode.id, viewModel.subtitleSearchContextFor(episode))
+            }
         },
         onDownloadEpisode = viewModel::onDownloadEpisode,
         onPauseEpisodeDownload = viewModel::onPauseEpisodeDownload,

@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.bobot.iptvapp.data.logout.LogoutCoordinator
 import com.bobot.iptvapp.data.preferences.AppPreferencesStore
+import com.bobot.iptvapp.data.preferences.OpenSubtitlesApiKeyStore
 import com.bobot.iptvapp.data.source.CatalogException
 import com.bobot.iptvapp.data.source.CredentialsProvider
 import com.bobot.iptvapp.domain.model.ContentType
@@ -58,6 +59,10 @@ import javax.inject.Inject
  *                               [SettingsViewModel.onToggleWifiOnlyDownloads]. Defaults to `false`
  *                               (downloads allowed on any network) to match the preference store's
  *                               own default before the first emission arrives.
+ * @property openSubtitlesApiKeyInput Current text of the masked OpenSubtitles key field. Never
+ *                               pre-filled, emptied after every save or clear.
+ * @property isOpenSubtitlesApiKeyConfigured Whether a key is stored — the only thing about the
+ *                               stored key the screen ever learns.
  */
 /**
  * The block of [SettingsScreen] a message belongs to.
@@ -67,7 +72,7 @@ import javax.inject.Inject
  * press it (QA finding N12). Tagging the message with its origin is enough for the screen to place
  * it correctly, and keeps a single message slot in the state rather than one per section.
  */
-enum class SettingsMessageSection { CREDENTIALS, ACTIONS }
+enum class SettingsMessageSection { CREDENTIALS, ACTIONS, SUBTITLES }
 
 data class SettingsUiState(
     val serverUrl: String = "",
@@ -81,6 +86,8 @@ data class SettingsUiState(
     val isLoggedOut: Boolean = false,
     val isWifiOnlyDownloads: Boolean = false,
     val isLogoutConfirmationVisible: Boolean = false,
+    val openSubtitlesApiKeyInput: String = "",
+    val isOpenSubtitlesApiKeyConfigured: Boolean = false,
 )
 
 /**
@@ -120,6 +127,8 @@ data class SettingsUiState(
  * @param appPreferencesStore  Used to read and persist the Wi-Fi-only downloads preference.
  * @param logoutCoordinator    Starts the logout purge outside this ViewModel's lifecycle and
  *                             publishes its outcome — see [onLogout].
+ * @param openSubtitlesApiKeyStore Stores the app's OpenSubtitles consumer key; only its
+ *                             configured/not-configured state is ever read back.
  */
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
@@ -127,6 +136,7 @@ class SettingsViewModel @Inject constructor(
     private val credentialsProvider: CredentialsProvider,
     private val appPreferencesStore: AppPreferencesStore,
     private val logoutCoordinator: LogoutCoordinator,
+    private val openSubtitlesApiKeyStore: OpenSubtitlesApiKeyStore,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(SettingsUiState())
@@ -149,6 +159,12 @@ class SettingsViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(serverUrl = credentials.baseUrl, username = credentials.username)
                 }
+            }
+        }
+
+        viewModelScope.launch {
+            openSubtitlesApiKeyStore.observeIsConfigured().collect { configured ->
+                _uiState.update { it.copy(isOpenSubtitlesApiKeyConfigured = configured) }
             }
         }
 
@@ -406,6 +422,58 @@ class SettingsViewModel @Inject constructor(
     fun onToggleWifiOnlyDownloads(enabled: Boolean) {
         viewModelScope.launch {
             appPreferencesStore.setWifiOnlyDownloads(enabled)
+        }
+    }
+
+    /** Updates the OpenSubtitles key field and clears any previously shown message. */
+    fun onOpenSubtitlesApiKeyChange(value: String) {
+        _uiState.update {
+            it.copy(openSubtitlesApiKeyInput = value, errorMessage = null, infoMessage = null)
+        }
+    }
+
+    /**
+     * Stores the typed OpenSubtitles consumer key, then empties the field: the key is never shown
+     * again, only [SettingsUiState.isOpenSubtitlesApiKeyConfigured] is. A blank field is refused
+     * rather than taken as "clear" — [onClearOpenSubtitlesApiKey] is the explicit way to do that.
+     */
+    fun onSaveOpenSubtitlesApiKey() {
+        val typed = _uiState.value.openSubtitlesApiKeyInput.trim()
+        if (typed.isEmpty()) {
+            _uiState.update {
+                it.copy(
+                    errorMessage = "Veuillez saisir une clé API OpenSubtitles.",
+                    infoMessage = null,
+                    messageSection = SettingsMessageSection.SUBTITLES,
+                )
+            }
+            return
+        }
+        viewModelScope.launch {
+            openSubtitlesApiKeyStore.setApiKey(typed)
+            _uiState.update {
+                it.copy(
+                    openSubtitlesApiKeyInput = "",
+                    errorMessage = null,
+                    infoMessage = "Clé OpenSubtitles enregistrée.",
+                    messageSection = SettingsMessageSection.SUBTITLES,
+                )
+            }
+        }
+    }
+
+    /** Forgets the stored OpenSubtitles key, and whatever was half-typed in the field. */
+    fun onClearOpenSubtitlesApiKey() {
+        viewModelScope.launch {
+            openSubtitlesApiKeyStore.clearApiKey()
+            _uiState.update {
+                it.copy(
+                    openSubtitlesApiKeyInput = "",
+                    errorMessage = null,
+                    infoMessage = "Clé OpenSubtitles effacée.",
+                    messageSection = SettingsMessageSection.SUBTITLES,
+                )
+            }
         }
     }
 

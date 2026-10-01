@@ -5,10 +5,20 @@ import androidx.lifecycle.viewModelScope
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Tracks
 import androidx.media3.common.Player as ExoCommonPlayer
+import com.bobot.iptvapp.data.logout.DownloadedSubtitlePurger
+import com.bobot.iptvapp.data.logout.LogoutCoordinator
 import com.bobot.iptvapp.data.preferences.AppPreferencesStore
+import com.bobot.iptvapp.data.remote.opensubtitles.OpenSubtitlesClient
+import com.bobot.iptvapp.data.remote.opensubtitles.OnlineSubtitleVisit
+import com.bobot.iptvapp.data.remote.opensubtitles.OpenSubtitlesDownloader
+import com.bobot.iptvapp.domain.logout.LogoutPurgeState
 import com.bobot.iptvapp.domain.model.ContentType
 import com.bobot.iptvapp.domain.model.ExternalSubtitle
+import com.bobot.iptvapp.domain.model.OnlineSubtitle
+import com.bobot.iptvapp.domain.model.OnlineSubtitleDownloadResult
+import com.bobot.iptvapp.domain.model.OnlineSubtitleSearchResult
 import com.bobot.iptvapp.domain.model.PlaybackProgress
+import com.bobot.iptvapp.domain.model.SubtitleSearchContext
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.repository.PlaybackProgressRepository
 import com.bobot.iptvapp.domain.util.Resource
@@ -17,6 +27,7 @@ import com.bobot.iptvapp.player.PlayerTrack
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -24,6 +35,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
@@ -66,6 +78,7 @@ import javax.inject.Inject
  *                           selected entry in this list" the exact same state Media3 itself
  *                           exposes. Consumers can derive "disabled" as
  *                           `subtitleTracks.none { it.isSelected }`.
+ * @property onlineSubtitles The OpenSubtitles search and pick — see [OnlineSubtitlesUiState].
  */
 data class PlayerUiState(
     val isPlaying: Boolean = false,
@@ -76,6 +89,7 @@ data class PlayerUiState(
     val isLive: Boolean = false,
     val audioTracks: List<PlayerTrack> = emptyList(),
     val subtitleTracks: List<PlayerTrack> = emptyList(),
+    val onlineSubtitles: OnlineSubtitlesUiState = OnlineSubtitlesUiState(),
 )
 
 /**
@@ -110,6 +124,10 @@ class PlayerViewModel @Inject constructor(
     private val playbackProgressRepository: PlaybackProgressRepository,
     private val appPreferencesStore: AppPreferencesStore,
     private val catalogRepository: CatalogRepository,
+    private val openSubtitlesClient: OpenSubtitlesClient,
+    private val openSubtitlesDownloader: OpenSubtitlesDownloader,
+    private val logoutCoordinator: LogoutCoordinator,
+    private val downloadedSubtitlePurger: DownloadedSubtitlePurger,
 ) : ViewModel() {
 
     private companion object {
@@ -162,10 +180,21 @@ class PlayerViewModel @Inject constructor(
          * KDoc for the full best-effort contract.
          */
         const val EXTERNAL_SUBTITLES_TIMEOUT_MS = 4_000L
+
+        /** Prefix of the track id given to a subtitle picked online — see [selectOnlineSubtitle]. */
+        const val ONLINE_TRACK_ID_PREFIX = "online-subtitle-"
     }
 
-    /** The shared [ExoCommonPlayer] instance to attach to Media3's `PlayerView`. */
-    val player: ExoCommonPlayer
+    /**
+     * The shared [ExoCommonPlayer] instance to attach to Media3's `PlayerView` — `null` once this
+     * screen is released or its session revoked (see [inSession]): reading [PlayerManager.player]
+     * then would build a fresh player behind the logout purge, or hand over the next account's.
+     */
+    val player: ExoCommonPlayer?
+        get() = if (!released && inSession()) activePlayer else null
+
+    /** [PlayerManager.player], for this class's own reads — only ever once [inSession] allowed them. */
+    private val activePlayer: ExoCommonPlayer
         get() = playerManager.player
 
     private val _uiState = MutableStateFlow(PlayerUiState())
@@ -179,9 +208,9 @@ class PlayerViewModel @Inject constructor(
     private var streamUrl: String? = null
 
     /**
-     * Resume position resolved in [initialize] and retained so that [retry] passes it back
-     * to [PlayerManager.prepare], ensuring the user resumes from the same offset after an
-     * error rather than restarting from the beginning.
+     * Resume position resolved in [initialize], moved on by every later prepare, and passed back
+     * to [PlayerManager.prepare] by [retry] when the player no longer holds the media to read
+     * the reached position from — so an error never restarts the video from the beginning.
      */
     private var startPositionMs: Long = 0L
 
@@ -191,6 +220,68 @@ class PlayerViewModel @Inject constructor(
      * silently dropping them back to [PlayerManager.prepare]'s `emptyList()` default.
      */
     private var resolvedExternalSubtitles: List<ExternalSubtitle> = emptyList()
+
+    /**
+     * Metadata for an online subtitle search, as handed over by the route in [initialize].
+     * Always `null` for live streams and for routes that carried none.
+     */
+    var subtitleSearchContext: SubtitleSearchContext? = null
+        private set
+
+    /**
+     * The subtitle picked online, as last handed to [PlayerManager.prepare] after
+     * [resolvedExternalSubtitles] — kept so that [retry] re-prepares with it too. At most one: a
+     * new pick replaces it rather than stacking tracks.
+     */
+    private var onlineExternalSubtitle: ExternalSubtitle? = null
+
+    /**
+     * Id of the online track to switch on as soon as a tracks snapshot carries it — see
+     * [switchToPendingOnlineTrack]. Cleared once switched, or when the user picks a track by hand.
+     */
+    private var pendingOnlineTrackId: String? = null
+
+    /**
+     * Whether the user's subtitle choice is still [onlineExternalSubtitle]: set by a pick, cleared
+     * by any other track or by switching subtitles off. [retry] switches the track back on only then.
+     */
+    private var onlineTrackChosen = false
+
+    /** Numbers each pick and retry of one, so its track id can never match a snapshot of an earlier prepare. */
+    private var onlinePickCount = 0
+
+    private var onlineSearchJob: Job? = null
+    private var onlineApplyJob: Job? = null
+
+    /** The re-prepare without a failed online track — see [onSideLoadedSubtitleError]. */
+    private var onlineFallbackJob: Job? = null
+
+    /**
+     * Counts every [PlayerManager.prepare] of this visit, so a fallback queued for one media can
+     * tell a retry or a new pick has replaced it since.
+     */
+    private var preparedMedia = 0
+
+    /** Owns the files this visit's picks download; [releasePlayer] closes it, deleting them. */
+    private val onlineSubtitleVisit = OnlineSubtitleVisit()
+
+    /**
+     * [initialize]'s start-up, up to the first prepare. A pick waits for it (see
+     * [applyOnlineSubtitle]); leaving the player cancels it.
+     */
+    private var startUpJob: Job? = null
+
+    /**
+     * The session this visit plays, searches and saves for: [LogoutCoordinator.purgeAttempts] and
+     * [LogoutCoordinator.sessionGeneration] as they were when the route created this ViewModel —
+     * the attempts first, so a purge landing between the two reads revokes this visit. Never read
+     * again: a logout between construction and [initialize] must revoke the route, not hand it the
+     * next session. See [inSession].
+     */
+    private val sessionPurgeAttempts = logoutCoordinator.purgeAttempts
+    private val sessionGeneration = logoutCoordinator.sessionGeneration
+
+    private var retryJob: Job? = null
 
     private var initialized = false
     private var released = false
@@ -206,6 +297,9 @@ class PlayerViewModel @Inject constructor(
      */
     private var stallDetectionJob: Job? = null
 
+    // Media3 may still call back once a logout purge has stopped the player: every callback that
+    // reads the player or saves goes through [inSession], directly or via [saveProgress] /
+    // [refreshTracks].
     private val playerListener = object : ExoCommonPlayer.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             _uiState.update { it.copy(isPlaying = isPlaying) }
@@ -218,6 +312,7 @@ class PlayerViewModel @Inject constructor(
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
+            if (!inSession()) return
             _uiState.update {
                 it.copy(
                     isBuffering = playbackState == ExoCommonPlayer.STATE_BUFFERING,
@@ -271,19 +366,29 @@ class PlayerViewModel @Inject constructor(
      * The resolved [url] and start position are retained internally so that [retry] can
      * re-prepare the same stream without requiring the caller to pass them again.
      */
-    fun initialize(streamUrl: String, streamId: String) {
+    fun initialize(
+        streamUrl: String,
+        streamId: String,
+        subtitleSearchContext: SubtitleSearchContext? = null,
+    ) {
         if (initialized) return
         initialized = true
+        // A logout since this route was created: nothing is retained — no stream to retry, no
+        // title to search, no profile to save for — and the player is never read, since reading it
+        // behind the purge's stop would build a fresh one.
+        if (!inSession()) return
 
         this.streamUrl = streamUrl
         contentId = streamId
         contentType = resolveContentTypeFromUrl(streamUrl)
+        this.subtitleSearchContext = subtitleSearchContext.takeIf { contentType != ContentType.LIVE }
+        updateOnline { it.copy(isAvailable = this.subtitleSearchContext != null) }
 
-        player.addListener(playerListener)
+        activePlayer.addListener(playerListener)
+        playerManager.setSideLoadedSubtitleErrorListener { onSideLoadedSubtitleError(it) }
 
-        viewModelScope.launch {
+        startUpJob = viewModelScope.launch {
             val profileId = appPreferencesStore.getActiveProfileId()
-            activeProfileId = profileId
 
             val resolvedType = contentType ?: ContentType.MOVIE
 
@@ -309,23 +414,34 @@ class PlayerViewModel @Inject constructor(
             // side-loaded (Task 3's `PlayerManager.prepare` contract). See
             // `resolveExternalSubtitles` KDoc for the MOVIE-only gating and timeout rationale.
             val externalSubtitles = resolveExternalSubtitles(resolvedType, streamId)
-            resolvedExternalSubtitles = externalSubtitles
 
-            startPositionMs = resolvedStartPosition
-            playerManager.prepare(
-                streamUrl = streamUrl,
-                startPositionMs = resolvedStartPosition,
-                externalSubtitles = externalSubtitles,
-            )
-            _uiState.update { it.copy(currentPositionMs = resolvedStartPosition) }
-            startProgressTicker()
+            // Same gate as a pick (see `applyOnlineSubtitle`), for the same reason: the waits
+            // above run outside the purge's lock, so a logout can stop playback and purge while
+            // the screen stays open. Checked and prepared in one go — a purge completed before is
+            // refused, one starting after stops this playback. [activeProfileId] is only set in
+            // here, so a refused start-up never saves a position for the purged profile either.
+            logoutCoordinator.runInSession(sessionGeneration) {
+                if (!inSession()) return@runInSession
+                activeProfileId = profileId
+                resolvedExternalSubtitles = externalSubtitles
+                startPositionMs = resolvedStartPosition
+                preparedMedia++
+                playerManager.prepare(
+                    streamUrl = streamUrl,
+                    startPositionMs = resolvedStartPosition,
+                    externalSubtitles = externalSubtitles,
+                )
+                _uiState.update { it.copy(currentPositionMs = resolvedStartPosition) }
+                startProgressTicker()
+            }
         }
     }
 
     /**
-     * Clears the error state and re-prepares the retained stream from the last known resume
-     * position. Intended to be wired to the "Réessayer" button on the error overlay in
-     * [PlayerScreen].
+     * Clears the error state and re-prepares the retained stream where playback had reached (or
+     * the last known resume position), paused if it was, the online track switched back on if it
+     * was still the user's choice. Intended to be wired to the "Réessayer" button on the error
+     * overlay in [PlayerScreen].
      *
      * ## Guard notes
      * Unlike [initialize], this function is deliberately **not** gated by [initialized] — an
@@ -334,11 +450,25 @@ class PlayerViewModel @Inject constructor(
      * [releasePlayer] cannot call into a released [PlayerManager]. If [streamUrl] is null
      * (retry called before [initialize] ran — should not happen in normal flow), the call is
      * silently ignored.
+     *
+     * ## Logout purge
+     * The error overlay stays up through a logout, and the stream URL carries the previous
+     * account's Xtream credentials. So the re-prepare goes through the same gate as [initialize]'s,
+     * for the same session: checked and prepared in one go under the purge's lock — a purge
+     * completed or started before is refused, one starting after stops this playback.
      */
     fun retry() {
         if (released) return
         val url = streamUrl ?: return
+        retryJob?.cancel()
+        retryJob = viewModelScope.launch {
+            logoutCoordinator.runInSession(sessionGeneration) {
+                if (!released && inSession()) reprepare(url)
+            }
+        }
+    }
 
+    private fun reprepare(url: String) {
         // Cancel any stall watchdog left over from the previous attempt so it cannot fire
         // against the new attempt's playback (e.g. right after this retry succeeds and starts
         // playing normally) — see `stallDetectionJob` KDoc.
@@ -357,18 +487,115 @@ class PlayerViewModel @Inject constructor(
         // makes this call safe even if the Media3 callback *does* also fire independently —
         // no duplicate timer is created.
         startStallDetection()
-        // Re-passes `resolvedExternalSubtitles` (retained from `initialize`'s resolution) rather
-        // than relying on `prepare`'s `emptyList()` default, so a retry does not silently drop
-        // an already-resolved best-effort external subtitle track.
+
+        // Where playback had reached, not where it last started — as long as the player still
+        // holds this media. A live stream always restarts at its live edge.
+        if (contentType != ContentType.LIVE && activePlayer.currentMediaItem != null) {
+            startPositionMs = activePlayer.currentPosition.coerceAtLeast(0L)
+        }
+        val keepPlaying = activePlayer.playWhenReady
+        _uiState.update { it.copy(currentPositionMs = startPositionMs) }
+
+        // Media3 ties a selection to the track groups it was made on, and the retried media has
+        // new ones: the online track the user had on is switched on again, under a fresh id so
+        // that only the retried media's snapshot can match it (see `switchToPendingOnlineTrack`).
+        onlineExternalSubtitle?.let { online ->
+            onlinePickCount++
+            val trackId = "$ONLINE_TRACK_ID_PREFIX$onlinePickCount"
+            onlineExternalSubtitle = online.copy(trackId = trackId)
+            pendingOnlineTrackId = trackId.takeIf { onlineTrackChosen }
+        }
+
+        // Re-passes the retained external subtitles (see `currentExternalSubtitles`) rather than
+        // relying on `prepare`'s `emptyList()` default, so a retry does not silently drop an
+        // already-resolved best-effort track, nor one picked online.
+        preparedMedia++
         playerManager.prepare(
             streamUrl = url,
             startPositionMs = startPositionMs,
-            externalSubtitles = resolvedExternalSubtitles,
+            externalSubtitles = currentExternalSubtitles(),
         )
+        // `prepare` always resumes playback; a video the user had paused stays paused.
+        if (!keepPlaying) activePlayer.pause()
+    }
+
+    // ─── Online subtitles (OpenSubtitles) ────────────────────────────────────────
+
+    /**
+     * Opens the search panel, searching unless results (or a search) are already there. A no-op
+     * when [OnlineSubtitlesUiState.isAvailable] is `false` — in particular for any live channel.
+     *
+     * ## Logout purge
+     * Also a no-op once this visit's session is revoked (see [inSession]): the search sends the
+     * previous account's title to OpenSubtitles. A search already on its way is not published —
+     * see [startOnlineSearch].
+     */
+    fun openOnlineSubtitleSearch() {
+        if (released || subtitleSearchContext == null || !inSession()) return
+        updateOnline { it.copy(isPanelOpen = true) }
+        val search = _uiState.value.onlineSubtitles.search
+        if (search is OnlineSubtitleSearchState.Idle || search is OnlineSubtitleSearchState.Failed) {
+            startOnlineSearch()
+        }
+    }
+
+    /** Searches again, dropping whatever the previous search would still answer. */
+    fun retryOnlineSubtitleSearch() {
+        if (released || subtitleSearchContext == null || !inSession()) return
+        updateOnline { it.copy(isPanelOpen = true) }
+        startOnlineSearch()
+    }
+
+    /**
+     * Closes the panel. A search still running is cancelled and forgotten; results already shown
+     * are kept for the next opening. A pick already made keeps going — the user asked for it.
+     */
+    fun closeOnlineSubtitleSearch() {
+        val searching = onlineSearchJob?.isActive == true
+        onlineSearchJob?.cancel()
+        onlineSearchJob = null
+        updateOnline {
+            it.copy(
+                isPanelOpen = false,
+                search = if (searching) OnlineSubtitleSearchState.Idle else it.search,
+            )
+        }
+    }
+
+    /**
+     * Downloads [subtitle] and re-prepares the stream with it, the Xtream subtitles kept, at the
+     * position playback has reached *when the file arrives* — the download takes seconds, and
+     * resuming from where the user clicked would replay them. Play/pause is carried over, and
+     * the new track is switched on once Media3 reports it (see [switchToPendingOnlineTrack]).
+     *
+     * A newer pick supersedes this one; a failure only sets
+     * [OnlineSubtitlesUiState.applyError] — playback is never stopped for it.
+     *
+     * ## Logout purge
+     * The file lands in the directory the logout purge empties, so a pick must never write
+     * behind a purge. The download cannot run under the purge's lock (it would block a logout
+     * behind the network), so the pick uses the same generation check as sign-in does (see
+     * [LogoutCoordinator]): it is refused outright while a purge is running or owed, the file
+     * store writes only inside [LogoutCoordinator.runInSession] for that generation (a file
+     * written before a purge is the purge's to delete, none can land after it), and the file is
+     * played only under that same gate. The file belongs to [onlineSubtitleVisit]: kept for any
+     * retry or later pick, deleted when the player is left — never a purge of the directory, which
+     * may hold another player's or, after a logout, the next account's subtitles.
+     */
+    fun selectOnlineSubtitle(subtitle: OnlineSubtitle) {
+        if (released || subtitleSearchContext == null) return
+        onlineApplyJob?.cancel()
+        updateOnline { it.copy(applyingFileId = subtitle.fileId, applyError = null) }
+        onlineApplyJob = viewModelScope.launch { applyOnlineSubtitle(subtitle) }
+    }
+
+    fun dismissOnlineSubtitleError() {
+        updateOnline { it.copy(applyError = null) }
     }
 
     /** Toggles play/pause — wired to the Composable's central play/pause control. */
     fun togglePlayPause() {
+        val player = player ?: return
         if (player.isPlaying) player.pause() else player.play()
     }
 
@@ -377,11 +604,13 @@ class PlayerViewModel @Inject constructor(
      * A no-op on a live stream — see [seekTo].
      */
     fun seekForward() {
+        val player = player ?: return
         seekTo(player.currentPosition + SEEK_STEP_MS)
     }
 
     /** Seeks backward by [SEEK_STEP_MS], clamped to zero. */
     fun seekBackward() {
+        val player = player ?: return
         seekTo(player.currentPosition - SEEK_STEP_MS)
     }
 
@@ -395,6 +624,7 @@ class PlayerViewModel @Inject constructor(
      * D-pad left/right keys reach this method directly, so the guard belongs here too.
      */
     fun seekTo(positionMs: Long) {
+        val player = player ?: return
         if (isLiveStream()) return
         val duration = player.duration
         val upperBound = if (duration > 0) duration else Long.MAX_VALUE
@@ -415,7 +645,7 @@ class PlayerViewModel @Inject constructor(
      * guard.
      */
     fun selectAudioTrack(trackId: String) {
-        if (released) return
+        if (released || !inSession()) return
         playerManager.selectAudioTrack(trackId)
         refreshTracks()
     }
@@ -426,7 +656,9 @@ class PlayerViewModel @Inject constructor(
      * which this mirrors exactly.
      */
     fun selectSubtitleTrack(trackId: String) {
-        if (released) return
+        if (released || !inSession()) return
+        pendingOnlineTrackId = null
+        onlineTrackChosen = trackId == onlineExternalSubtitle?.trackId
         playerManager.selectSubtitleTrack(trackId)
         refreshTracks()
     }
@@ -438,7 +670,9 @@ class PlayerViewModel @Inject constructor(
      * contract, which this mirrors exactly.
      */
     fun disableSubtitles() {
-        if (released) return
+        if (released || !inSession()) return
+        pendingOnlineTrackId = null
+        onlineTrackChosen = false
         playerManager.disableSubtitles()
         refreshTracks()
     }
@@ -462,6 +696,16 @@ class PlayerViewModel @Inject constructor(
      * first call) with `0` under the same profile/content composite key. The `released` flag
      * makes every call after the first a no-op, mirroring the [initialized] guard on
      * [initialize].
+     *
+     * ## After a logout
+     * A purge that has started already stopped this playback (its first step): nothing is saved
+     * and the player is not read again. One that has completed may have been followed by the next
+     * account's own player, which is not this screen's to release.
+     *
+     * ## Downloaded subtitles
+     * The files this visit's picks downloaded are deleted, and a download still finishing deletes
+     * its own — see [OnlineSubtitleVisit]. Those files only: never another player's, nor, after a
+     * logout, the next account's.
      */
     fun releasePlayer() {
         if (released) return
@@ -469,9 +713,17 @@ class PlayerViewModel @Inject constructor(
 
         saveProgress()
         progressTickerJob?.cancel()
+        // Leaving the player drops any online search, pick or retry still in flight: nothing may
+        // re-prepare a released player, and a late result has nowhere to show.
+        startUpJob?.cancel()
+        onlineSearchJob?.cancel()
+        onlineApplyJob?.cancel()
+        onlineFallbackJob?.cancel()
+        retryJob?.cancel()
         cancelStallDetection()
-        player.removeListener(playerListener)
-        playerManager.release()
+        if (inSession()) activePlayer.removeListener(playerListener)
+        if (logoutCoordinator.sessionGeneration == sessionGeneration) playerManager.release()
+        onlineSubtitleVisit.close()
     }
 
     override fun onCleared() {
@@ -497,13 +749,157 @@ class PlayerViewModel @Inject constructor(
      * after [PlayerManager.release] (mirrors every other post-release guard in this class).
      */
     private fun refreshTracks() {
-        if (released) return
+        if (released || !inSession()) return
         _uiState.update {
             it.copy(
                 audioTracks = playerManager.getAudioTracks(),
                 subtitleTracks = playerManager.getSubtitleTracks(),
             )
         }
+        switchToPendingOnlineTrack()
+    }
+
+    /**
+     * Switches on the online track [selectOnlineSubtitle] prepared, once the fresh snapshot in
+     * [PlayerUiState.subtitleTracks] carries its id. Right after `prepare`, Media3 still reports
+     * the old media's tracks (or none) — selecting then would hit a stale id and silently do
+     * nothing — so this waits for the track to actually show up, then forgets it: later track
+     * updates never override what the user picks next.
+     */
+    private fun switchToPendingOnlineTrack() {
+        val trackId = pendingOnlineTrackId ?: return
+        if (_uiState.value.subtitleTracks.none { it.id == trackId }) return
+        pendingOnlineTrackId = null
+        playerManager.selectSubtitleTrack(trackId)
+        _uiState.update { it.copy(subtitleTracks = playerManager.getSubtitleTracks()) }
+    }
+
+    private fun currentExternalSubtitles(): List<ExternalSubtitle> =
+        resolvedExternalSubtitles + listOfNotNull(onlineExternalSubtitle)
+
+    private fun updateOnline(transform: (OnlineSubtitlesUiState) -> OnlineSubtitlesUiState) {
+        _uiState.update { it.copy(onlineSubtitles = transform(it.onlineSubtitles)) }
+    }
+
+    private fun startOnlineSearch() {
+        val context = subtitleSearchContext ?: return
+        onlineSearchJob?.cancel()
+        updateOnline { it.copy(search = OnlineSubtitleSearchState.Loading) }
+        onlineSearchJob = viewModelScope.launch {
+            // Checked again once dispatched: a logout may have run since the button was pressed.
+            if (!inSession()) return@launch
+            val state = when (val result = openSubtitlesClient.search(context)) {
+                is OnlineSubtitleSearchResult.Found -> OnlineSubtitleSearchState.Results(result.subtitles)
+                OnlineSubtitleSearchResult.NoResults -> OnlineSubtitleSearchState.Empty
+                is OnlineSubtitleSearchResult.Failed -> result.toSearchState()
+            }
+            // A cancelled search can still resume here if its answer was already on its way;
+            // only the search that is still the current one, for a session still signed in, may
+            // publish — whether or not the client honoured the cancellation.
+            if (isActive && !released && inSession()) updateOnline { it.copy(search = state) }
+        }
+    }
+
+    private suspend fun applyOnlineSubtitle(subtitle: OnlineSubtitle) {
+        // This visit's session, not whichever is current: a screen left open through a completed
+        // logout would otherwise download — and play the previous account's stream — for the next.
+        val generation = sessionGeneration
+        val stillInSession = logoutCoordinator.runUnlessPurgeOwed {
+            logoutCoordinator.sessionGeneration == generation && inSession()
+        }
+        if (stillInSession != true) {
+            failPick(LOGOUT_MESSAGE)
+            return
+        }
+
+        when (val result = openSubtitlesDownloader.download(subtitle, generation, onlineSubtitleVisit)) {
+            is OnlineSubtitleDownloadResult.Failed -> failPick(result.toMessage())
+            is OnlineSubtitleDownloadResult.Downloaded -> {
+                // The search is offered before the first prepare: a pick landing earlier would
+                // play from 0 and then be replaced by that prepare, without its track. Waiting
+                // (outside the purge's lock) makes it re-prepare on top, at the resume point.
+                startUpJob?.join()
+                // Checked and played in one go under the purge's lock: a purge either completed
+                // before (refused) or starts after, and then its first step stops this playback.
+                // A check released before `prepare` would let a purge stop the player in between
+                // and this pick start the previous account's stream again behind it.
+                val played = logoutCoordinator.runInSession(generation) {
+                    if (!released && inSession()) playWithOnlineSubtitle(subtitle, result.subtitle)
+                }
+                if (played == null) failPick(LOGOUT_MESSAGE)
+            }
+        }
+    }
+
+    private fun playWithOnlineSubtitle(subtitle: OnlineSubtitle, file: ExternalSubtitle) {
+        val url = streamUrl ?: return
+        onlinePickCount++
+        val trackId = "$ONLINE_TRACK_ID_PREFIX$onlinePickCount"
+        onlineExternalSubtitle = file.copy(trackId = trackId)
+        pendingOnlineTrackId = trackId
+        onlineTrackChosen = true
+        updateOnline {
+            it.copy(applyingFileId = null, appliedFileId = subtitle.fileId, applyError = null)
+        }
+        reprepareInPlace(url)
+    }
+
+    /**
+     * Replaces the playing media with [url] and [currentExternalSubtitles], where the video had
+     * reached and paused if it was.
+     */
+    private fun reprepareInPlace(url: String) {
+        val position = activePlayer.currentPosition.coerceAtLeast(0L)
+        val keepPlaying = activePlayer.playWhenReady
+        // Retained like `initialize`'s resume point, so a later `retry` resumes here, not there.
+        startPositionMs = position
+
+        cancelStallDetection()
+        _uiState.update { it.copy(hasError = false, isBuffering = true, currentPositionMs = position) }
+        // Same reason as in `retry`: a fresh prepare may leave STATE_BUFFERING unchanged.
+        startStallDetection()
+        preparedMedia++
+        playerManager.prepare(
+            streamUrl = url,
+            startPositionMs = position,
+            externalSubtitles = currentExternalSubtitles(),
+        )
+        // `prepare` always resumes playback; a video the user had paused stays paused.
+        if (!keepPlaying) activePlayer.pause()
+    }
+
+    /**
+     * The player could not load or parse side-loaded track [trackId]. Only the online track still
+     * applied is acted on — every failed attempt is reported, and so are tracks a later pick
+     * replaced. It is forgotten at once, so nothing brings it back (a pending switch, a [retry]),
+     * then the video is re-prepared once without it: Media3 keeps a failing source stalled rather
+     * than failing playback, see [PlayerManager.setSideLoadedSubtitleErrorListener].
+     *
+     * No re-prepare if the media has been replaced since (a retry or pick already dropped the
+     * track), or behind the error overlay — its [retry] will. Same session gate as a pick.
+     */
+    private fun onSideLoadedSubtitleError(trackId: String) {
+        if (released || !inSession()) return
+        if (trackId != onlineExternalSubtitle?.trackId) return
+        onlineExternalSubtitle = null
+        pendingOnlineTrackId = null
+        onlineTrackChosen = false
+        updateOnline { it.copy(appliedFileId = null, applyError = ONLINE_TRACK_FAILED_MESSAGE) }
+
+        val url = streamUrl ?: return
+        val failedIn = preparedMedia
+        onlineFallbackJob?.cancel()
+        onlineFallbackJob = viewModelScope.launch {
+            logoutCoordinator.runInSession(sessionGeneration) {
+                if (released || !inSession()) return@runInSession
+                if (preparedMedia != failedIn || _uiState.value.hasError) return@runInSession
+                reprepareInPlace(url)
+            }
+        }
+    }
+
+    private fun failPick(message: String) {
+        updateOnline { it.copy(applyingFileId = null, applyError = message) }
     }
 
     /**
@@ -557,11 +953,14 @@ class PlayerViewModel @Inject constructor(
             var msSinceLastSave = 0L
             while (isActive) {
                 delay(POSITION_TICK_INTERVAL_MS)
+                // A logout purge has stopped this playback: reading the player would build a new
+                // one, and this session never comes back — see [inSession].
+                if (!inSession()) break
 
-                val isPlayingNow = player.isPlaying
+                val isPlayingNow = activePlayer.isPlaying
                 _uiState.update {
                     it.copy(
-                        currentPositionMs = player.currentPosition.coerceAtLeast(0L),
+                        currentPositionMs = activePlayer.currentPosition.coerceAtLeast(0L),
                         durationMs = safeDuration(),
                         isLive = isLiveStream(),
                     )
@@ -621,6 +1020,14 @@ class PlayerViewModel @Inject constructor(
      * a "position" for live content is therefore meaningless and would only pollute the
      * Continue Watching row (see [com.bobot.iptvapp.ui.screen.home.HomeViewModel]) with
      * useless rows. See also [initialize]'s matching skip of the `getProgress` lookup for LIVE.
+     *
+     * ## Logout purge
+     * Nothing is read once this visit's session is revoked (see [inSession]). A position read
+     * before is written under the purge's lock, for this visit's session only: a purge either
+     * comes after the write — and deletes it with the rest of the table — or refuses it. Without
+     * that, a write still on its way would land after the purge, and nothing would ever delete it.
+     * [LogoutCoordinator.awaitInSession] rather than `runInSession`, so the save is not lost to a
+     * pick holding the lock for a few milliseconds.
      */
     private fun saveProgress() {
         val profileId = activeProfileId ?: return
@@ -628,28 +1035,55 @@ class PlayerViewModel @Inject constructor(
         val type = contentType ?: return
 
         if (type == ContentType.LIVE) return
+        if (!inSession()) return
 
-        val position = player.currentPosition.coerceAtLeast(0L)
+        val position = activePlayer.currentPosition.coerceAtLeast(0L)
         val duration = safeDuration()
+        val generation = sessionGeneration
 
         viewModelScope.launch {
-            playbackProgressRepository.upsertProgress(
-                PlaybackProgress(
-                    contentId = id,
-                    contentType = type,
-                    positionMillis = position,
-                    durationMillis = duration,
-                    lastUpdatedMillis = System.currentTimeMillis(),
-                    profileId = profileId,
-                ),
-            )
+            logoutCoordinator.awaitInSession(generation) {
+                if (!inSession()) return@awaitInSession
+                playbackProgressRepository.upsertProgress(
+                    PlaybackProgress(
+                        contentId = id,
+                        contentType = type,
+                        positionMillis = position,
+                        durationMillis = duration,
+                        lastUpdatedMillis = System.currentTimeMillis(),
+                        profileId = profileId,
+                    ),
+                )
+            }
         }
     }
+
+    /**
+     * Whether this visit's session is still the signed-in one: no logout purge has started since
+     * this ViewModel was created, none has completed since, and none is running or left owed.
+     * Once one has, it has stopped this playback — or is about to, its first step — and
+     * [PlayerManager.player] would hand back a fresh player, or later the next account's. Never
+     * true again after that: whatever the purge's outcome, this screen neither plays, reads the
+     * player, searches nor saves any more.
+     *
+     * The generation and [LogoutCoordinator.state] cover a route created *during* a purge, whose
+     * attempts snapshot already includes it: running or failed (still owed), it must not touch the
+     * player the purge stopped; completed, the generation has moved past it.
+     *
+     * Holds nothing, so it is enough on its own only for main-thread work that does not play: the
+     * purge's stop runs on the main thread after [LogoutCoordinator.purgeAttempts] moves, so a read
+     * here that still sees it unchanged comes before that stop. Anything that prepares or writes
+     * checks it again under the purge's lock.
+     */
+    private fun inSession(): Boolean =
+        logoutCoordinator.purgeAttempts == sessionPurgeAttempts &&
+            logoutCoordinator.sessionGeneration == sessionGeneration &&
+            logoutCoordinator.state.value.let { it !is LogoutPurgeState.Running && it !is LogoutPurgeState.Failed }
 
     /** [ExoCommonPlayer.getDuration] reports `C.TIME_UNSET` (a large negative Long) when
      *  unknown (e.g. live streams, or before metadata loads) — clamp that to `0L` so callers
      *  never need to special-case the sentinel value. */
-    private fun safeDuration(): Long = player.duration.coerceAtLeast(0L)
+    private fun safeDuration(): Long = activePlayer.duration.coerceAtLeast(0L)
 
     /** Whether the current stream is live — a live channel has no seekable timeline, so the
      *  UI drops the progress bar, the two time labels and the seek buttons (QA finding N5).
@@ -659,7 +1093,7 @@ class PlayerViewModel @Inject constructor(
      *  [ExoCommonPlayer.isCurrentMediaItemLive] also catches VOD URLs that a provider actually
      *  serves as a live HLS window. */
     private fun isLiveStream(): Boolean =
-        contentType == ContentType.LIVE || player.isCurrentMediaItemLive
+        contentType == ContentType.LIVE || activePlayer.isCurrentMediaItemLive
 }
 
 /**

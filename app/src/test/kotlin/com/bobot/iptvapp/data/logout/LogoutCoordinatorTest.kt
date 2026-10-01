@@ -247,4 +247,61 @@ class LogoutCoordinatorTest {
             assertEquals(emptyList<String>(), stack.journal)
             assertEquals(LogoutPurgeState.Idle, coordinator.state.value)
         }
+
+    // ── Session revocation for a screen left open through the logout ──────────
+
+    @Test
+    fun `purgeAttempts moves before the purge stops playback, and stays moved`() =
+        runTest(testDispatcher) {
+            stack.seedSignedInAccountWithDownloads()
+            val gate = CompletableDeferred<Unit>()
+            stack.gateFirstMedia3Removal = gate
+
+            applicationScope.launch { coordinator.logOut() }
+            advanceUntilIdle()
+            assertTrue("stop-playback" in stack.journal)
+            assertEquals("a running purge has already moved it", 1, coordinator.purgeAttempts)
+            assertEquals(0, coordinator.sessionGeneration)
+
+            gate.complete(Unit)
+            advanceUntilIdle()
+            assertEquals(1, coordinator.purgeAttempts)
+            assertEquals(1, coordinator.sessionGeneration)
+        }
+
+    @Test
+    fun `awaitInSession waits out a short holder of the lock where runInSession is refused`() =
+        runTest(testDispatcher) {
+            val holderGate = CompletableDeferred<Unit>()
+            applicationScope.launch { coordinator.runUnlessPurgeOwed { holderGate.await() } }
+            advanceUntilIdle()
+
+            val refused = coordinator.runInSession(0) { "written" }
+            var awaited: String? = null
+            applicationScope.launch { awaited = coordinator.awaitInSession(0) { "written" } }
+            advanceUntilIdle()
+            assertNull(refused)
+            assertNull("still waiting for the lock", awaited)
+
+            holderGate.complete(Unit)
+            advanceUntilIdle()
+            assertEquals("written", awaited)
+        }
+
+    @Test
+    fun `awaitInSession queued behind a purge is refused once that purge completes`() =
+        runTest(testDispatcher) {
+            stack.seedSignedInAccountWithDownloads()
+            val gate = CompletableDeferred<Unit>()
+            stack.gateFirstMedia3Removal = gate
+            applicationScope.launch { coordinator.logOut() }
+            advanceUntilIdle()
+
+            var ran = false
+            applicationScope.launch { coordinator.awaitInSession(0) { ran = true } }
+            gate.complete(Unit)
+            advanceUntilIdle()
+
+            assertFalse(ran)
+        }
 }

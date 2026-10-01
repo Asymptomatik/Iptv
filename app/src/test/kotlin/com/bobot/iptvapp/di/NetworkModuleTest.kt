@@ -1,6 +1,7 @@
 package com.bobot.iptvapp.di
 
 import okhttp3.logging.HttpLoggingInterceptor
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -100,5 +101,27 @@ class NetworkModuleTest {
         assertTrue(streaming.connectTimeoutMillis == api.connectTimeoutMillis)
         assertTrue(streaming.readTimeoutMillis == api.readTimeoutMillis)
         assertTrue(streaming.writeTimeoutMillis == api.writeTimeoutMillis)
+    }
+
+    @Test
+    fun `the OpenSubtitles client carries no interceptor at all, so its Api-Key never reaches logcat`() {
+        val api = NetworkModule.provideOkHttpClient()
+        val openSubtitles = NetworkModule.provideOpenSubtitlesOkHttpClient(api)
+
+        assertTrue(openSubtitles.interceptors.isEmpty())
+        assertTrue(openSubtitles.networkInterceptors.isEmpty())
+        assertSame(api.connectionPool, openSubtitles.connectionPool)
+    }
+
+    @Test
+    fun `the OpenSubtitles client leaves every redirect to the caller and bounds each call`() {
+        val openSubtitles = NetworkModule.provideOpenSubtitlesOkHttpClient(NetworkModule.provideOkHttpClient())
+
+        // OkHttp only strips `Authorization` on a cross-host hop, never the custom `Api-Key`, so an
+        // automatic follow could hand the key to any HTTPS host a Location names. The callers
+        // follow redirects themselves, through OpenSubtitlesUrlPolicy's allowlist.
+        assertFalse("OkHttp must not follow redirects on its own", openSubtitles.followRedirects)
+        assertFalse("an HTTPS→HTTP hop would carry the key in clear", openSubtitles.followSslRedirects)
+        assertEquals(15_000, openSubtitles.callTimeoutMillis)
     }
 }

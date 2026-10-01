@@ -57,6 +57,17 @@ interface PlayerManager {
     fun prepare(streamUrl: String, startPositionMs: Long = 0L, externalSubtitles: List<ExternalSubtitle> = emptyList())
 
     /**
+     * Sets who is told, on the main thread, that a side-loaded subtitle of the last [prepare]
+     * failed to load or parse — with the [ExternalSubtitle.trackId] it was prepared with. Only
+     * subtitles prepared with a `trackId` are reported, possibly more than once (every failed
+     * attempt), and never as a [Player] error: while this is set, such a failure stalls or
+     * silences that one track instead of failing playback, so the listener is expected to
+     * re-[prepare] without it. Nothing is reported for a replaced or released media; [release]
+     * clears the listener.
+     */
+    fun setSideLoadedSubtitleErrorListener(listener: ((trackId: String) -> Unit)?)
+
+    /**
      * Releases the current [Player] instance and its underlying decoder/renderer
      * resources. Safe to call multiple times or when no player has been created yet.
      * The next [prepare] call (or [player] access) creates a fresh instance.

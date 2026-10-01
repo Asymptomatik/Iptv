@@ -43,6 +43,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.bobot.iptvapp.domain.model.DownloadState
 import com.bobot.iptvapp.domain.model.Movie
+import com.bobot.iptvapp.domain.model.SubtitleSearchContext
 import com.bobot.iptvapp.domain.util.displayTitle
 import com.bobot.iptvapp.ui.components.CategoryChip
 import com.bobot.iptvapp.ui.components.DownloadMessageBanner
@@ -77,7 +78,7 @@ import com.bobot.iptvapp.ui.util.rememberNotificationPermissionRequester
 @Composable
 fun MovieDetailScreen(
     movieId: String,
-    onNavigateToPlayer: (streamUrl: String, streamId: String) -> Unit,
+    onNavigateToPlayer: (streamUrl: String, streamId: String, subtitleSearchContext: SubtitleSearchContext?) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: MovieDetailViewModel = hiltViewModel(),
 ) {
@@ -89,7 +90,7 @@ fun MovieDetailScreen(
 
     MovieDetailContent(
         uiState = uiState,
-        onPlayClick = { uiState.streamUrl?.let { url -> onNavigateToPlayer(url, movieId) } },
+        onPlayClick = { uiState.streamUrl?.let { url -> onNavigateToPlayer(url, movieId, uiState.subtitleSearchContext) } },
         onFavoriteClick = viewModel::onToggleFavorite,
         onDownloadClick = viewModel::onDownloadClick,
         onPauseDownload = viewModel::onPauseDownload,

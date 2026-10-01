@@ -10,6 +10,7 @@ import com.bobot.iptvapp.domain.model.Episode
 import com.bobot.iptvapp.domain.model.OfflineDownload
 import com.bobot.iptvapp.domain.model.Season
 import com.bobot.iptvapp.domain.model.Series
+import com.bobot.iptvapp.domain.model.SubtitleSearchContext
 import com.bobot.iptvapp.domain.model.XtreamCredentials
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.repository.DownloadRepository
@@ -155,6 +156,27 @@ class SeriesDetailViewModelTest {
         createViewModel()
         viewModel.initialize(id)
         testDispatcher.scheduler.runCurrent()
+    }
+
+    // ── Online subtitle search context ───────────────────────────────────────
+
+    @Test
+    fun `episode subtitle search context names the loaded series, season and episode`() {
+        coEvery { catalogRepository.getSeriesDetail(seriesId) } returns
+            Resource.Success(series.copy(title = "FR - Breaking Bad"))
+
+        initialize()
+
+        assertEquals(
+            SubtitleSearchContext(
+                kind = SubtitleSearchContext.Kind.EPISODE,
+                title = "Le Chat est dans le sac",
+                seriesTitle = "Breaking Bad",
+                seasonNumber = 1,
+                episodeNumber = 2,
+            ),
+            viewModel.subtitleSearchContextFor(season1Episodes[1]),
+        )
     }
 
     // ── Successful load ───────────────────────────────────────────────────────

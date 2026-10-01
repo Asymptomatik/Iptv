@@ -10,6 +10,7 @@ import com.bobot.iptvapp.domain.model.FavoriteItem
 import com.bobot.iptvapp.domain.model.Movie
 import com.bobot.iptvapp.domain.model.PlaybackProgress
 import com.bobot.iptvapp.domain.model.Series
+import com.bobot.iptvapp.domain.model.SubtitleSearchContext
 import com.bobot.iptvapp.domain.model.XtreamCredentials
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.repository.FavoritesRepository
@@ -902,6 +903,11 @@ class HomeViewModelTest {
         assertEquals(ContentType.MOVIE, card.contentType)
         // movie1.containerExtension is null -> falls back to "mp4" (mirrors MovieDetailViewModel).
         assertEquals("http://example.com:8080/movie/user/pass/m1.mp4", card.resumeStreamUrl)
+        // movie1.year is null -> the context carries the title only, no invented year.
+        assertEquals(
+            SubtitleSearchContext(SubtitleSearchContext.Kind.MOVIE, title = "Explosion Totale"),
+            card.subtitleSearchContext,
+        )
         coVerify(exactly = 1) { catalogRepository.getMovieDetail("m1") }
         verify(exactly = 0) { catalogRepository.observeVodCategories() }
     }
@@ -996,6 +1002,17 @@ class HomeViewModelTest {
         assertEquals(ContentType.SERIES, card.contentType)
         // episode1.containerExtension is null -> falls back to "mp4".
         assertEquals("http://example.com:8080/series/user/pass/e1.mp4", card.resumeStreamUrl)
+        // The card shows the series, but subtitles are searched for the resumed episode.
+        assertEquals(
+            SubtitleSearchContext(
+                kind = SubtitleSearchContext.Kind.EPISODE,
+                title = "Pilot",
+                seriesTitle = "Breaking Code",
+                seasonNumber = 1,
+                episodeNumber = 1,
+            ),
+            card.subtitleSearchContext,
+        )
         // Cache-only resolution — no catalog tab needed.
         verify(exactly = 0) { catalogRepository.observeSeriesCategories() }
     }
