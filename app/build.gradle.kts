@@ -205,6 +205,7 @@ dependencies {
     testImplementation(libs.mockk)
     testImplementation(libs.turbine)
     testImplementation(libs.coroutines.test)
+    testImplementation(libs.okhttp.mockwebserver)
 
     // ── Instrumented tests ───────────────────────────────────────────────
     androidTestImplementation(libs.junit.ext)

@@ -6,6 +6,8 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.preferencesDataStore
 import com.bobot.iptvapp.data.preferences.AppPreferencesStore
 import com.bobot.iptvapp.data.preferences.DataStoreAppPreferencesStore
+import com.bobot.iptvapp.data.preferences.DataStoreOpenSubtitlesApiKeyStore
+import com.bobot.iptvapp.data.preferences.OpenSubtitlesApiKeyStore
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
@@ -30,6 +32,7 @@ private val Context.iptvPrefsDataStore: DataStore<Preferences> by preferencesDat
  * One DataStore file ("iptv_prefs") is shared by all preference consumers:
  *  - [com.bobot.iptvapp.data.preferences.DataStoreCredentialsProvider] — keys prefixed "credentials_"
  *  - [com.bobot.iptvapp.data.preferences.DataStoreAppPreferencesStore] — keys prefixed "pref_"
+ *  - [com.bobot.iptvapp.data.preferences.DataStoreOpenSubtitlesApiKeyStore] — key "opensubtitles_api_key"
  *
  * A single DataStore instance is simpler to manage (one file, one coroutine scope, one
  * serialisation/deserialisation path) and avoids the overhead of multiple concurrent
@@ -49,6 +52,12 @@ abstract class PreferencesModule {
     @Binds
     @Singleton
     abstract fun bindAppPreferencesStore(impl: DataStoreAppPreferencesStore): AppPreferencesStore
+
+    @Binds
+    @Singleton
+    abstract fun bindOpenSubtitlesApiKeyStore(
+        impl: DataStoreOpenSubtitlesApiKeyStore,
+    ): OpenSubtitlesApiKeyStore
 
     companion object {
 

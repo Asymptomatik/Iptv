@@ -1,10 +1,13 @@
 package com.bobot.iptvapp.di
 
 import com.bobot.iptvapp.BuildConfig
+import com.bobot.iptvapp.data.preferences.OpenSubtitlesApiKeyStore
+import com.bobot.iptvapp.data.remote.opensubtitles.OpenSubtitlesClient
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
@@ -24,6 +27,15 @@ import javax.inject.Singleton
 @Qualifier
 @Retention(AnnotationRetention.BINARY)
 annotation class StreamingHttpClient
+
+/**
+ * Qualifies the [OkHttpClient] of the OpenSubtitles API. It carries no interceptor at all, so the
+ * consumer key sent in its `Api-Key` header can never reach a logger — see
+ * [NetworkModule.provideOpenSubtitlesOkHttpClient].
+ */
+@Qualifier
+@Retention(AnnotationRetention.BINARY)
+annotation class OpenSubtitlesHttpClient
 
 /**
  * Hilt module providing network-layer singletons for the Xtream Codes client.
@@ -134,6 +146,52 @@ object NetworkModule {
         apiClient.newBuilder()
             .apply { interceptors().removeAll { it is HttpLoggingInterceptor } }
             .build()
+
+    /**
+     * Provides the [OkHttpClient] for the OpenSubtitles search API — see [OpenSubtitlesHttpClient].
+     *
+     * Derived from [provideOkHttpClient]'s client to share its connection pool and dispatcher, but
+     * stripped of **every** interceptor rather than only the logging one: the `Api-Key` header is a
+     * secret, [redactingLogger] knows nothing about it, and the only interceptor guaranteed never
+     * to print it is no interceptor at all.
+     *
+     * - OkHttp follows no redirect at all: it would carry the `Api-Key` header to any HTTPS host a
+     *   `Location` names (it only strips `Authorization`). The callers follow redirects by hand,
+     *   through [com.bobot.iptvapp.data.remote.opensubtitles.OpenSubtitlesUrlPolicy]'s allowlist;
+     * - each call is bounded to 15 s end to end — a subtitle search is not worth waiting longer.
+     */
+    @Provides
+    @Singleton
+    @OpenSubtitlesHttpClient
+    fun provideOpenSubtitlesOkHttpClient(apiClient: OkHttpClient): OkHttpClient =
+        apiClient.newBuilder()
+            .apply {
+                interceptors().clear()
+                networkInterceptors().clear()
+            }
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .callTimeout(15, TimeUnit.SECONDS)
+            .build()
+
+    /**
+     * The OpenSubtitles search client. Its `User-Agent` must name the app and its version, or the
+     * API answers 403.
+     */
+    @Provides
+    @Singleton
+    fun provideOpenSubtitlesClient(
+        @OpenSubtitlesHttpClient httpClient: OkHttpClient,
+        json: Json,
+        apiKeyStore: OpenSubtitlesApiKeyStore,
+        @IoDispatcher ioDispatcher: CoroutineDispatcher,
+    ): OpenSubtitlesClient = OpenSubtitlesClient(
+        httpClient = httpClient,
+        json = json,
+        apiKeyStore = apiKeyStore,
+        userAgent = "IptvApp v${BuildConfig.VERSION_NAME}",
+        ioDispatcher = ioDispatcher,
+    )
 
     /**
      * Debug-only [HttpLoggingInterceptor.Logger] that strips Xtream credentials out of every line

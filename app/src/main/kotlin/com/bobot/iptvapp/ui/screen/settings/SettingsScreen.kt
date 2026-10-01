@@ -118,6 +118,9 @@ fun SettingsScreen(
         onConfirmLogout = viewModel::onLogout,
         onDismissLogoutConfirmation = viewModel::onLogoutConfirmationDismissed,
         onToggleWifiOnlyDownloads = viewModel::onToggleWifiOnlyDownloads,
+        onOpenSubtitlesApiKeyChange = viewModel::onOpenSubtitlesApiKeyChange,
+        onSaveOpenSubtitlesApiKey = viewModel::onSaveOpenSubtitlesApiKey,
+        onClearOpenSubtitlesApiKey = viewModel::onClearOpenSubtitlesApiKey,
         onNavigateToProfiles = onNavigateToProfiles,
         modifier = modifier,
     )
@@ -128,7 +131,7 @@ fun SettingsScreen(
  * (QA finding Y3). At most one is being edited at a time, so the state is a nullable value of this
  * type rather than three booleans.
  */
-private enum class SettingsField { SERVER_URL, USERNAME, PASSWORD }
+private enum class SettingsField { SERVER_URL, USERNAME, PASSWORD, OPENSUBTITLES_API_KEY }
 
 /**
  * Stateless content — separated from [SettingsScreen] so it can be exercised directly in
@@ -149,6 +152,9 @@ private fun SettingsContent(
     onConfirmLogout: () -> Unit,
     onDismissLogoutConfirmation: () -> Unit,
     onToggleWifiOnlyDownloads: (Boolean) -> Unit,
+    onOpenSubtitlesApiKeyChange: (String) -> Unit,
+    onSaveOpenSubtitlesApiKey: () -> Unit,
+    onClearOpenSubtitlesApiKey: () -> Unit,
     onNavigateToProfiles: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -452,6 +458,112 @@ private fun SettingsContent(
             }
 
             Spacer(modifier = Modifier.height(Spacing.xl))
+
+            HorizontalDivider(color = GlassBorder)
+
+            Spacer(modifier = Modifier.height(Spacing.lg))
+
+            // ── Glass section: online subtitles ─────────────────────────────────
+            // The app's own OpenSubtitles consumer key (one per application, per their policy).
+            // Always masked, never pre-filled: only whether one is stored is ever shown.
+            GlassSurface(
+                modifier = Modifier.fillMaxWidth(),
+                strong = false,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(Spacing.md),
+                ) {
+                    Text(
+                        text = "Sous-titres en ligne",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = TextPrimary,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    Spacer(modifier = Modifier.height(Spacing.sm))
+
+                    Text(
+                        text = if (uiState.isOpenSubtitlesApiKeyConfigured) {
+                            "Clé OpenSubtitles configurée."
+                        } else {
+                            "Aucune clé OpenSubtitles configurée."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    Spacer(modifier = Modifier.height(Spacing.md))
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .glassSurface(shape = RoundedCornerShape(RadiusMd)),
+                    ) {
+                        OutlinedTextField(
+                            value = uiState.openSubtitlesApiKeyInput,
+                            onValueChange = onOpenSubtitlesApiKeyChange,
+                            label = { Text("Clé API OpenSubtitles") },
+                            supportingText = {
+                                Text(
+                                    text = if (uiState.isOpenSubtitlesApiKeyConfigured) {
+                                        "Saisir une nouvelle clé pour la remplacer"
+                                    } else {
+                                        "Clé « consumer » de l'application"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextSecondary,
+                                )
+                            },
+                            singleLine = true,
+                            enabled = !uiState.isLoading,
+                            visualTransformation = PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Password,
+                                imeAction = ImeAction.Done,
+                            ),
+                            keyboardActions = KeyboardActions(onDone = { onSaveOpenSubtitlesApiKey() }),
+                            colors = settingsTextFieldColors(),
+                            readOnly = isTv && editingField != SettingsField.OPENSUBTITLES_API_KEY,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .dpadFocusEscape()
+                                .tvTextFieldEditGate(
+                                    enabled = isTv,
+                                    isEditing = editingField == SettingsField.OPENSUBTITLES_API_KEY,
+                                    onStartEditing = { editingField = SettingsField.OPENSUBTITLES_API_KEY },
+                                    onStopEditing = { editingField = null },
+                                ),
+                        )
+                    }
+
+                    SettingsMessages(uiState, SettingsMessageSection.SUBTITLES)
+
+                    Spacer(modifier = Modifier.height(Spacing.lg))
+
+                    PrimaryButton(
+                        label = "Enregistrer la clé",
+                        enabled = !uiState.isLoading,
+                        onClick = onSaveOpenSubtitlesApiKey,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    if (uiState.isOpenSubtitlesApiKeyConfigured) {
+                        Spacer(modifier = Modifier.height(Spacing.md))
+
+                        GhostButton(
+                            label = "Effacer la clé",
+                            enabled = !uiState.isLoading,
+                            onClick = onClearOpenSubtitlesApiKey,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(Spacing.xl))
         }
     }
 }
@@ -609,6 +721,9 @@ private fun SettingsContentPreFilledPreview() {
             onConfirmLogout = {},
             onDismissLogoutConfirmation = {},
             onToggleWifiOnlyDownloads = {},
+            onOpenSubtitlesApiKeyChange = {},
+            onSaveOpenSubtitlesApiKey = {},
+            onClearOpenSubtitlesApiKey = {},
             onNavigateToProfiles = {},
         )
     }
@@ -637,6 +752,9 @@ private fun SettingsContentErrorPreview() {
             onConfirmLogout = {},
             onDismissLogoutConfirmation = {},
             onToggleWifiOnlyDownloads = {},
+            onOpenSubtitlesApiKeyChange = {},
+            onSaveOpenSubtitlesApiKey = {},
+            onClearOpenSubtitlesApiKey = {},
             onNavigateToProfiles = {},
         )
     }
@@ -664,6 +782,9 @@ private fun SettingsContentInfoPreview() {
             onConfirmLogout = {},
             onDismissLogoutConfirmation = {},
             onToggleWifiOnlyDownloads = {},
+            onOpenSubtitlesApiKeyChange = {},
+            onSaveOpenSubtitlesApiKey = {},
+            onClearOpenSubtitlesApiKey = {},
             onNavigateToProfiles = {},
         )
     }

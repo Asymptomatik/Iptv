@@ -34,6 +34,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.InputMode
+import androidx.compose.ui.input.InputModeManager
+import androidx.compose.ui.platform.LocalInputModeManager
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
@@ -65,18 +68,38 @@ private const val SUBTITLES_OFF_LABEL = "Désactivés"
  * deliberately does not depend on), and the text-glyph language is already established next door
  * by [PlayerSeekButton]'s "10 s ↻".
  *
- * Its caller is responsible for only rendering it when [hasSelectableTracks] is true.
+ * Its caller is responsible for only rendering it when [shouldShowTracksButton] is true.
+ *
+ * @param takeFocus  Set once the track panels close, so the D-pad lands back on this button
+ *                   instead of on nothing: the panel row that held the focus is gone, and the
+ *                   button itself comes back with the controls. Requested from here rather than
+ *                   by the caller because only here is the button sure to be composed. Keyboard
+ *                   mode only — a touch close never shows a focus ring.
+ * @param onFocusTaken Clears [takeFocus] once it has been honoured (or skipped in touch mode), so
+ *                   the controls coming back later — after an auto-hide — do not pull the focus
+ *                   here again.
  */
 @Composable
 internal fun PlayerTracksButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    takeFocus: Boolean = false,
+    onFocusTaken: () -> Unit = {},
 ) {
     var isFocused by remember { mutableStateOf(false) }
+    val focusRequester = remember { FocusRequester() }
+    val inputModeManager = LocalInputModeManager.current
+
+    LaunchedEffect(takeFocus) {
+        if (!takeFocus) return@LaunchedEffect
+        if (inputModeManager.isKeyboard) focusRequester.requestFocus()
+        onFocusTaken()
+    }
 
     Box(
         contentAlignment = Alignment.Center,
         modifier = modifier
+            .focusRequester(focusRequester)
             // Same surface as the seek and play/pause buttons — see playerControlSurface
             // (QA finding N10).
             .playerControlSurface(isFocused)
@@ -110,7 +133,12 @@ internal fun PlayerTracksButton(
  * ## "Désactivés" is a first-class row, not a toggle
  * Disabling subtitles clears every track's selection rather than setting a separate flag (see
  * [areSubtitlesDisabled]), so "off" is genuinely one option among the others and is rendered as
- * such — always present, checked exactly when no track is applied.
+ * such — present whenever the stream has subtitle tracks, checked exactly when none is applied.
+ *
+ * ## Online search
+ * On a VOD, the section ends with a "Rechercher en ligne…" row that hands over to
+ * [OnlineSubtitleSearchPanel] — and the section shows for it alone when the stream announces no
+ * subtitle track, since that is exactly when a search is most needed.
  *
  * @param audioTracks       Audio tracks to offer; the section is omitted when there is nothing to
  *                          choose from (fewer than two entries — Media3 always applies one).
@@ -118,6 +146,13 @@ internal fun PlayerTracksButton(
  * @param onSelectAudio     Invoked with a [PlayerTrack.id] from [audioTracks].
  * @param onSelectSubtitle  Invoked with a [PlayerTrack.id] from [subtitleTracks].
  * @param onDisableSubtitles Invoked when the "Désactivés" row is picked.
+ * @param onlineSearchAvailable Whether to end the "Sous-titres" section with the row opening the
+ *                          online search — `true` for a VOD with a search context, even when the
+ *                          stream announces no subtitle track at all (see [hasSubtitleSection]).
+ * @param onOpenOnlineSearch Invoked when that row is picked.
+ * @param focusOnlineSearchRow Whether that row, rather than the first one, takes the initial focus —
+ *                          set when coming back from the search panel, so the D-pad lands where
+ *                          the user left instead of jumping to the top of the list.
  */
 @Composable
 internal fun PlayerTrackSelectorPanel(
@@ -127,14 +162,30 @@ internal fun PlayerTrackSelectorPanel(
     onSelectSubtitle: (String) -> Unit,
     onDisableSubtitles: () -> Unit,
     modifier: Modifier = Modifier,
+    onlineSearchAvailable: Boolean = false,
+    onOpenOnlineSearch: () -> Unit = {},
+    focusOnlineSearchRow: Boolean = false,
 ) {
     val firstRowFocusRequester = remember { FocusRequester() }
+    val onlineSearchFocusRequester = remember { FocusRequester() }
 
     // Media3 always applies one audio track, so a lone entry is a label, not a choice.
     val showAudioSection = audioTracks.size > 1
+    val hasSubtitleTracks = subtitleTracks.isNotEmpty()
+    val inputModeManager = LocalInputModeManager.current
 
+    // Once per opening, never again: a track picked inside the panel recomposes it with new
+    // tracks, and re-keying on them would yank the D-pad back to the top under the user's feet.
+    // Keyboard mode only, so a touch opening never lights up a row.
     LaunchedEffect(Unit) {
-        firstRowFocusRequester.requestFocus()
+        if (!inputModeManager.isKeyboard) return@LaunchedEffect
+        when {
+            focusOnlineSearchRow && onlineSearchAvailable -> onlineSearchFocusRequester.requestFocus()
+            // Nothing carries firstRowFocusRequester in an empty panel — the CC button is not
+            // shown for such a stream, but a request on an unattached requester would throw.
+            showAudioSection || hasSubtitleSection(subtitleTracks, onlineSearchAvailable) ->
+                firstRowFocusRequester.requestFocus()
+        }
     }
 
     Column(
@@ -163,35 +214,62 @@ internal fun PlayerTrackSelectorPanel(
             }
         }
 
-        if (subtitleTracks.isNotEmpty()) {
+        if (hasSubtitleSection(subtitleTracks, onlineSearchAvailable)) {
             PlayerTrackSectionTitle(text = "Sous-titres")
 
-            PlayerTrackRow(
-                label = SUBTITLES_OFF_LABEL,
-                isSelected = areSubtitlesDisabled(subtitleTracks),
-                onClick = onDisableSubtitles,
-                // Takes the initial focus only when there is no audio section above it.
-                modifier = if (showAudioSection) {
-                    Modifier
-                } else {
-                    Modifier.focusRequester(firstRowFocusRequester)
-                },
-            )
-
-            subtitleTracks.forEach { track ->
+            if (hasSubtitleTracks) {
                 PlayerTrackRow(
-                    label = track.label,
-                    isSelected = track.isSelected,
-                    onClick = { onSelectSubtitle(track.id) },
+                    label = SUBTITLES_OFF_LABEL,
+                    isSelected = areSubtitlesDisabled(subtitleTracks),
+                    onClick = onDisableSubtitles,
+                    // Takes the initial focus only when there is no audio section above it.
+                    modifier = if (showAudioSection) {
+                        Modifier
+                    } else {
+                        Modifier.focusRequester(firstRowFocusRequester)
+                    },
+                )
+
+                subtitleTracks.forEach { track ->
+                    PlayerTrackRow(
+                        label = track.label,
+                        isSelected = track.isSelected,
+                        onClick = { onSelectSubtitle(track.id) },
+                    )
+                }
+            }
+
+            if (onlineSearchAvailable) {
+                // Last row, and the first focus stop when it is alone in the panel. An action,
+                // not an option: it never carries the check mark.
+                var searchRowModifier = Modifier.focusRequester(onlineSearchFocusRequester)
+                if (!showAudioSection && !hasSubtitleTracks) {
+                    searchRowModifier = searchRowModifier.focusRequester(firstRowFocusRequester)
+                }
+                PlayerTrackRow(
+                    label = ONLINE_SEARCH_ROW_LABEL,
+                    isSelected = false,
+                    onClick = onOpenOnlineSearch,
+                    role = Role.Button,
+                    modifier = searchRowModifier,
                 )
             }
         }
     }
 }
 
-/** Section heading inside [PlayerTrackSelectorPanel] — deliberately not focusable. */
+/**
+ * Whether focus requests should be honoured: keyboard mode is where a TV starts and where a phone
+ * goes on its first D-pad press. In touch mode the rows are not focusable anyway
+ * (`Focusability.SystemDefined`); checking here keeps a touch user's screen free of focus rings
+ * whatever that rule becomes.
+ */
+internal val InputModeManager.isKeyboard: Boolean
+    get() = inputMode == InputMode.Keyboard
+
+/** Section heading inside [PlayerTrackSelectorPanel] and [OnlineSubtitleSearchPanel] — deliberately not focusable. */
 @Composable
-private fun PlayerTrackSectionTitle(
+internal fun PlayerTrackSectionTitle(
     text: String,
     modifier: Modifier = Modifier,
 ) {
@@ -209,13 +287,17 @@ private fun PlayerTrackSectionTitle(
  * The check mark is the only selection affordance — the row does not also tint its background,
  * so the focus highlight stays unambiguously about *where the D-pad is* rather than *what is
  * currently playing*, which the panel needs to keep visually distinct.
+ *
+ * [role] is [Role.Button] for rows that trigger an action rather than pick an option ("Rechercher
+ * en ligne…", "Retour aux pistes"): those are never announced as selected.
  */
 @Composable
-private fun PlayerTrackRow(
+internal fun PlayerTrackRow(
     label: String,
     isSelected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    role: Role = Role.RadioButton,
 ) {
     var isFocused by remember { mutableStateOf(false) }
 
@@ -227,8 +309,8 @@ private fun PlayerTrackRow(
         modifier = modifier
             .fillMaxWidth()
             .semantics {
-                role = Role.RadioButton
-                selected = isSelected
+                this.role = role
+                if (role == Role.RadioButton) selected = isSelected
             }
             .clip(rowShape)
             .background(Color.White.copy(alpha = if (isFocused) 0.18f else 0f))
@@ -332,6 +414,27 @@ private fun PlayerTrackSelectorPanelSubtitlesOffPreview() {
                 onSelectAudio = {},
                 onSelectSubtitle = {},
                 onDisableSubtitles = {},
+            )
+        }
+    }
+}
+
+@Preview(
+    name = "PlayerTrackSelectorPanel — VOD sans piste, recherche en ligne",
+    showBackground = true,
+    backgroundColor = 0xFF0A0A0F,
+)
+@Composable
+private fun PlayerTrackSelectorPanelOnlineOnlyPreview() {
+    IptvAppTheme {
+        Box(modifier = Modifier.padding(Spacing.md)) {
+            PlayerTrackSelectorPanel(
+                audioTracks = emptyList(),
+                subtitleTracks = emptyList(),
+                onSelectAudio = {},
+                onSelectSubtitle = {},
+                onDisableSubtitles = {},
+                onlineSearchAvailable = true,
             )
         }
     }

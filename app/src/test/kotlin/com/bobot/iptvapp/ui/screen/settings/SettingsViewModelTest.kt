@@ -3,6 +3,7 @@ package com.bobot.iptvapp.ui.screen.settings
 import com.bobot.iptvapp.data.logout.LogoutCoordinator
 import com.bobot.iptvapp.data.preferences.AppPreferencesStore
 import com.bobot.iptvapp.data.preferences.FakeLogoutPurgeMarkerStore
+import com.bobot.iptvapp.data.preferences.FakeOpenSubtitlesApiKeyStore
 import com.bobot.iptvapp.data.source.CatalogException
 import com.bobot.iptvapp.data.source.InMemoryCredentialsProvider
 import com.bobot.iptvapp.domain.model.ContentType
@@ -81,6 +82,7 @@ class SettingsViewModelTest {
      */
     private val applicationScope = CoroutineScope(SupervisorJob() + testDispatcher)
     private val markerStore = FakeLogoutPurgeMarkerStore()
+    private val openSubtitlesApiKeyStore = FakeOpenSubtitlesApiKeyStore()
 
     /**
      * Built on first use so a test can install a gated [FakeLogoutPurger] beforehand, and shared by
@@ -133,6 +135,7 @@ class SettingsViewModelTest {
             credentialsProvider = credentialsProvider,
             appPreferencesStore = appPreferencesStore,
             logoutCoordinator = logoutCoordinator,
+            openSubtitlesApiKeyStore = openSubtitlesApiKeyStore,
         )
         testDispatcher.scheduler.runCurrent()
     }
@@ -702,5 +705,74 @@ class SettingsViewModelTest {
             "the sentence about downloads must announce deletion, not survival: $downloadsSentence",
             downloadsSentence.contains("supprim") && !downloadsSentence.contains("conserv"),
         )
+    }
+
+    // ── OpenSubtitles consumer key ────────────────────────────────────────────
+
+    @Test
+    fun `an already configured key is reported but never pre-filled`() {
+        openSubtitlesApiKeyStore.key.value = "stored-key"
+        createViewModel()
+
+        val state = viewModel.uiState.value
+        assertTrue(state.isOpenSubtitlesApiKeyConfigured)
+        assertEquals("", state.openSubtitlesApiKeyInput)
+    }
+
+    @Test
+    fun `no key configured is reported as such`() {
+        createViewModel()
+
+        assertFalse(viewModel.uiState.value.isOpenSubtitlesApiKeyConfigured)
+    }
+
+    @Test
+    fun `saving a typed key stores it trimmed, empties the field and confirms`() {
+        createViewModel()
+
+        viewModel.onOpenSubtitlesApiKeyChange("  new-key  ")
+        assertEquals("  new-key  ", viewModel.uiState.value.openSubtitlesApiKeyInput)
+        viewModel.onSaveOpenSubtitlesApiKey()
+        testDispatcher.scheduler.runCurrent()
+
+        val state = viewModel.uiState.value
+        assertEquals("new-key", openSubtitlesApiKeyStore.key.value)
+        assertTrue(state.isOpenSubtitlesApiKeyConfigured)
+        assertEquals("", state.openSubtitlesApiKeyInput)
+        assertEquals(SettingsMessageSection.SUBTITLES, state.messageSection)
+        assertEquals("Clé OpenSubtitles enregistrée.", state.infoMessage)
+        assertNull(state.errorMessage)
+    }
+
+    @Test
+    fun `saving a blank field keeps the stored key and explains why`() {
+        openSubtitlesApiKeyStore.key.value = "stored-key"
+        createViewModel()
+
+        viewModel.onOpenSubtitlesApiKeyChange("   ")
+        viewModel.onSaveOpenSubtitlesApiKey()
+        testDispatcher.scheduler.runCurrent()
+
+        val state = viewModel.uiState.value
+        assertEquals("stored-key", openSubtitlesApiKeyStore.key.value)
+        assertEquals(SettingsMessageSection.SUBTITLES, state.messageSection)
+        assertEquals("Veuillez saisir une clé API OpenSubtitles.", state.errorMessage)
+    }
+
+    @Test
+    fun `clearing forgets the stored key and any half-typed one`() {
+        openSubtitlesApiKeyStore.key.value = "stored-key"
+        createViewModel()
+
+        viewModel.onOpenSubtitlesApiKeyChange("half-typ")
+        viewModel.onClearOpenSubtitlesApiKey()
+        testDispatcher.scheduler.runCurrent()
+
+        val state = viewModel.uiState.value
+        assertNull(openSubtitlesApiKeyStore.key.value)
+        assertFalse(state.isOpenSubtitlesApiKeyConfigured)
+        assertEquals("", state.openSubtitlesApiKeyInput)
+        assertEquals(SettingsMessageSection.SUBTITLES, state.messageSection)
+        assertEquals("Clé OpenSubtitles effacée.", state.infoMessage)
     }
 }

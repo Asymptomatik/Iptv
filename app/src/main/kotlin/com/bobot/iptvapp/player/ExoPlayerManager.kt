@@ -70,9 +70,65 @@ class ExoPlayerManager @Inject constructor(
     override val player: Player
         get() = requirePlayer()
 
+    // ── Audio choice across re-prepares ─────────────────────────────────────
+    //
+    // A `TrackSelectionOverride` names a `TrackGroup`, and a re-prepare of the same stream (online
+    // subtitle pick, "Réessayer") builds new ones — renamed `"<child>:<id>"` by Media3's
+    // `MergingMediaPeriod` once a side-loaded subtitle is merged in — so the override would match
+    // nothing and Media3 would fall back to its default audio track. The chosen track is therefore
+    // remembered by what it carries (its [Format] minus the id) and re-applied on the first
+    // snapshot of the new media. A different stream (e.g. zapping to a live channel) drops it.
+
+    /** The stream last passed to [prepare]; a different one forgets [chosenAudio]. */
+    private var preparedStreamUrl: String? = null
+
+    /** The audio track picked through [selectAudioTrack], without its id — see [withoutId]. */
+    private var chosenAudio: Format? = null
+
+    /** The audio groups of the replaced media while [chosenAudio] waits to be re-applied, else `null`. */
+    private var replacedAudioGroups: List<TrackGroup>? = null
+
+    /** The player [tracksListener] is registered on, so each new player gets it exactly once. */
+    private var listenedPlayer: ExoPlayer? = null
+
+    /**
+     * The [ExternalSubtitle.trackId]s the last [prepare] asked for. `MergingMediaPeriod` reports
+     * them as `"<child>:<id>"`; [trackId] gives them back their requested id.
+     */
+    private var requestedSideLoadedIds: Set<String> = emptySet()
+
+    // ── Side-loaded subtitle failures ───────────────────────────────────────
+
+    /** See [PlayerManager.setSideLoadedSubtitleErrorListener]. */
+    private var sideLoadedSubtitleErrorListener: ((trackId: String) -> Unit)? = null
+
+    /** Bumped by every [prepare] and [release]: a failure of an older media is never reported. */
+    private var prepareGeneration = 0
+
+    private val tracksListener = object : Player.Listener {
+        override fun onTracksChanged(tracks: Tracks) {
+            restoreChosenAudio(tracks)
+        }
+    }
+
     override fun prepare(streamUrl: String, startPositionMs: Long, externalSubtitles: List<ExternalSubtitle>) {
-        val mediaSource = mediaSourceFactory.create(streamUrl, externalSubtitles)
-        requirePlayer().apply {
+        val generation = ++prepareGeneration
+        // Only with a listener: without one, a failing subtitle must fail playback as before rather
+        // than stall unnoticed (see IptvMediaSourceFactory's "Failures").
+        val onSubtitleLoadError = sideLoadedSubtitleErrorListener?.let {
+            { trackId: String -> if (generation == prepareGeneration) sideLoadedSubtitleErrorListener?.invoke(trackId) }
+        }
+        val mediaSource = mediaSourceFactory.create(streamUrl, externalSubtitles, onSubtitleLoadError)
+        if (preparedStreamUrl != null && preparedStreamUrl != streamUrl) chosenAudio = null
+        preparedStreamUrl = streamUrl
+        requestedSideLoadedIds = externalSubtitles.mapNotNullTo(mutableSetOf()) { it.trackId }
+        val player = requirePlayer()
+        if (listenedPlayer !== player) {
+            player.addListener(tracksListener)
+            listenedPlayer = player
+        }
+        replacedAudioGroups = chosenAudio?.let { typeGroups(C.TRACK_TYPE_AUDIO).map { it.mediaTrackGroup } }
+        player.apply {
             setMediaSource(mediaSource)
             if (startPositionMs > 0L) {
                 seekTo(startPositionMs)
@@ -82,10 +138,44 @@ class ExoPlayerManager @Inject constructor(
         }
     }
 
+    override fun setSideLoadedSubtitleErrorListener(listener: ((trackId: String) -> Unit)?) {
+        sideLoadedSubtitleErrorListener = listener
+    }
+
     override fun release() {
         exoPlayer?.release()
         exoPlayer = null
+        prepareGeneration++
+        sideLoadedSubtitleErrorListener = null
+        listenedPlayer = null
+        preparedStreamUrl = null
+        chosenAudio = null
+        replacedAudioGroups = null
+        requestedSideLoadedIds = emptySet()
     }
+
+    /**
+     * Re-applies [chosenAudio] to the first [tracks] snapshot of the re-prepared media. An empty
+     * snapshot, or one still reporting the replaced media's audio groups, is not the new media
+     * yet and leaves the choice waiting; any other one consumes it, matched or not.
+     */
+    private fun restoreChosenAudio(tracks: Tracks) {
+        val replaced = replacedAudioGroups ?: return
+        val chosen = chosenAudio ?: return
+        val audioGroups = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
+        if (audioGroups.isEmpty() || audioGroups.map { it.mediaTrackGroup } == replaced) return
+        replacedAudioGroups = null
+
+        val match = audioGroups.firstNotNullOfOrNull { group ->
+            (0 until group.length)
+                .firstOrNull { withoutId(group.getTrackFormat(it)) == chosen }
+                ?.let { group.mediaTrackGroup to it }
+        } ?: return
+        applyOverride(match.first, match.second, C.TRACK_TYPE_AUDIO)
+    }
+
+    /** [format] with its id cleared: what a track carries, whatever a merge renamed it to. */
+    private fun withoutId(format: Format): Format = format.buildUpon().setId(null).build()
 
     /**
      * [ActivePlaybackStopper]'s hook for the logout purge: releases the player from a background
@@ -169,10 +259,10 @@ class ExoPlayerManager @Inject constructor(
 
     /** Builds the [PlayerTrack] list for [trackType], labelled/identified per the class KDoc. */
     private fun tracksOfType(trackType: Int, playerTrackType: PlayerTrackType): List<PlayerTrack> =
-        indexedFormats(trackType).map { indexed ->
+        indexedFormats(trackType).mapIndexed { position, indexed ->
             PlayerTrack(
                 id = trackId(indexed.format, playerTrackType, indexed.groupIndex, indexed.trackIndex),
-                label = trackLabel(indexed.format, playerTrackType, indexed.trackIndex),
+                label = trackLabel(indexed.format, playerTrackType, position),
                 languageCode = indexed.format.language,
                 isSelected = indexed.group.isTrackSelected(indexed.trackIndex),
                 type = playerTrackType,
@@ -187,6 +277,17 @@ class ExoPlayerManager @Inject constructor(
         val (mediaTrackGroup, trackIndex) =
             findTrackLocation(trackId, trackType, playerTrackType) ?: return
 
+        if (trackType == C.TRACK_TYPE_AUDIO) {
+            chosenAudio = withoutId(mediaTrackGroup.getFormat(trackIndex))
+            // A choice made on the new media replaces the pending one; one made on the replaced
+            // media's snapshot still has to be carried over.
+            if (replacedAudioGroups?.contains(mediaTrackGroup) != true) replacedAudioGroups = null
+        }
+        applyOverride(mediaTrackGroup, trackIndex, trackType)
+    }
+
+    /** Makes `(mediaTrackGroup, trackIndex)` the sole selection for [trackType]. */
+    private fun applyOverride(mediaTrackGroup: TrackGroup, trackIndex: Int, trackType: Int) {
         val player = requirePlayer()
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
             .setTrackTypeDisabled(trackType, false)
@@ -206,18 +307,36 @@ class ExoPlayerManager @Inject constructor(
             }
             ?.let { it.group.mediaTrackGroup to it.trackIndex }
 
-    /** See "Track identity" in the class KDoc above. */
+    /**
+     * See "Track identity" in the class KDoc above. A side-loaded track [prepare] named is listed
+     * under that name, not the `"<child>:<id>"` `MergingMediaPeriod` renamed it to.
+     */
     private fun trackId(format: Format, playerTrackType: PlayerTrackType, groupIndex: Int, trackIndex: Int): String {
         val formatId = format.id
+        requestedSideLoadedId(formatId)?.let { return it }
         if (!formatId.isNullOrBlank()) return formatId
         val typePrefix = playerTrackType.name.lowercase()
         return "$typePrefix-$groupIndex-$trackIndex"
     }
 
     /**
+     * The id in [requestedSideLoadedIds] that merged [formatId] carries, or `null`. Child 0 is the
+     * stream itself, so an embedded track that happens to share the id is never taken for it.
+     */
+    private fun requestedSideLoadedId(formatId: String?): String? {
+        if (formatId == null || requestedSideLoadedIds.isEmpty()) return null
+        val child = formatId.substringBefore(':', missingDelimiterValue = "").toIntOrNull() ?: return null
+        val id = formatId.substringAfter(':')
+        return id.takeIf { child > 0 && it in requestedSideLoadedIds }
+    }
+
+    /**
      * Human-readable label for [format]: the container-provided label when present, else a
      * language display name resolved via [LanguageLabel], else a generic positional fallback
-     * (e.g. "Audio 2") — never blank.
+     * (e.g. "Audio 2") — never blank. The fallback numbers the track by its [position] in the
+     * whole list of its type, not within its group: every side-loaded subtitle, and each embedded
+     * text track of a typical MKV, is alone in its own group, so a per-group index would label
+     * them all "Subtitle 1".
      *
      * There is deliberately no third "raw language code" branch between the two above: since
      * [LanguageLabel.forCode] already returns `null` only for a `null`/blank/`"und"`
@@ -228,7 +347,7 @@ class ExoPlayerManager @Inject constructor(
      * still gets [LanguageLabel.forCode]'s own raw-code fallback, which is the same string one
      * would have gotten from a redundant third branch here anyway).
      */
-    private fun trackLabel(format: Format, playerTrackType: PlayerTrackType, trackIndex: Int): String {
+    private fun trackLabel(format: Format, playerTrackType: PlayerTrackType, position: Int): String {
         val containerLabel = format.label
         if (!containerLabel.isNullOrBlank()) return containerLabel
 
@@ -239,7 +358,7 @@ class ExoPlayerManager @Inject constructor(
             PlayerTrackType.AUDIO -> "Audio"
             PlayerTrackType.SUBTITLE -> "Subtitle"
         }
-        return "$typeName ${trackIndex + 1}"
+        return "$typeName ${position + 1}"
     }
 
     private fun requirePlayer(): ExoPlayer = exoPlayer ?: createPlayer().also { exoPlayer = it }

@@ -70,6 +70,9 @@ class LogoutPurgeStack(ioDispatcher: CoroutineDispatcher) {
         ),
     )
 
+    /** Downloaded online subtitles; not journaled, so the callers' journals keep their shape. */
+    val downloadedSubtitles = FakeDownloadedSubtitlePurger()
+
     val purger: LogoutPurger = DefaultLogoutPurger(
         markerStore = RecordingMarkerStore(markerStore),
         downloadStoragePurger = storagePurger,
@@ -78,6 +81,7 @@ class LogoutPurgeStack(ioDispatcher: CoroutineDispatcher) {
         activePlaybackStopper = RecordingActivePlaybackStopper(),
         logoutFinalizer = RecordingLogoutFinalizer(),
         credentialsProvider = RecordingCredentialsProvider(credentials),
+        downloadedSubtitlePurger = downloadedSubtitles,
     )
 
     val accountA = XtreamCredentials("http://a.example:8080", "userA", "passA")

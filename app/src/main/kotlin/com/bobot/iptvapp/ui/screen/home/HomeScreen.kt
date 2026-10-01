@@ -64,6 +64,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.bobot.iptvapp.domain.model.ContentType
+import com.bobot.iptvapp.domain.model.SubtitleSearchContext
 import com.bobot.iptvapp.ui.components.CategoryChip
 import com.bobot.iptvapp.ui.components.FocusableCard
 import com.bobot.iptvapp.ui.components.FocusableTextButton
@@ -103,7 +104,7 @@ import com.bobot.iptvapp.ui.util.rememberIsTvDevice
 @Composable
 fun HomeScreen(
     onNavigateToDetail: (contentType: String, contentId: String) -> Unit,
-    onNavigateToPlayer: (streamUrl: String, streamId: String) -> Unit,
+    onNavigateToPlayer: (streamUrl: String, streamId: String, subtitleSearchContext: SubtitleSearchContext?) -> Unit,
     onNavigateToSearch: () -> Unit,
     onNavigateToSettings: () -> Unit,
     onNavigateToDownloads: () -> Unit,
@@ -117,7 +118,7 @@ fun HomeScreen(
         onCardClick = { item ->
             val resumeUrl = item.resumeStreamUrl
             if (resumeUrl != null) {
-                onNavigateToPlayer(resumeUrl, item.id)
+                onNavigateToPlayer(resumeUrl, item.id, item.subtitleSearchContext)
             } else {
                 onNavigateToDetail(item.contentType.toDetailContentType(), item.id)
             }

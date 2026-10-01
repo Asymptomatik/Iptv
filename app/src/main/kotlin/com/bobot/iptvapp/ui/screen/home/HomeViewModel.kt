@@ -13,6 +13,7 @@ import com.bobot.iptvapp.domain.model.Episode
 import com.bobot.iptvapp.domain.model.LanguageFilterState
 import com.bobot.iptvapp.domain.model.Movie
 import com.bobot.iptvapp.domain.model.Series
+import com.bobot.iptvapp.domain.model.SubtitleSearchContext
 import com.bobot.iptvapp.domain.model.XtreamCredentials
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.repository.FavoritesRepository
@@ -22,6 +23,7 @@ import com.bobot.iptvapp.domain.usecase.LoadCategoryScopedCatalogUseCase
 import com.bobot.iptvapp.domain.util.displayName
 import com.bobot.iptvapp.domain.util.displayTitle
 import com.bobot.iptvapp.domain.util.languageTag
+import com.bobot.iptvapp.domain.util.subtitleSearchContext
 import com.bobot.iptvapp.domain.util.Resource
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
@@ -64,6 +66,8 @@ import javax.inject.Inject
  *                          [com.bobot.iptvapp.navigation.Detail] — Continue Watching cards resume
  *                          playback immediately on click, matching Netflix-style behavior, rather
  *                          than opening a detail page first.
+ * @property subtitleSearchContext Set alongside [resumeStreamUrl] and forwarded with it to
+ *                          [com.bobot.iptvapp.navigation.Player]; `null` on every other card.
  */
 data class HomeCardItem(
     val id: String,
@@ -71,6 +75,7 @@ data class HomeCardItem(
     val imageUrl: String?,
     val contentType: ContentType,
     val resumeStreamUrl: String? = null,
+    val subtitleSearchContext: SubtitleSearchContext? = null,
 )
 
 /**
@@ -1410,6 +1415,7 @@ class HomeViewModel @Inject constructor(
             imageUrl = movie.posterUrl,
             contentType = ContentType.MOVIE,
             resumeStreamUrl = streamUrl,
+            subtitleSearchContext = movie.subtitleSearchContext(),
         )
     }
 
@@ -1432,6 +1438,8 @@ class HomeViewModel @Inject constructor(
             imageUrl = series.coverUrl,
             contentType = ContentType.SERIES,
             resumeStreamUrl = streamUrl,
+            // The card shows the series, but subtitles must match the episode being resumed.
+            subtitleSearchContext = episode.subtitleSearchContext(series),
         )
     }
 }

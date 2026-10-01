@@ -1,6 +1,7 @@
 package com.bobot.iptvapp
 
 import android.app.Application
+import com.bobot.iptvapp.data.remote.opensubtitles.OnlineSubtitleOrphanSweeper
 import com.bobot.iptvapp.download.DownloadRequirementsController
 import com.bobot.iptvapp.download.DownloadTracker
 import com.bobot.iptvapp.download.LogoutPurgeRecoveryController
@@ -31,4 +32,7 @@ class IptvApplication : Application() {
      * previous run, and cleans up installs logged out before that purge existed.
      */
     @Inject lateinit var logoutPurgeRecoveryController: LogoutPurgeRecoveryController
+
+    /** Injected purely so Hilt builds it: its constructor sweeps a dead process's subtitle files. */
+    @Inject lateinit var onlineSubtitleOrphanSweeper: OnlineSubtitleOrphanSweeper
 }

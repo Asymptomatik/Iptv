@@ -3,11 +3,15 @@ package com.bobot.iptvapp.ui.screen.player
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
+import com.bobot.iptvapp.data.logout.LogoutCoordinator
 import com.bobot.iptvapp.data.preferences.AppPreferencesStore
+import com.bobot.iptvapp.data.preferences.FakeLogoutPurgeMarkerStore
+import com.bobot.iptvapp.domain.logout.FakeLogoutPurger
 import com.bobot.iptvapp.domain.model.ContentType
 import com.bobot.iptvapp.domain.model.ExternalSubtitle
 import com.bobot.iptvapp.domain.model.Movie
 import com.bobot.iptvapp.domain.model.PlaybackProgress
+import com.bobot.iptvapp.domain.model.SubtitleSearchContext
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.repository.PlaybackProgressRepository
 import com.bobot.iptvapp.domain.util.Resource
@@ -22,13 +26,16 @@ import io.mockk.just
 import io.mockk.mockk
 import io.mockk.slot
 import io.mockk.verify
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -83,6 +90,7 @@ class PlayerViewModelTest {
         every { playerManager.selectAudioTrack(any()) } just Runs
         every { playerManager.selectSubtitleTrack(any()) } just Runs
         every { playerManager.disableSubtitles() } just Runs
+        every { playerManager.setSideLoadedSubtitleErrorListener(any()) } just Runs
         playbackProgressRepository = mockk()
         appPreferencesStore = mockk()
         catalogRepository = mockk()
@@ -99,6 +107,17 @@ class PlayerViewModelTest {
             playbackProgressRepository = playbackProgressRepository,
             appPreferencesStore = appPreferencesStore,
             catalogRepository = catalogRepository,
+            // The online subtitle search is covered by PlayerViewModelOnlineSubtitlesTest; nothing
+            // here may reach it, so the collaborators are strict mocks with no answers.
+            openSubtitlesClient = mockk(),
+            openSubtitlesDownloader = mockk(),
+            // Real, over fakes with no logout: start-up prepares through its session gate.
+            logoutCoordinator = LogoutCoordinator(
+                FakeLogoutPurger(),
+                FakeLogoutPurgeMarkerStore(),
+                CoroutineScope(SupervisorJob() + testDispatcher),
+            ),
+            downloadedSubtitlePurger = mockk(),
         )
     }
 
@@ -210,8 +229,9 @@ class PlayerViewModelTest {
         listenerSlot.captured.onPlayerError(error)
         assertTrue(viewModel.uiState.value.hasError)
 
-        // Act: retry.
+        // Act: retry — it re-prepares from a coroutine, under the logout purge's lock.
         viewModel.retry()
+        testDispatcher.scheduler.runCurrent()
 
         // Assert: error cleared, isBuffering restored, prepare called a second time for same URL.
         assertFalse("hasError should be cleared by retry", viewModel.uiState.value.hasError)
@@ -220,6 +240,59 @@ class PlayerViewModelTest {
         verify(exactly = 2) {
             playerManager.prepare(streamUrl = url, startPositionMs = 0L, externalSubtitles = any())
         }
+    }
+
+    // ── Online subtitle search context ─────────────────────────────────────────
+
+    @Test
+    fun `initialize retains the subtitle search context handed over by the route`() {
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+        val context = SubtitleSearchContext(
+            kind = SubtitleSearchContext.Kind.EPISODE,
+            title = "Pilote",
+            seriesTitle = "Breaking Bad",
+            seasonNumber = 1,
+            episodeNumber = 1,
+        )
+
+        viewModel.initialize("http://example.com:8080/series/u/p/e1.mkv", "e1", context)
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(context, viewModel.subtitleSearchContext)
+    }
+
+    @Test
+    fun `initialize without subtitle metadata leaves the context null and still plays`() {
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+
+        viewModel.initialize("http://example.com:8080/movie/u/p/42.mp4", "42")
+        testDispatcher.scheduler.runCurrent()
+
+        assertNull(viewModel.subtitleSearchContext)
+        verify(exactly = 1) { playerManager.prepare(any(), any(), any()) }
+    }
+
+    @Test
+    fun `a LIVE stream never exposes a subtitle search context`() {
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+        val context = SubtitleSearchContext(SubtitleSearchContext.Kind.MOVIE, title = "TF1")
+
+        viewModel.initialize("http://example.com:8080/live/u/p/77.ts", "77", context)
+        testDispatcher.scheduler.runCurrent()
+
+        assertNull(viewModel.subtitleSearchContext)
+    }
+
+    @Test
+    fun `a second initialize does not replace the retained subtitle search context`() {
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+        val first = SubtitleSearchContext(SubtitleSearchContext.Kind.MOVIE, title = "Up", year = 2009)
+
+        viewModel.initialize("http://example.com:8080/movie/u/p/42.mp4", "42", first)
+        viewModel.initialize("http://example.com:8080/movie/u/p/42.mp4", "42", null)
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(first, viewModel.subtitleSearchContext)
     }
 
     // ── LIVE progress exclusion (Task 23 decision) ───────────────────────────────
@@ -577,6 +650,7 @@ class PlayerViewModelTest {
 
         listenerSlot.captured.onPlayerError(mockk<PlaybackException>(relaxed = true))
         viewModel.retry()
+        testDispatcher.scheduler.runCurrent()
 
         // Twice: once from initialize, once from retry — both carrying the resolved subtitles.
         verify(exactly = 2) {
