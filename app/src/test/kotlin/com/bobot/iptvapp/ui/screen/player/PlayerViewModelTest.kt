@@ -413,6 +413,160 @@ class PlayerViewModelTest {
         )
     }
 
+    // ── LIVE stream ended (progressive `.ts` reaching end of input) ─────────────────
+
+    @Test
+    fun `a LIVE stream that ends surfaces the error overlay instead of a silent frozen frame`() {
+        // A live `.ts` is played as a progressive source: if the provider closes the connection,
+        // Media3 reads it as the end of the media and goes to STATE_ENDED without any error — the
+        // last frame stays on screen, no spinner, and play() on an ended player does nothing.
+        val listenerSlot = slot<Player.Listener>()
+        every { player.addListener(capture(listenerSlot)) } just Runs
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+
+        viewModel.initialize("http://example.com:8080/live/u/p/77.ts", "77")
+        testDispatcher.scheduler.runCurrent()
+        listenerSlot.captured.onPlaybackStateChanged(Player.STATE_READY)
+        listenerSlot.captured.onPlaybackStateChanged(Player.STATE_ENDED)
+
+        assertTrue("an ended live stream must offer Réessayer", viewModel.uiState.value.hasError)
+        assertFalse(viewModel.uiState.value.isBuffering)
+    }
+
+    @Test
+    fun `a movie that ends normally shows no error`() {
+        assertFalse(endedShowsError("http://example.com:8080/movie/u/p/42.mp4"))
+    }
+
+    @Test
+    fun `an episode that ends normally shows no error`() {
+        assertFalse(endedShowsError("http://example.com:8080/series/u/p/e1.mkv"))
+    }
+
+    /** Plays [url] to its end through the real listener, then reads [PlayerUiState.hasError]. */
+    private fun endedShowsError(url: String): Boolean {
+        val listenerSlot = slot<Player.Listener>()
+        every { player.addListener(capture(listenerSlot)) } just Runs
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+
+        viewModel.initialize(url, "42")
+        testDispatcher.scheduler.runCurrent()
+        listenerSlot.captured.onPlaybackStateChanged(Player.STATE_READY)
+        listenerSlot.captured.onPlaybackStateChanged(Player.STATE_ENDED)
+        return viewModel.uiState.value.hasError
+    }
+
+    @Test
+    fun `a movie the provider serves as a live window still ends without error`() {
+        // Only a channel of the live section is restarted: a VOD URL keeps its normal end even
+        // when Media3 reported its window as live.
+        val listenerSlot = slot<Player.Listener>()
+        every { player.addListener(capture(listenerSlot)) } just Runs
+        every { player.isCurrentMediaItemLive } returns true
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+
+        viewModel.initialize("http://example.com:8080/movie/u/p/42.m3u8", "42")
+        testDispatcher.scheduler.runCurrent()
+        listenerSlot.captured.onPlaybackStateChanged(Player.STATE_ENDED)
+
+        assertFalse(viewModel.uiState.value.hasError)
+    }
+
+    @Test
+    fun `a paused LIVE stream stays ready without any error`() {
+        val listenerSlot = slot<Player.Listener>()
+        every { player.addListener(capture(listenerSlot)) } just Runs
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+
+        viewModel.initialize("http://example.com:8080/live/u/p/77.ts", "77")
+        testDispatcher.scheduler.runCurrent()
+        listenerSlot.captured.onPlaybackStateChanged(Player.STATE_READY)
+        listenerSlot.captured.onIsPlayingChanged(false)
+        testDispatcher.scheduler.advanceTimeBy(30_000L)
+        testDispatcher.scheduler.runCurrent()
+
+        assertFalse(viewModel.uiState.value.hasError)
+        assertFalse(viewModel.uiState.value.isPlaying)
+    }
+
+    @Test
+    fun `retry after a LIVE stream ended reopens the channel once, from its start, and plays`() {
+        val url = "http://example.com:8080/live/u/p/77.ts"
+        val listenerSlot = slot<Player.Listener>()
+        every { player.addListener(capture(listenerSlot)) } just Runs
+        // Where the ended progressive source stopped — never a position to reopen a channel at.
+        every { player.currentPosition } returns 95_000L
+        every { player.playWhenReady } returns true
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+
+        viewModel.initialize(url, "77")
+        testDispatcher.scheduler.runCurrent()
+        listenerSlot.captured.onPlaybackStateChanged(Player.STATE_ENDED)
+        assertTrue(viewModel.uiState.value.hasError)
+
+        viewModel.retry()
+        testDispatcher.scheduler.runCurrent()
+
+        verify(exactly = 2) { playerManager.prepare(streamUrl = url, startPositionMs = 0L, externalSubtitles = emptyList()) }
+        verify(exactly = 2) { playerManager.prepare(any(), any(), any()) }
+        verify(exactly = 0) { player.pause() }
+        assertFalse(viewModel.uiState.value.hasError)
+        assertTrue(viewModel.uiState.value.isBuffering)
+        assertEquals(0L, viewModel.uiState.value.currentPositionMs)
+
+        // Nothing else restarts it on its own: the reopened channel ending again waits for the user.
+        listenerSlot.captured.onPlaybackStateChanged(Player.STATE_ENDED)
+        testDispatcher.scheduler.advanceTimeBy(60_000L)
+        testDispatcher.scheduler.runCurrent()
+        assertTrue(viewModel.uiState.value.hasError)
+        verify(exactly = 2) { playerManager.prepare(any(), any(), any()) }
+    }
+
+    @Test
+    fun `retry after a paused LIVE stream ended keeps it paused until the user resumes it`() {
+        val url = "http://example.com:8080/live/u/p/77.ts"
+        val listenerSlot = slot<Player.Listener>()
+        every { player.addListener(capture(listenerSlot)) } just Runs
+        every { player.playWhenReady } returns false
+        every { player.isPlaying } returns false
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+
+        viewModel.initialize(url, "77")
+        testDispatcher.scheduler.runCurrent()
+        listenerSlot.captured.onPlaybackStateChanged(Player.STATE_ENDED)
+        assertTrue(viewModel.uiState.value.hasError)
+
+        viewModel.retry()
+        testDispatcher.scheduler.runCurrent()
+
+        verify(exactly = 2) { playerManager.prepare(streamUrl = url, startPositionMs = 0L, externalSubtitles = emptyList()) }
+        verify(exactly = 1) { player.pause() }
+        verify(exactly = 0) { player.play() }
+        assertFalse(viewModel.uiState.value.hasError)
+
+        viewModel.togglePlayPause()
+
+        verify(exactly = 1) { player.play() }
+        verify(exactly = 2) { playerManager.prepare(any(), any(), any()) }
+    }
+
+    @Test
+    fun `an ended LIVE stream is neither reported nor reopened once the player is released`() {
+        val listenerSlot = slot<Player.Listener>()
+        every { player.addListener(capture(listenerSlot)) } just Runs
+        coEvery { appPreferencesStore.getActiveProfileId() } returns null
+
+        viewModel.initialize("http://example.com:8080/live/u/p/77.ts", "77")
+        testDispatcher.scheduler.runCurrent()
+        viewModel.releasePlayer()
+        listenerSlot.captured.onPlaybackStateChanged(Player.STATE_ENDED)
+        viewModel.retry()
+        testDispatcher.scheduler.runCurrent()
+
+        assertFalse(viewModel.uiState.value.hasError)
+        verify(exactly = 1) { playerManager.prepare(any(), any(), any()) }
+    }
+
     // ── togglePlayPause ───────────────────────────────────────────────────────
 
     @Test

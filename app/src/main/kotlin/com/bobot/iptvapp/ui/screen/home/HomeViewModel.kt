@@ -20,6 +20,7 @@ import com.bobot.iptvapp.domain.repository.FavoritesRepository
 import com.bobot.iptvapp.domain.repository.PlaybackProgressRepository
 import com.bobot.iptvapp.domain.usecase.FilterCatalogByLanguageUseCase
 import com.bobot.iptvapp.domain.usecase.LoadCategoryScopedCatalogUseCase
+import com.bobot.iptvapp.domain.util.MovieSortMode
 import com.bobot.iptvapp.domain.util.displayName
 import com.bobot.iptvapp.domain.util.displayTitle
 import com.bobot.iptvapp.domain.util.languageTag
@@ -37,6 +38,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
@@ -44,6 +46,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.Calendar
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
@@ -89,6 +92,30 @@ data class HomeRow(
     val categoryId: String,
     val title: String,
     val items: List<HomeCardItem>,
+)
+
+/**
+ * The Films tab's "Nouveautés" view: every film of the categories the active language keeps, merged
+ * across categories without duplicates and ordered by [sortMode] — see [HomeViewModel] KDoc
+ * "Nouveautés".
+ *
+ * @property sortMode The order [items] are actually in. Only changes together with [items], once
+ *                    the new page is computed off the main thread — the order the user picked is
+ *                    [HomeUiState.selectedMovieSortMode], published at once.
+ * @property language The Films language filter [items] were computed for — `null` for "Toutes".
+ * @property items    The pages asked for so far — one page of 60 at first, one more per
+ *                    [HomeViewModel.onLoadMoreNewReleases]. Earlier pages keep their order, so the
+ *                    grid only ever appends to them while the order and filter stay the same.
+ * @property hasMore  `true` when at least one more distinct film follows [items].
+ * @property isFailed `true` when the Films load of this generation ended in [Resource.Error]: no
+ *                    card is coming, even if the rows of a previous load are still shown.
+ */
+data class NewReleasesState(
+    val sortMode: MovieSortMode = MovieSortMode.RECENT_RELEASE,
+    val language: String? = null,
+    val items: List<HomeCardItem> = emptyList(),
+    val hasMore: Boolean = false,
+    val isFailed: Boolean = false,
 )
 
 /**
@@ -164,6 +191,15 @@ private data class HomeSectionResources(
  *                            [HomeViewModel.onLanguageSelected].
  * @property selectedMovieLanguage Films tab equivalent of [selectedLiveLanguage].
  * @property selectedSeriesLanguage Series tab equivalent of [selectedLiveLanguage].
+ * @property newReleases   The Films tab's "Nouveautés" view — see [NewReleasesState]. Empty until
+ *                            the Films tab is opened; never touches the other tabs.
+ * @property selectedMovieSortMode The "Nouveautés" order the user picked, published as soon as it
+ *                            is picked — [newReleases] catches up off the main thread, see
+ *                            [isNewReleasesPending].
+ * @property seriesNewReleases The Series tab's "Nouveautés" view, always in
+ *                            [MovieSortMode.RECENT_RELEASE] ("Sortie récente", the only order offered
+ *                            for series) — see [HomeViewModel] KDoc "Nouveautés". Empty until the
+ *                            Series tab is opened.
  */
 /**
  * Where one catalog tab ([ContentType.LIVE] / [ContentType.MOVIE] / [ContentType.SERIES]) stands in
@@ -205,7 +241,33 @@ data class HomeUiState(
     val selectedMovieLanguage: String? = null,
     val selectedSeriesLanguage: String? = null,
     val catalogTabLoadStates: Map<ContentType, CatalogTabLoadState> = emptyMap(),
+    val newReleases: NewReleasesState = NewReleasesState(),
+    val selectedMovieSortMode: MovieSortMode = MovieSortMode.RECENT_RELEASE,
+    val seriesNewReleases: NewReleasesState = NewReleasesState(),
 ) {
+    /**
+     * `true` between a new order or language being picked and [newReleases] being recomputed for
+     * it: the published cards are still in the previous order/language, so the screen must not
+     * show them under the new choice.
+     */
+    val isNewReleasesPending: Boolean
+        get() = newReleases.sortMode != selectedMovieSortMode || newReleases.language != selectedMovieLanguage
+
+    /**
+     * `true` while the Films catalogue is still loading category by category: [newReleases] only
+     * covers the categories loaded so far, and later ones will slot into it.
+     */
+    val isNewReleasesLoading: Boolean
+        get() = catalogTabLoadStates[ContentType.MOVIE] == CatalogTabLoadState.LOADING
+
+    /** Series equivalent of [isNewReleasesPending] — a single order, so only the language can lag. */
+    val isSeriesNewReleasesPending: Boolean
+        get() = seriesNewReleases.language != selectedSeriesLanguage
+
+    /** Series equivalent of [isNewReleasesLoading]. */
+    val isSeriesNewReleasesLoading: Boolean
+        get() = catalogTabLoadStates[ContentType.SERIES] == CatalogTabLoadState.LOADING
+
     /** `true` once at least one row exists in any section — used to pick which visual state to render. */
     val hasAnyRows: Boolean
         get() = continueWatchingRows.isNotEmpty() ||
@@ -442,6 +504,31 @@ data class HomeUiState(
  *    same emission and passes that corrected value to [toRows], so a fallback never renders one
  *    stale, filtered frame before the corrected "Toutes" rows appear.
  *
+ * ## "Nouveautés"
+ * [NewReleasesState] merges every film of the Films categories the active language keeps (all of
+ * them for "Toutes"), deduplicated by id, in [MovieSortMode] order. It is a second projection of
+ * the same [moviesState] the category rows read, built by [collectNewReleases] inside the MOVIE
+ * load job, off the main thread on [defaultDispatcher]:
+ *  - [MovieDiscoveryIndex] keeps per-category slices of references into the accumulated list,
+ *    parses titles and sorts each slice once per mode, and merges only the slices of the selected
+ *    categories up to the requested limit — a new category, a language or a mode change never
+ *    re-sorts or re-cards the whole catalogue. See that class.
+ *  - Only the requested pages are turned into cards ([NEW_RELEASES_PAGE_SIZE] at first, one more
+ *    page per [onLoadMoreNewReleases]); the rows' [cardMemo] is neither read nor duplicated.
+ *  - The categories come from [LoadCategoryScopedCatalogUseCase]'s `onCategoriesResolved`, so no
+ *    extra subscription to the (network-backed) categories Flow is added, and no per-film
+ *    `get_vod_info` is ever made: the release year comes from the title only.
+ *  - Every MOVIE (re)load bumps [newReleasesGeneration], clears the published view and starts a
+ *    fresh index in the new job. The old job is cancelled and a result stamped with an older
+ *    generation is dropped, so [onRetry] can never publish a card from the previous catalogue.
+ *
+ * The Series tab gets the same view, [HomeUiState.seriesNewReleases], built the same way by
+ * [collectSeriesNewReleases] over [seriesState] with a [SeriesDiscoveryIndex], with one order only
+ * — release year descending ([SeriesReleaseYear]: title year first, then the list call's
+ * `releaseDate` year when plausible). No `get_series_info` is made, and the key is built from the
+ * list snapshot, so opening a series never moves it. Series have no added date: `last_modified` is
+ * not one, so no "Ajout récent" order is offered.
+ *
  * @param catalogRepository Read access to categories and content lists for all three content types.
  * @param favoritesRepository Read access to the active profile's favorites list.
  * @param playbackProgressRepository Read access to the active profile's Continue Watching history.
@@ -471,6 +558,9 @@ class HomeViewModel @Inject constructor(
         /** Fallback used when [Movie.containerExtension] is `null` or blank — mirrors
          *  [com.bobot.iptvapp.ui.screen.moviedetail.MovieDetailViewModel.DEFAULT_CONTAINER_EXTENSION]. */
         const val DEFAULT_CONTAINER_EXTENSION = "mp4"
+
+        /** Cards per "Nouveautés" page — the same page size as the category grid. */
+        const val NEW_RELEASES_PAGE_SIZE = 60
     }
 
     private val _uiState = MutableStateFlow(HomeUiState())
@@ -514,6 +604,29 @@ class HomeViewModel @Inject constructor(
     private val liveRowsState = MutableStateFlow<Resource<List<HomeRow>>>(Resource.Success(emptyList()))
     private val movieRowsState = MutableStateFlow<Resource<List<HomeRow>>>(Resource.Success(emptyList()))
     private val seriesRowsState = MutableStateFlow<Resource<List<HomeRow>>>(Resource.Success(emptyList()))
+
+    // ── "Nouveautés" — see class KDoc "Nouveautés" ────────────────────────────────────────────────
+
+    /** What the "Nouveautés" view is asked for; one value so a mode change and its page reset land together. */
+    private data class NewReleasesQuery(val sortMode: MovieSortMode, val limit: Int)
+
+    private val newReleasesQuery =
+        MutableStateFlow(NewReleasesQuery(MovieSortMode.RECENT_RELEASE, NEW_RELEASES_PAGE_SIZE))
+
+    /** The Films categories of the current load, as resolved by [loadCategoryScopedCatalogUseCase]. */
+    private val movieCategoriesState = MutableStateFlow<List<Category>>(emptyList())
+
+    /** Bumped by every MOVIE (re)load; only the current generation may publish "Nouveautés". Main thread only. */
+    private var newReleasesGeneration = 0
+
+    /** Cards the Series "Nouveautés" view is asked for; reset to one page by a language change or a reload. */
+    private val seriesNewReleasesLimit = MutableStateFlow(NEW_RELEASES_PAGE_SIZE)
+
+    /** The Series categories of the current load, as resolved by [loadCategoryScopedCatalogUseCase]. */
+    private val seriesCategoriesState = MutableStateFlow<List<Category>>(emptyList())
+
+    /** Bumped by every SERIES (re)load; only the current generation may publish. Main thread only. */
+    private var seriesNewReleasesGeneration = 0
 
     // ── Per-tab language filter state — see class KDoc "Per-tab language filter" ─────────────────
 
@@ -753,11 +866,53 @@ class HomeViewModel @Inject constructor(
         // explicit "Toutes" choice is protected exactly like any other explicit choice — see class
         // KDoc "Default language filter and its one-shot fallback".
         explicitSelectionContentTypes.add(contentType)
+        if (contentType == ContentType.MOVIE) {
+            // Another language is another list: "Nouveautés" goes back to its first page.
+            newReleasesQuery.update { it.copy(limit = NEW_RELEASES_PAGE_SIZE) }
+        }
+        if (contentType == ContentType.SERIES) seriesNewReleasesLimit.value = NEW_RELEASES_PAGE_SIZE
         when (contentType) {
             ContentType.LIVE -> liveLanguageFilterState.update { it.withSelection(language) }
             ContentType.MOVIE -> movieLanguageFilterState.update { it.withSelection(language) }
             ContentType.SERIES -> seriesLanguageFilterState.update { it.withSelection(language) }
         }
+    }
+
+    /**
+     * Picks the "Nouveautés" order and goes back to its first page. Pure in-memory re-ordering of
+     * the films already loaded — no fetch. See class KDoc "Nouveautés".
+     */
+    fun onMovieSortModeSelected(mode: MovieSortMode) {
+        newReleasesQuery.value = NewReleasesQuery(mode, NEW_RELEASES_PAGE_SIZE)
+        // Only the choice: newReleases.sortMode keeps describing the cards until they are re-sorted.
+        _uiState.update { it.copy(selectedMovieSortMode = mode) }
+    }
+
+    /**
+     * Asks "Nouveautés" for one more page. Measured from the page actually published, so repeated
+     * calls before it lands (a grid asking twice) still add a single page; a no-op once
+     * [NewReleasesState.hasMore] is `false`.
+     *
+     * Also a no-op while the published page is for another order or language than the one asked
+     * for: a grid still showing the old list would otherwise grow the new one's first page.
+     */
+    fun onLoadMoreNewReleases() {
+        val published = _uiState.value.newReleases
+        if (!published.hasMore) return
+        if (published.sortMode != newReleasesQuery.value.sortMode ||
+            published.language != movieLanguageFilterState.value.selected
+        ) {
+            return
+        }
+        newReleasesQuery.update { it.copy(limit = maxOf(it.limit, published.items.size + NEW_RELEASES_PAGE_SIZE)) }
+    }
+
+    /** Series equivalent of [onLoadMoreNewReleases]; only the language can make the published page stale. */
+    fun onLoadMoreSeriesNewReleases() {
+        val published = _uiState.value.seriesNewReleases
+        if (!published.hasMore) return
+        if (published.language != seriesLanguageFilterState.value.selected) return
+        seriesNewReleasesLimit.update { maxOf(it, published.items.size + NEW_RELEASES_PAGE_SIZE) }
     }
 
     /**
@@ -803,6 +958,10 @@ class HomeViewModel @Inject constructor(
         // onCatalogTabSelected from a LaunchedEffect on tab switch, and any gap between the switch
         // and the first state emission would flash the empty state (QA finding M3).
         markCatalogTabLoadState(contentType, CatalogTabLoadState.LOADING)
+        if (contentType == ContentType.MOVIE) resetNewReleases()
+        if (contentType == ContentType.SERIES) resetSeriesNewReleases()
+        val newReleasesGeneration = newReleasesGeneration
+        val seriesNewReleasesGeneration = seriesNewReleasesGeneration
         catalogTabJobs[contentType] = viewModelScope.launch {
             when (contentType) {
                 ContentType.LIVE -> loadCatalogTab(
@@ -818,31 +977,39 @@ class HomeViewModel @Inject constructor(
                     },
                 )
 
-                ContentType.MOVIE -> loadCatalogTab(
-                    contentType = ContentType.MOVIE,
-                    categoriesFlow = catalogRepository.observeVodCategories(),
-                    itemsState = moviesState,
-                    rowsState = movieRowsState,
-                    languageFilterState = movieLanguageFilterState,
-                    categoryIdOf = Movie::categoryId,
-                    toCard = { movie: Movie -> toCardItem(movie) },
-                    fetchCategoryItems = { categoryId ->
-                        catalogRepository.getMovies(categoryId).first { it !is Resource.Loading }
-                    },
-                )
+                ContentType.MOVIE -> {
+                    launch { collectNewReleases(newReleasesGeneration) }
+                    loadCatalogTab(
+                        contentType = ContentType.MOVIE,
+                        categoriesFlow = catalogRepository.observeVodCategories(),
+                        itemsState = moviesState,
+                        rowsState = movieRowsState,
+                        languageFilterState = movieLanguageFilterState,
+                        categoryIdOf = Movie::categoryId,
+                        toCard = { movie: Movie -> toCardItem(movie) },
+                        fetchCategoryItems = { categoryId ->
+                            catalogRepository.getMovies(categoryId).first { it !is Resource.Loading }
+                        },
+                        onCategoriesResolved = { movieCategoriesState.value = it },
+                    )
+                }
 
-                ContentType.SERIES -> loadCatalogTab(
-                    contentType = ContentType.SERIES,
-                    categoriesFlow = catalogRepository.observeSeriesCategories(),
-                    itemsState = seriesState,
-                    rowsState = seriesRowsState,
-                    languageFilterState = seriesLanguageFilterState,
-                    categoryIdOf = Series::categoryId,
-                    toCard = { series: Series -> toCardItem(series) },
-                    fetchCategoryItems = { categoryId ->
-                        catalogRepository.getSeriesList(categoryId).first { it !is Resource.Loading }
-                    },
-                )
+                ContentType.SERIES -> {
+                    launch { collectSeriesNewReleases(seriesNewReleasesGeneration) }
+                    loadCatalogTab(
+                        contentType = ContentType.SERIES,
+                        categoriesFlow = catalogRepository.observeSeriesCategories(),
+                        itemsState = seriesState,
+                        rowsState = seriesRowsState,
+                        languageFilterState = seriesLanguageFilterState,
+                        categoryIdOf = Series::categoryId,
+                        toCard = { series: Series -> toCardItem(series) },
+                        fetchCategoryItems = { categoryId ->
+                            catalogRepository.getSeriesList(categoryId).first { it !is Resource.Loading }
+                        },
+                        onCategoriesResolved = { seriesCategoriesState.value = it },
+                    )
+                }
             }
         }
     }
@@ -884,6 +1051,7 @@ class HomeViewModel @Inject constructor(
         categoryIdOf: (T) -> String,
         toCard: (T) -> HomeCardItem,
         fetchCategoryItems: suspend (categoryId: String) -> Resource<List<T>>,
+        onCategoriesResolved: (List<Category>) -> Unit = {},
     ) {
         itemsState.value = Resource.Loading
         rowsState.value = Resource.Loading
@@ -913,7 +1081,7 @@ class HomeViewModel @Inject constructor(
                 .collect { rowsState.value = it }
         }
         try {
-            loadCategoryScopedCatalogUseCase(categoriesFlow, itemsState, fetchCategoryItems = fetchCategoryItems)
+            loadCategoryScopedCatalogUseCase(categoriesFlow, itemsState, onCategoriesResolved, fetchCategoryItems)
         } finally {
             // QA finding M3: this is the only point at which the per-category loop is genuinely
             // over — an empty tab from here on really is empty. `isActive` distinguishes "finished"
@@ -925,6 +1093,96 @@ class HomeViewModel @Inject constructor(
                 markCatalogTabLoadState(contentType, CatalogTabLoadState.LOADED)
             }
         }
+    }
+
+    /**
+     * Invalidates "Nouveautés" for a MOVIE (re)load, synchronously on the main thread: a new
+     * generation, no categories, the first page, and no published cards. See class KDoc "Nouveautés".
+     */
+    private fun resetNewReleases() {
+        newReleasesGeneration++
+        movieCategoriesState.value = emptyList()
+        newReleasesQuery.update { it.copy(limit = NEW_RELEASES_PAGE_SIZE) }
+        _uiState.update { it.copy(newReleases = NewReleasesState(sortMode = newReleasesQuery.value.sortMode)) }
+    }
+
+    /**
+     * Keeps [HomeUiState.newReleases] in step with the Films catalogue, the language and the
+     * requested page, for as long as the MOVIE load job that launched it — see class KDoc
+     * "Nouveautés". [moviesState] being [Resource.Loading] publishes nothing, so the view keeps
+     * what it last showed for this generation; [Resource.Error] publishes an empty, failed state so
+     * the view stops waiting for films that will not come.
+     */
+    private suspend fun collectNewReleases(generation: Int) {
+        val index = MovieDiscoveryIndex(
+            // A title year up to next year is plausible (announced releases); later is a typo.
+            latestPlausibleYear = Calendar.getInstance().get(Calendar.YEAR) + 1,
+            toCard = { movie: Movie -> toCardItem(movie) },
+        )
+        combine(
+            moviesState,
+            movieCategoriesState,
+            movieLanguageFilterState.map { it.selected }.distinctUntilChanged(),
+            newReleasesQuery,
+        ) { moviesResource, categories, selectedLanguage, query ->
+            if (moviesResource is Resource.Error) {
+                return@combine NewReleasesState(sortMode = query.sortMode, language = selectedLanguage, isFailed = true)
+            }
+            val movies = (moviesResource as? Resource.Success)?.data ?: return@combine null
+            index.ingest(movies)
+            val categoryIds = filterCatalogByLanguageUseCase.filterCategories(categories, selectedLanguage).map { it.id }
+            val page = index.page(categoryIds, query.sortMode, query.limit)
+            NewReleasesState(
+                sortMode = query.sortMode,
+                language = selectedLanguage,
+                items = page.items,
+                hasMore = page.hasMore,
+            )
+        }
+            .filterNotNull()
+            .distinctUntilChanged()
+            .flowOn(defaultDispatcher)
+            .collect { state ->
+                if (generation == newReleasesGeneration) _uiState.update { it.copy(newReleases = state) }
+            }
+    }
+
+    /** Series equivalent of [resetNewReleases]. */
+    private fun resetSeriesNewReleases() {
+        seriesNewReleasesGeneration++
+        seriesCategoriesState.value = emptyList()
+        seriesNewReleasesLimit.value = NEW_RELEASES_PAGE_SIZE
+        _uiState.update { it.copy(seriesNewReleases = NewReleasesState()) }
+    }
+
+    /** Series equivalent of [collectNewReleases], over [seriesState] with a [SeriesDiscoveryIndex]. */
+    private suspend fun collectSeriesNewReleases(generation: Int) {
+        val index = SeriesDiscoveryIndex(
+            // Same bound as the films': an announced series may carry next year.
+            latestPlausibleYear = Calendar.getInstance().get(Calendar.YEAR) + 1,
+            toCard = { series: Series -> toCardItem(series) },
+        )
+        combine(
+            seriesState,
+            seriesCategoriesState,
+            seriesLanguageFilterState.map { it.selected }.distinctUntilChanged(),
+            seriesNewReleasesLimit,
+        ) { seriesResource, categories, selectedLanguage, limit ->
+            if (seriesResource is Resource.Error) {
+                return@combine NewReleasesState(language = selectedLanguage, isFailed = true)
+            }
+            val series = (seriesResource as? Resource.Success)?.data ?: return@combine null
+            index.ingest(series)
+            val categoryIds = filterCatalogByLanguageUseCase.filterCategories(categories, selectedLanguage).map { it.id }
+            val page = index.page(categoryIds, limit)
+            NewReleasesState(language = selectedLanguage, items = page.items, hasMore = page.hasMore)
+        }
+            .filterNotNull()
+            .distinctUntilChanged()
+            .flowOn(defaultDispatcher)
+            .collect { state ->
+                if (generation == seriesNewReleasesGeneration) _uiState.update { it.copy(seriesNewReleases = state) }
+            }
     }
 
     /**

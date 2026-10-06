@@ -37,6 +37,7 @@ import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withContext
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -326,6 +327,34 @@ class PlayerViewModelSessionRevocationTest {
     }
 
     @Test
+    fun `a live channel ending after a logout shows nothing and its retry reopens nothing`() {
+        viewModel.initialize(LIVE_URL, "77")
+        testDispatcher.scheduler.runCurrent()
+        logOutNow()
+
+        listener.onPlaybackStateChanged(Player.STATE_ENDED)
+        viewModel.retry()
+        testDispatcher.scheduler.runCurrent()
+
+        assertFalse(viewModel.uiState.value.hasError)
+        assertEquals(listOf("purge"), eventsFromPurge())
+    }
+
+    @Test
+    fun `a live channel that ended before a logout is not reopened by a retry after it`() {
+        viewModel.initialize(LIVE_URL, "77")
+        testDispatcher.scheduler.runCurrent()
+        listener.onPlaybackStateChanged(Player.STATE_ENDED)
+        assertTrue(viewModel.uiState.value.hasError)
+        logOutNow()
+
+        viewModel.retry()
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(listOf("purge"), eventsFromPurge())
+    }
+
+    @Test
     fun `leaving after a logout neither saves for the old profile nor rebuilds the player`() {
         startMovie()
         logOutNow()
@@ -586,6 +615,7 @@ class PlayerViewModelSessionRevocationTest {
 
     private companion object {
         const val MOVIE_URL = "http://example.com:8080/movie/old-user/old-pass/42.mp4"
+        const val LIVE_URL = "http://example.com:8080/live/old-user/old-pass/77.ts"
         const val NEXT_MOVIE_URL = "http://example.com:8080/movie/next-user/next-pass/7.mp4"
         const val OLD_PROFILE = "old-profile"
         const val NEXT_PROFILE = "next-profile"

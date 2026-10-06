@@ -48,7 +48,8 @@ import javax.inject.Inject
  * @property isBuffering     True while [ExoCommonPlayer.getPlaybackState] reports
  *                           [ExoCommonPlayer.STATE_BUFFERING] — drives a loading indicator.
  *                           Always `false` while [hasError] is true.
- * @property hasError        True when [ExoCommonPlayer.Listener.onPlayerError] fires — signals
+ * @property hasError        True when [ExoCommonPlayer.Listener.onPlayerError] fires, or when a
+ *                           live channel reaches [ExoCommonPlayer.STATE_ENDED] — signals
  *                           [PlayerScreen] to show the French error overlay ("Impossible de lire
  *                           le flux.") and hide the buffering spinner. Cleared to `false` by
  *                           [PlayerViewModel.retry].
@@ -328,6 +329,14 @@ class PlayerViewModel @Inject constructor(
                 startStallDetection()
             } else {
                 cancelStallDetection()
+            }
+
+            // A live `.ts` plays as a progressive source: a provider closing the connection reads
+            // as the end of the media, with no error — the last frame stays frozen and play() does
+            // nothing on an ended player. The error overlay's Réessayer reopens the channel instead
+            // (see [retry]); never on its own. A movie or an episode ending is a normal end.
+            if (playbackState == ExoCommonPlayer.STATE_ENDED && contentType == ContentType.LIVE && !released) {
+                _uiState.update { it.copy(hasError = true, isBuffering = false) }
             }
         }
 

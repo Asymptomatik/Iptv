@@ -17,7 +17,10 @@ import com.bobot.iptvapp.domain.repository.FavoritesRepository
 import com.bobot.iptvapp.domain.repository.PlaybackProgressRepository
 import com.bobot.iptvapp.domain.usecase.FilterCatalogByLanguageUseCase
 import com.bobot.iptvapp.domain.usecase.LoadCategoryScopedCatalogUseCase
+import com.bobot.iptvapp.domain.util.MovieSort
+import com.bobot.iptvapp.domain.util.MovieSortMode
 import com.bobot.iptvapp.domain.util.Resource
+import com.bobot.iptvapp.domain.util.SeriesSort
 import io.mockk.Runs
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -1827,5 +1830,619 @@ class HomeViewModelTest {
         testDispatcher.scheduler.runCurrent()
 
         assertNull(viewModel.uiState.value.selectedLiveLanguage)
+    }
+
+    // ── "Nouveautés" (Films tab, movie-date-sort) ─────────────────────────────
+
+    private val frAction = Category(id = "40", name = "FR | Action", type = ContentType.MOVIE)
+    private val frComedy = Category(id = "41", name = "FR | Comedie", type = ContentType.MOVIE)
+    private val enDrama = Category(id = "42", name = "EN | Drama", type = ContentType.MOVIE)
+
+    private fun film(id: String, title: String, categoryId: String, added: Long?) = Movie(
+        id = id,
+        title = title,
+        posterUrl = null,
+        plot = null,
+        categoryId = categoryId,
+        rating = null,
+        year = null,
+        addedMillis = added,
+        durationMillis = null,
+        containerExtension = null,
+    )
+
+    private val frOld = film("fa", "Vieux Film (2009)", "40", added = 900)
+    private val frNoYear = film("fb", "Sans Millesime", "40", added = 1_000)
+    private val frNew = film("fc", "Nouveau (2025)", "41", added = 100)
+    private val frNewer = film("fd", "Nouveau Bis (2025)", "41", added = 500)
+    private val frNoAdded = film("fe", "Milieu - 2024", "41", added = null)
+    private val enFilm = film("ef", "English Movie (2026)", "42", added = 2_000)
+
+    private fun newReleaseIds() = viewModel.uiState.value.newReleases.items.map { it.id }
+
+    /** Opens Films on FR/FR/EN categories with [frLanguage] explicitly selected. */
+    private fun openFilms(frLanguage: String? = "FR") {
+        stubMovies("40", listOf(frOld, frNoYear))
+        stubMovies("41", listOf(frNew, frNewer, frNoAdded))
+        stubMovies("42", listOf(enFilm))
+        createViewModel()
+        viewModel.onLanguageSelected(ContentType.MOVIE, frLanguage)
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        vodCategoriesFlow.value = Resource.Success(listOf(frAction, frComedy, enDrama))
+        testDispatcher.scheduler.runCurrent()
+    }
+
+    @Test
+    fun `Nouveautes gathers every film of the active language across categories, newest title year first`() {
+        openFilms()
+
+        val state = viewModel.uiState.value
+        assertEquals(MovieSortMode.RECENT_RELEASE, state.newReleases.sortMode)
+        // 2025 (added 500, then 100), 2024 without an added date, 2009, then the film with no year.
+        assertEquals(listOf("fd", "fc", "fe", "fa", "fb"), newReleaseIds())
+        assertEquals(
+            HomeCardItem(id = "fd", title = "Nouveau Bis (2025)", imageUrl = null, contentType = ContentType.MOVIE),
+            state.newReleases.items.first(),
+        )
+        assertFalse(state.newReleases.hasMore)
+        assertFalse(state.isNewReleasesLoading)
+        // The category rows are untouched: still one FR row, in category order.
+        assertEquals(listOf("FR"), state.movieRows.map { it.title })
+        assertEquals(listOf("fa", "fb", "fc", "fd", "fe"), state.movieRows.single().items.map { it.id })
+    }
+
+    @Test
+    fun `Nouveautes with Toutes includes every language`() {
+        openFilms(frLanguage = null)
+
+        assertEquals(listOf("ef", "fd", "fc", "fe", "fa", "fb"), newReleaseIds())
+    }
+
+    @Test
+    fun `switching to recently added reorders by added date, unknown dates last, without refetching`() {
+        openFilms()
+
+        viewModel.onMovieSortModeSelected(MovieSortMode.RECENTLY_ADDED)
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(MovieSortMode.RECENTLY_ADDED, viewModel.uiState.value.newReleases.sortMode)
+        assertEquals(listOf("fb", "fa", "fd", "fc", "fe"), newReleaseIds())
+        verify(exactly = 1) { catalogRepository.getMovies("40") }
+        verify(exactly = 1) { catalogRepository.getMovies("41") }
+        coVerify(exactly = 0) { catalogRepository.getMovieDetail(any()) }
+    }
+
+    @Test
+    fun `a film listed in two categories appears once in Nouveautes`() {
+        stubMovies("40", listOf(frOld, frNewer.copy(categoryId = "40")))
+        stubMovies("41", listOf(frNewer))
+        stubMovies("42", emptyList())
+        createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        vodCategoriesFlow.value = Resource.Success(listOf(frAction, frComedy, enDrama))
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(listOf("fd", "fa"), newReleaseIds())
+    }
+
+    @Test
+    fun `changing the language swaps Nouveautes in memory, back to the first page`() {
+        openFilms()
+
+        viewModel.onLanguageSelected(ContentType.MOVIE, "EN")
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(listOf("ef"), newReleaseIds())
+
+        viewModel.onLanguageSelected(ContentType.MOVIE, "FR")
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(listOf("fd", "fc", "fe", "fa", "fb"), newReleaseIds())
+        verify(exactly = 1) { catalogRepository.getMovies("42") }
+    }
+
+    @Test
+    fun `Nouveautes starts at one page of 60 cards and grows one page per request`() {
+        val films = (0 until 130).map { film("p$it", "Film $it (${1990 + it % 30})", "40", added = it.toLong()) }
+        stubMovies("40", films)
+        stubMovies("41", emptyList())
+        stubMovies("42", emptyList())
+        createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        vodCategoriesFlow.value = Resource.Success(listOf(frAction, frComedy, enDrama))
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(60, viewModel.uiState.value.newReleases.items.size)
+        assertTrue(viewModel.uiState.value.newReleases.hasMore)
+
+        // Two requests before the page lands still ask for a single extra page.
+        viewModel.onLoadMoreNewReleases()
+        viewModel.onLoadMoreNewReleases()
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(120, viewModel.uiState.value.newReleases.items.size)
+        // The first page keeps its order: the grid only appends.
+        val expected = MovieSort.sort(films, MovieSortMode.RECENT_RELEASE, latestPlausibleYear = 2100).map { it.id }
+        assertEquals(expected.take(120), newReleaseIds())
+
+        viewModel.onLoadMoreNewReleases()
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(130, viewModel.uiState.value.newReleases.items.size)
+        assertFalse(viewModel.uiState.value.newReleases.hasMore)
+
+        // Changing the mode goes back to the first page.
+        viewModel.onMovieSortModeSelected(MovieSortMode.RECENTLY_ADDED)
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(60, viewModel.uiState.value.newReleases.items.size)
+        assertEquals("p129", newReleaseIds().first())
+    }
+
+    /** Films on one FR category of [count] films, "Nouveautés" already paged out to 120 cards. */
+    private fun openFilmsPagedTo120(count: Int = 300) {
+        stubMovies("40", (0 until count).map { film("p$it", "Film $it (${1990 + it % 30})", "40", added = it.toLong()) })
+        stubMovies("41", emptyList())
+        stubMovies("42", listOf(enFilm))
+        createViewModel()
+        viewModel.onLanguageSelected(ContentType.MOVIE, "FR")
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        vodCategoriesFlow.value = Resource.Success(listOf(frAction, frComedy, enDrama))
+        testDispatcher.scheduler.runCurrent()
+        viewModel.onLoadMoreNewReleases()
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(120, viewModel.uiState.value.newReleases.items.size)
+    }
+
+    @Test
+    fun `a load-more left over from the previous order does not grow the new order past one page`() {
+        openFilmsPagedTo120()
+
+        viewModel.onMovieSortModeSelected(MovieSortMode.RECENTLY_ADDED)
+        // The grid's callback still sees the 120 cards of the previous order, hasMore = true.
+        viewModel.onLoadMoreNewReleases()
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(MovieSortMode.RECENTLY_ADDED, viewModel.uiState.value.newReleases.sortMode)
+        assertEquals(60, viewModel.uiState.value.newReleases.items.size)
+    }
+
+    @Test
+    fun `a load-more left over from the previous language does not grow the new language past one page`() {
+        openFilmsPagedTo120()
+
+        viewModel.onLanguageSelected(ContentType.MOVIE, null)
+        viewModel.onLoadMoreNewReleases()
+        testDispatcher.scheduler.runCurrent()
+
+        assertNull(viewModel.uiState.value.newReleases.language)
+        assertEquals(60, viewModel.uiState.value.newReleases.items.size)
+        // Once the new page is published, load-more works again.
+        viewModel.onLoadMoreNewReleases()
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(120, viewModel.uiState.value.newReleases.items.size)
+    }
+
+    @Test
+    fun `Nouveautes fills in as categories arrive and reports the partial load`() {
+        val lateComedy = MutableStateFlow<Resource<List<Movie>>>(Resource.Loading)
+        stubMovies("40", listOf(frOld, frNoYear))
+        every { catalogRepository.getMovies("41") } returns lateComedy
+        stubMovies("42", listOf(enFilm))
+        createViewModel()
+        viewModel.onLanguageSelected(ContentType.MOVIE, "FR")
+        viewModel.onCatalogTabSelected(ContentType.MOVIE)
+        vodCategoriesFlow.value = Resource.Success(listOf(frAction, frComedy, enDrama))
+        testDispatcher.scheduler.runCurrent()
+
+        assertTrue(viewModel.uiState.value.isNewReleasesLoading)
+        assertEquals(listOf("fa", "fb"), newReleaseIds())
+
+        lateComedy.value = Resource.Success(listOf(frNew, frNewer, frNoAdded))
+        testDispatcher.scheduler.runCurrent()
+
+        assertFalse(viewModel.uiState.value.isNewReleasesLoading)
+        assertEquals(listOf("fd", "fc", "fe", "fa", "fb"), newReleaseIds())
+    }
+
+    @Test
+    fun `a categories re-emission leaves Nouveautes unchanged`() {
+        openFilms()
+        val before = viewModel.uiState.value.newReleases
+
+        // A distinct list, so the StateFlow really re-emits and the category rows recombine.
+        val kids = Category(id = "43", name = "Kids", type = ContentType.MOVIE)
+        vodCategoriesFlow.value = Resource.Success(listOf(frAction, frComedy, enDrama, kids))
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(before, viewModel.uiState.value.newReleases)
+    }
+
+    @Test
+    fun `onRetry drops Nouveautes at once and never shows the previous load, even at the same size`() {
+        openFilms()
+        assertEquals(5, newReleaseIds().size)
+
+        stubMovies("40", listOf(film("ra", "Remplace A (2020)", "40", 1), film("rb", "Remplace B (2021)", "40", 2)))
+        stubMovies("41", listOf(film("rc", "Remplace C (2022)", "41", 3), film("rd", "Remplace D", "41", 4), film("re", "Remplace E", "41", 5)))
+        viewModel.onRetry()
+
+        assertTrue(viewModel.uiState.value.newReleases.items.isEmpty())
+
+        vodCategoriesFlow.value = Resource.Success(listOf(frAction, frComedy, enDrama))
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(listOf("rc", "rb", "ra", "re", "rd"), newReleaseIds())
+    }
+
+    @Test
+    fun `a failed Films reload settles Nouveautes while keeping the previous rows and languages`() {
+        openFilms()
+        val previousRows = viewModel.uiState.value.movieRows
+        assertTrue(previousRows.isNotEmpty())
+
+        viewModel.onRetry()
+        vodCategoriesFlow.value = Resource.Error(message = "Panne films")
+        testDispatcher.scheduler.runCurrent()
+
+        val state = viewModel.uiState.value
+        assertEquals("Panne films", state.errorMessage)
+        assertEquals(previousRows, state.movieRows)
+        assertTrue(state.movieLanguages.isNotEmpty())
+        assertEquals(CatalogTabLoadState.LOADED, state.catalogTabLoadStates[ContentType.MOVIE])
+        assertTrue(state.newReleases.items.isEmpty())
+        assertTrue(state.newReleases.isFailed)
+        assertFalse(state.isNewReleasesPending)
+    }
+
+    @Test
+    fun `a sort picked after a failed Films reload stays settled`() {
+        openFilms()
+        viewModel.onRetry()
+        vodCategoriesFlow.value = Resource.Error(message = "Panne films")
+        testDispatcher.scheduler.runCurrent()
+
+        viewModel.onMovieSortModeSelected(MovieSortMode.RECENTLY_ADDED)
+        testDispatcher.scheduler.runCurrent()
+
+        val state = viewModel.uiState.value
+        assertTrue(state.newReleases.isFailed)
+        assertFalse(state.isNewReleasesPending)
+    }
+
+    @Test
+    fun `opening Films alone never loads Live or Series`() {
+        openFilms()
+
+        verify(exactly = 0) { catalogRepository.observeLiveCategories() }
+        verify(exactly = 0) { catalogRepository.observeSeriesCategories() }
+        assertTrue(viewModel.uiState.value.liveRows.isEmpty())
+        assertTrue(viewModel.uiState.value.seriesRows.isEmpty())
+    }
+
+    @Test
+    fun `Nouveautes is empty and idle before the Films tab is opened`() {
+        createViewModel()
+
+        assertTrue(viewModel.uiState.value.newReleases.items.isEmpty())
+        assertFalse(viewModel.uiState.value.isNewReleasesLoading)
+    }
+
+    @Test
+    fun `a picked order is published at once but the cards keep their real order until re-sorted`() {
+        openFilms()
+
+        viewModel.onMovieSortModeSelected(MovieSortMode.RECENTLY_ADDED)
+
+        // Before the off-main re-sort lands, the screen must not label the old cards with the new order.
+        val pending = viewModel.uiState.value
+        assertEquals(MovieSortMode.RECENTLY_ADDED, pending.selectedMovieSortMode)
+        assertEquals(MovieSortMode.RECENT_RELEASE, pending.newReleases.sortMode)
+        assertEquals(listOf("fd", "fc", "fe", "fa", "fb"), newReleaseIds())
+        assertTrue(pending.isNewReleasesPending)
+
+        testDispatcher.scheduler.runCurrent()
+
+        val settled = viewModel.uiState.value
+        assertEquals(MovieSortMode.RECENTLY_ADDED, settled.newReleases.sortMode)
+        assertFalse(settled.isNewReleasesPending)
+    }
+
+    @Test
+    fun `a language change marks Nouveautes pending until the cards of that language land`() {
+        openFilms()
+        assertEquals("FR", viewModel.uiState.value.newReleases.language)
+        assertFalse(viewModel.uiState.value.isNewReleasesPending)
+
+        viewModel.onLanguageSelected(ContentType.MOVIE, "EN")
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals("EN", viewModel.uiState.value.newReleases.language)
+        assertFalse(viewModel.uiState.value.isNewReleasesPending)
+        assertEquals(listOf("ef"), newReleaseIds())
+    }
+
+    @Test
+    fun `the picked order survives a retry`() {
+        openFilms()
+        viewModel.onMovieSortModeSelected(MovieSortMode.RECENTLY_ADDED)
+        testDispatcher.scheduler.runCurrent()
+
+        viewModel.onRetry()
+        vodCategoriesFlow.value = Resource.Success(listOf(frAction, frComedy, enDrama))
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(MovieSortMode.RECENTLY_ADDED, viewModel.uiState.value.selectedMovieSortMode)
+        assertEquals(MovieSortMode.RECENTLY_ADDED, viewModel.uiState.value.newReleases.sortMode)
+        assertEquals(listOf("fb", "fa", "fd", "fc", "fe"), newReleaseIds())
+    }
+
+    // ── "Nouveautés" (Series tab, series-date-sort) ───────────────────────────
+
+    private val frDramaSeries = Category(id = "60", name = "FR | Drames", type = ContentType.SERIES)
+    private val frComedySeries = Category(id = "61", name = "FR | Comedies", type = ContentType.SERIES)
+    private val enSeriesCategory = Category(id = "62", name = "EN | Shows", type = ContentType.SERIES)
+
+    private fun show(id: String, title: String, categoryId: String, year: Int? = null) = Series(
+        id = id,
+        title = title,
+        coverUrl = "http://example.com/$id.jpg",
+        plot = null,
+        categoryId = categoryId,
+        rating = null,
+        year = year,
+    )
+
+    private val frOldShow = show("sa", "Vieille Serie (2009)", "60")
+    private val frNoYearShow = show("sb", "Sans Millesime", "60")
+    private val frNewShow = show("sc", "Nouvelle (2025)", "61")
+    private val frListYearShow = show("sd", "Annee Liste", "61", year = 2025)
+    private val frSeasonShow = show("se", "Ancienne S02 (2024)", "61", year = 2024)
+    private val enShow = show("sf", "English Show (2026)", "62")
+
+    private fun seriesNewReleaseIds() = viewModel.uiState.value.seriesNewReleases.items.map { it.id }
+
+    /** Opens Series on FR/FR/EN categories with [frLanguage] explicitly selected. */
+    private fun openSeries(frLanguage: String? = "FR") {
+        stubSeries("60", listOf(frOldShow, frNoYearShow))
+        stubSeries("61", listOf(frNewShow, frListYearShow, frSeasonShow))
+        stubSeries("62", listOf(enShow))
+        createViewModel()
+        viewModel.onLanguageSelected(ContentType.SERIES, frLanguage)
+        viewModel.onCatalogTabSelected(ContentType.SERIES)
+        seriesCategoriesFlow.value = Resource.Success(listOf(frDramaSeries, frComedySeries, enSeriesCategory))
+        testDispatcher.scheduler.runCurrent()
+    }
+
+    @Test
+    fun `series Nouveautes gathers every series of the active language, newest release year first`() {
+        openSeries()
+
+        val state = viewModel.uiState.value
+        // 2025 (title, then list year: tie broken by id), 2009, then unknown years by id — the
+        // season-scoped entry has no trusted year.
+        assertEquals(listOf("sc", "sd", "sa", "sb", "se"), seriesNewReleaseIds())
+        assertEquals("FR", state.seriesNewReleases.language)
+        assertFalse(state.seriesNewReleases.hasMore)
+        assertFalse(state.isSeriesNewReleasesLoading)
+        assertFalse(state.isSeriesNewReleasesPending)
+        // The category rows are untouched: still one FR row, in category order.
+        assertEquals(listOf("FR"), state.seriesRows.map { it.title })
+        assertEquals(listOf("sa", "sb", "sc", "sd", "se"), state.seriesRows.single().items.map { it.id })
+    }
+
+    @Test
+    fun `series Nouveautes cards open the series detail, never the player`() {
+        openSeries()
+
+        assertEquals(
+            HomeCardItem(
+                id = "sc",
+                title = "Nouvelle (2025)",
+                imageUrl = "http://example.com/sc.jpg",
+                contentType = ContentType.SERIES,
+            ),
+            viewModel.uiState.value.seriesNewReleases.items.first(),
+        )
+        assertTrue(
+            viewModel.uiState.value.seriesNewReleases.items.all {
+                it.contentType == ContentType.SERIES && it.resumeStreamUrl == null && it.subtitleSearchContext == null
+            },
+        )
+    }
+
+    @Test
+    fun `series Nouveautes with Toutes includes every language`() {
+        openSeries(frLanguage = null)
+
+        assertEquals(listOf("sf", "sc", "sd", "sa", "sb", "se"), seriesNewReleaseIds())
+    }
+
+    @Test
+    fun `a series listed in two categories appears once in series Nouveautes`() {
+        stubSeries("60", listOf(frOldShow, frNewShow.copy(categoryId = "60")))
+        stubSeries("61", listOf(frNewShow))
+        stubSeries("62", listOf(frNewShow.copy(categoryId = "62")))
+        createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.SERIES)
+        seriesCategoriesFlow.value = Resource.Success(listOf(frDramaSeries, frComedySeries, enSeriesCategory))
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(listOf("sc", "sa"), seriesNewReleaseIds())
+    }
+
+    @Test
+    fun `series Nouveautes never asks for a series detail`() {
+        openSeries()
+        viewModel.onLanguageSelected(ContentType.SERIES, null)
+        testDispatcher.scheduler.runCurrent()
+
+        coVerify(exactly = 0) { catalogRepository.getSeriesDetail(any()) }
+        verify(exactly = 1) { catalogRepository.getSeriesList("60") }
+        verify(exactly = 1) { catalogRepository.getSeriesList("61") }
+        verify(exactly = 1) { catalogRepository.getSeriesList("62") }
+    }
+
+    @Test
+    fun `changing the series language swaps series Nouveautes in memory`() {
+        openSeries()
+
+        viewModel.onLanguageSelected(ContentType.SERIES, "EN")
+        // The language and the re-merged page land in the same dispatch here; the pending window
+        // in between is covered on the state itself by HomeScreenSelectionTest.
+        testDispatcher.scheduler.runCurrent()
+        assertEquals("EN", viewModel.uiState.value.seriesNewReleases.language)
+        assertFalse(viewModel.uiState.value.isSeriesNewReleasesPending)
+        assertEquals(listOf("sf"), seriesNewReleaseIds())
+
+        viewModel.onLanguageSelected(ContentType.SERIES, "FR")
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(listOf("sc", "sd", "sa", "sb", "se"), seriesNewReleaseIds())
+        verify(exactly = 1) { catalogRepository.getSeriesList("62") }
+    }
+
+    @Test
+    fun `series Nouveautes starts at one page of 60 cards and grows one page per request`() {
+        val shows = (0 until 130).map { show("p$it", "Serie $it (${1990 + it % 30})", "60") }
+        stubSeries("60", shows)
+        stubSeries("61", emptyList())
+        stubSeries("62", emptyList())
+        createViewModel()
+        viewModel.onCatalogTabSelected(ContentType.SERIES)
+        seriesCategoriesFlow.value = Resource.Success(listOf(frDramaSeries, frComedySeries, enSeriesCategory))
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(60, viewModel.uiState.value.seriesNewReleases.items.size)
+        assertTrue(viewModel.uiState.value.seriesNewReleases.hasMore)
+
+        // Two requests before the page lands still ask for a single extra page.
+        viewModel.onLoadMoreSeriesNewReleases()
+        viewModel.onLoadMoreSeriesNewReleases()
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(120, viewModel.uiState.value.seriesNewReleases.items.size)
+        val expected = SeriesSort.sort(shows, latestPlausibleYear = 2100).map { it.id }
+        assertEquals(expected.take(120), seriesNewReleaseIds())
+
+        viewModel.onLoadMoreSeriesNewReleases()
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(130, viewModel.uiState.value.seriesNewReleases.items.size)
+        assertFalse(viewModel.uiState.value.seriesNewReleases.hasMore)
+
+        // Another language goes back to the first page.
+        viewModel.onLanguageSelected(ContentType.SERIES, "FR")
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(60, viewModel.uiState.value.seriesNewReleases.items.size)
+    }
+
+    @Test
+    fun `a series load-more left over from the previous language does not grow the new one past one page`() {
+        stubSeries("60", (0 until 300).map { show("p$it", "Serie $it (${1990 + it % 30})", "60") })
+        stubSeries("61", emptyList())
+        stubSeries("62", listOf(enShow))
+        createViewModel()
+        viewModel.onLanguageSelected(ContentType.SERIES, "FR")
+        viewModel.onCatalogTabSelected(ContentType.SERIES)
+        seriesCategoriesFlow.value = Resource.Success(listOf(frDramaSeries, frComedySeries, enSeriesCategory))
+        testDispatcher.scheduler.runCurrent()
+        viewModel.onLoadMoreSeriesNewReleases()
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(120, viewModel.uiState.value.seriesNewReleases.items.size)
+
+        viewModel.onLanguageSelected(ContentType.SERIES, null)
+        // The grid's callback still sees the 120 FR cards, hasMore = true.
+        viewModel.onLoadMoreSeriesNewReleases()
+        testDispatcher.scheduler.runCurrent()
+
+        assertNull(viewModel.uiState.value.seriesNewReleases.language)
+        assertEquals(60, viewModel.uiState.value.seriesNewReleases.items.size)
+        viewModel.onLoadMoreSeriesNewReleases()
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(120, viewModel.uiState.value.seriesNewReleases.items.size)
+    }
+
+    @Test
+    fun `series Nouveautes fills in as categories arrive and reports the partial load`() {
+        val lateComedies = MutableStateFlow<Resource<List<Series>>>(Resource.Loading)
+        stubSeries("60", listOf(frOldShow, frNoYearShow))
+        every { catalogRepository.getSeriesList("61") } returns lateComedies
+        stubSeries("62", listOf(enShow))
+        createViewModel()
+        viewModel.onLanguageSelected(ContentType.SERIES, "FR")
+        viewModel.onCatalogTabSelected(ContentType.SERIES)
+        seriesCategoriesFlow.value = Resource.Success(listOf(frDramaSeries, frComedySeries, enSeriesCategory))
+        testDispatcher.scheduler.runCurrent()
+
+        assertTrue(viewModel.uiState.value.isSeriesNewReleasesLoading)
+        assertEquals(listOf("sa", "sb"), seriesNewReleaseIds())
+
+        lateComedies.value = Resource.Success(listOf(frNewShow, frListYearShow, frSeasonShow))
+        testDispatcher.scheduler.runCurrent()
+
+        assertFalse(viewModel.uiState.value.isSeriesNewReleasesLoading)
+        assertEquals(listOf("sc", "sd", "sa", "sb", "se"), seriesNewReleaseIds())
+    }
+
+    @Test
+    fun `onRetry drops series Nouveautes at once and never shows the previous load`() {
+        openSeries()
+
+        stubSeries("60", listOf(show("ra", "Remplace A (2020)", "60"), show("rb", "Remplace B", "60", year = 2021)))
+        stubSeries("61", listOf(show("rc", "Remplace C (2022)", "61")))
+        viewModel.onRetry()
+
+        assertTrue(viewModel.uiState.value.seriesNewReleases.items.isEmpty())
+
+        seriesCategoriesFlow.value = Resource.Success(listOf(frDramaSeries, frComedySeries, enSeriesCategory))
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(listOf("rc", "rb", "ra"), seriesNewReleaseIds())
+    }
+
+    @Test
+    fun `a failed Series reload settles series Nouveautes while keeping the previous rows`() {
+        openSeries()
+        val previousRows = viewModel.uiState.value.seriesRows
+
+        viewModel.onRetry()
+        seriesCategoriesFlow.value = Resource.Error(message = "Panne series")
+        testDispatcher.scheduler.runCurrent()
+
+        val state = viewModel.uiState.value
+        assertEquals("Panne series", state.errorMessage)
+        assertEquals(previousRows, state.seriesRows)
+        assertEquals(CatalogTabLoadState.LOADED, state.catalogTabLoadStates[ContentType.SERIES])
+        assertTrue(state.seriesNewReleases.items.isEmpty())
+        assertTrue(state.seriesNewReleases.isFailed)
+        assertFalse(state.isSeriesNewReleasesPending)
+    }
+
+    @Test
+    fun `series and Films Nouveautes are independent`() {
+        openSeries()
+
+        assertTrue(viewModel.uiState.value.newReleases.items.isEmpty())
+        verify(exactly = 0) { catalogRepository.observeVodCategories() }
+
+        // A Films order change leaves the series view alone.
+        val before = viewModel.uiState.value.seriesNewReleases
+        viewModel.onMovieSortModeSelected(MovieSortMode.RECENTLY_ADDED)
+        viewModel.onLoadMoreNewReleases()
+        testDispatcher.scheduler.runCurrent()
+        assertEquals(before, viewModel.uiState.value.seriesNewReleases)
+    }
+
+    @Test
+    fun `opening Films never fills series Nouveautes`() {
+        openFilms()
+
+        assertTrue(viewModel.uiState.value.seriesNewReleases.items.isEmpty())
+        assertFalse(viewModel.uiState.value.isSeriesNewReleasesLoading)
+    }
+
+    @Test
+    fun `a series categories re-emission leaves series Nouveautes unchanged`() {
+        openSeries()
+        val before = viewModel.uiState.value.seriesNewReleases
+
+        val kids = Category(id = "63", name = "Kids", type = ContentType.SERIES)
+        seriesCategoriesFlow.value = Resource.Success(listOf(frDramaSeries, frComedySeries, enSeriesCategory, kids))
+        testDispatcher.scheduler.runCurrent()
+
+        assertEquals(before, viewModel.uiState.value.seriesNewReleases)
     }
 }
