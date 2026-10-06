@@ -75,7 +75,7 @@ class LogoutCoordinator @Inject constructor(
     private val logoutPurger: LogoutPurger,
     private val markerStore: LogoutPurgeMarkerStore,
     @ApplicationScope private val applicationScope: CoroutineScope,
-) {
+) : SessionWriteGate {
 
     /**
      * Held for the *entire* duration of a purge, and briefly by every operation that must not
@@ -102,6 +102,21 @@ class LogoutCoordinator @Inject constructor(
      * credentials write is refused on a stale generation, not committed or rolled back".
      */
     val sessionGeneration: Int get() = _sessionGeneration.get()
+
+    private val _purgeAttempts = AtomicInteger(0)
+
+    /**
+     * Bumped as every purge attempt *starts*, under [purgeLock] and before its first step stops
+     * playback — whatever the attempt then does or how it ends. [sessionGeneration] only moves once a
+     * purge completes, too late for a player screen left open through the logout: by then the purge
+     * has already released the player, and a screen still reading it would build a fresh one. That
+     * stop runs on the main thread after this bump, so main-thread code reading an unchanged value
+     * knows playback has not been stopped under it — see
+     * [PlayerViewModel][com.bobot.iptvapp.ui.screen.player.PlayerViewModel].
+     *
+     * A recovery with nothing owed bumps it as well: it only runs at launch, before any player.
+     */
+    val purgeAttempts: Int get() = _purgeAttempts.get()
 
     /**
      * Runs a user-requested logout and suspends until it has settled, without ever cancelling it:
@@ -146,6 +161,32 @@ class LogoutCoordinator @Inject constructor(
     }
 
     /**
+     * [runUnlessPurgeOwed], plus a refusal when a purge has completed since [generation] was read:
+     * a write started for the previous account must not land after its purge — nor be purged by
+     * nobody, since the next purge only comes with the next logout.
+     */
+    override suspend fun <T : Any> runInSession(generation: Int, block: suspend () -> T): T? {
+        if (!purgeLock.tryLock()) return null
+        try {
+            if (_sessionGeneration.get() != generation || markerStore.isPurgePending()) return null
+            return block()
+        } finally {
+            purgeLock.unlock()
+        }
+    }
+
+    /**
+     * [runInSession], but waiting for [purgeLock] rather than being refused while it is held: for a
+     * short local write that must not be lost to a pick or an enqueue holding the lock for a few
+     * milliseconds. A purge it queued behind still refuses it — that purge moved the generation, or
+     * left one owed. Never for anything slow: [block] runs under the lock, holding up any logout.
+     */
+    suspend fun <T : Any> awaitInSession(generation: Int, block: suspend () -> T): T? =
+        purgeLock.withLock {
+            if (_sessionGeneration.get() != generation || markerStore.isPurgePending()) null else block()
+        }
+
+    /**
      * Joins the single attempt in flight, starting one on [applicationScope] when none is running.
      * This — not [purgeLock] alone — is what makes [logOut] and [recoverIfNeeded] single-flight in
      * *outcome*: every caller that arrives while [inFlightAttempt] is set suspends on that exact
@@ -186,6 +227,7 @@ class LogoutCoordinator @Inject constructor(
      */
     private suspend fun runExclusively(purge: suspend () -> Boolean) {
         purgeLock.withLock {
+            _purgeAttempts.incrementAndGet()
             _state.value = LogoutPurgeState.Running
             try {
                 val purged = purge()

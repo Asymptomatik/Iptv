@@ -813,9 +813,7 @@ class CatalogRepositoryImplTest {
             val result = repository.getSeriesDetail("s1")
 
             assertEquals(Resource.Success(series), result)
-            coVerify(exactly = 1) {
-                catalogCacheDao.upsertSeries(match { it.size == 1 && it[0].id == "s1" })
-            }
+            coVerify(exactly = 1) { catalogCacheDao.upsertSeriesDetail(match { it.id == "s1" }) }
             coVerify(exactly = 1) {
                 catalogCacheDao.upsertSeasons(
                     match { seasons -> seasons.size == 1 && seasons[0].seriesId == "s1" && seasons[0].seasonNumber == 1 },
@@ -833,11 +831,42 @@ class CatalogRepositoryImplTest {
         }
 
     @Test
+    fun `getSeriesDetail leaves the list-owned merge to the DAO write, never to an earlier read`() =
+        runTest(testDispatcher) {
+            // Keeping the listed title, year and category is CatalogCacheDao.upsertSeriesDetail's job,
+            // at write time (see CatalogRepositorySeriesDetailWriteTest for the interleavings). The
+            // repository hands it the detail as fetched and never writes the row through upsertSeries.
+            val detail = buildSeriesWithEpisodes("s1").copy(
+                title = "Detail Title",
+                year = 2019,
+                categoryId = "",
+                coverUrl = "http://example.com/detail.jpg",
+                plot = "Detail plot",
+            )
+            coEvery { dataSource.getSeriesInfo("s1") } returns detail
+
+            val result = repository.getSeriesDetail("s1")
+
+            // The screen still gets the detail as fetched.
+            assertEquals(Resource.Success(detail), result)
+            coVerify(exactly = 1) {
+                catalogCacheDao.upsertSeriesDetail(
+                    match {
+                        it.title == "Detail Title" && it.year == 2019 && it.categoryId == "" &&
+                            it.coverUrl == "http://example.com/detail.jpg" && it.plot == "Detail plot"
+                    },
+                )
+            }
+            coVerify(exactly = 0) { catalogCacheDao.getSeriesById(any(), any()) }
+            coVerify(exactly = 0) { catalogCacheDao.upsertSeries(any()) }
+        }
+
+    @Test
     fun `getSeriesDetail still returns Success when the Room cache write throws`() =
         runTest(testDispatcher) {
             val series = buildSeriesWithEpisodes("s1")
             coEvery { dataSource.getSeriesInfo("s1") } returns series
-            coEvery { catalogCacheDao.upsertSeries(any()) } throws RuntimeException("Disk full")
+            coEvery { catalogCacheDao.upsertSeriesDetail(any()) } throws RuntimeException("Disk full")
 
             val result = repository.getSeriesDetail("s1")
 

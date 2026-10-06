@@ -93,6 +93,64 @@ class PlayerTrackSelectionTest {
         assertFalse(result)
     }
 
+    // ── shouldShowTracksButton / hasSubtitleSection (online search) ─────────
+
+    @Test
+    fun `shouldShowTracksButton is true on a VOD announcing no track when a search is available`() {
+        val result = shouldShowTracksButton(
+            audioTracks = emptyList(),
+            subtitleTracks = emptyList(),
+            onlineSearchAvailable = true,
+        )
+
+        assertTrue(result)
+    }
+
+    @Test
+    fun `shouldShowTracksButton keeps the live rule when no search is available`() {
+        val result = shouldShowTracksButton(
+            audioTracks = listOf(audioTrack(id = "aud-1", isSelected = true)),
+            subtitleTracks = emptyList(),
+            onlineSearchAvailable = false,
+        )
+
+        assertFalse(result)
+    }
+
+    @Test
+    fun `shouldShowTracksButton stays true for a stream choice without any search`() {
+        val result = shouldShowTracksButton(
+            audioTracks = listOf(
+                audioTrack(id = "aud-1", isSelected = true),
+                audioTrack(id = "aud-2", isSelected = false),
+            ),
+            subtitleTracks = emptyList(),
+            onlineSearchAvailable = false,
+        )
+
+        assertTrue(result)
+    }
+
+    @Test
+    fun `hasSubtitleSection shows for the search row alone`() {
+        assertTrue(hasSubtitleSection(subtitleTracks = emptyList(), onlineSearchAvailable = true))
+    }
+
+    @Test
+    fun `hasSubtitleSection is false with neither tracks nor search`() {
+        assertFalse(hasSubtitleSection(subtitleTracks = emptyList(), onlineSearchAvailable = false))
+    }
+
+    @Test
+    fun `hasSubtitleSection is true for stream tracks without search`() {
+        val result = hasSubtitleSection(
+            subtitleTracks = listOf(subtitleTrack(id = "sub-fr", isSelected = false)),
+            onlineSearchAvailable = false,
+        )
+
+        assertTrue(result)
+    }
+
     // ── Fixtures ────────────────────────────────────────────────────────────
 
     private fun audioTrack(id: String, isSelected: Boolean) = PlayerTrack(

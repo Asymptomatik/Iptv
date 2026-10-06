@@ -30,6 +30,33 @@ fun hasSelectableTracks(
 }
 
 /**
+ * `true` when the "CC" button is worth showing: the stream offers a choice of its own (see
+ * [hasSelectableTracks]), or an online subtitle search can bring one. The second half is what
+ * keeps the button reachable on a VOD whose provider announces no track at all — without it, the
+ * search would sit behind a button that never renders. Live channels never have a search
+ * ([OnlineSubtitlesUiState.isAvailable] is always `false` there), so their rule is unchanged.
+ */
+fun shouldShowTracksButton(
+    audioTracks: List<PlayerTrack>,
+    subtitleTracks: List<PlayerTrack>,
+    onlineSearchAvailable: Boolean,
+): Boolean {
+    return hasSelectableTracks(audioTracks, subtitleTracks) || onlineSearchAvailable
+}
+
+/**
+ * `true` when the selector's "Sous-titres" section has anything to list: tracks from the stream,
+ * or at least the row opening the online search. The "Désactivés" row only comes with actual
+ * tracks — with none, "off" is not a choice, it is the only state there is.
+ */
+fun hasSubtitleSection(
+    subtitleTracks: List<PlayerTrack>,
+    onlineSearchAvailable: Boolean,
+): Boolean {
+    return subtitleTracks.isNotEmpty() || onlineSearchAvailable
+}
+
+/**
  * `true` when no subtitle track is currently applied — the state the UI labels "Désactivés".
  *
  * There is deliberately no `subtitlesEnabled` flag anywhere in the player stack: disabling

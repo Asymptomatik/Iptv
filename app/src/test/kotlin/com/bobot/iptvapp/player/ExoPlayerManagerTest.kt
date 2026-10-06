@@ -4,13 +4,19 @@ import android.content.Context
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.Player
 import androidx.media3.common.TrackGroup
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.Tracks
 import androidx.media3.exoplayer.ExoPlayer
+import com.bobot.iptvapp.domain.model.ExternalSubtitle
+import com.bobot.iptvapp.domain.util.LanguageLabel
+import io.mockk.Runs
 import io.mockk.every
+import io.mockk.just
 import io.mockk.mockk
+import io.mockk.slot
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -110,6 +116,54 @@ class ExoPlayerManagerTest {
         manager.stopActivePlayback()
 
         verify { player.release() }
+    }
+
+    // ── Side-loaded subtitle failures ────────────────────────────────────────
+
+    private val reported = mutableListOf<String>()
+
+    /** Prepares [MOVIE_URL] and returns the failure callback it handed the factory, if any. */
+    private fun prepareCapturingCallback(): ((String) -> Unit)? {
+        val callbacks = mutableListOf<((String) -> Unit)?>()
+        every { mediaSourceFactory.create(any(), any(), captureNullable(callbacks)) } returns mockk(relaxed = true)
+        manager.prepare(MOVIE_URL, 0L, emptyList())
+        return callbacks.single()
+    }
+
+    @Test
+    fun `a failure of the current media is reported to the listener`() {
+        manager.setSideLoadedSubtitleErrorListener { reported += it }
+
+        prepareCapturingCallback()!!.invoke("online-subtitle-1")
+
+        assertEquals(listOf("online-subtitle-1"), reported)
+    }
+
+    @Test
+    fun `without a listener the factory gets no callback, so failures keep failing playback`() {
+        assertNull(prepareCapturingCallback())
+    }
+
+    @Test
+    fun `a failure of a replaced media is not reported`() {
+        manager.setSideLoadedSubtitleErrorListener { reported += it }
+        val first = prepareCapturingCallback()!!
+        prepareCapturingCallback()
+
+        first("online-subtitle-1")
+
+        assertTrue(reported.isEmpty())
+    }
+
+    @Test
+    fun `release forgets the listener and silences the released media`() {
+        manager.setSideLoadedSubtitleErrorListener { reported += it }
+        val callback = prepareCapturingCallback()!!
+
+        manager.release()
+        callback("online-subtitle-1")
+
+        assertTrue(reported.isEmpty())
     }
 
     // ── fixture builders ─────────────────────────────────────────────────────
@@ -354,5 +408,291 @@ class ExoPlayerManagerTest {
 
         assertEquals("Subtitle 1", label)
         assertFalse(label.equals("und", ignoreCase = true))
+    }
+
+    // ── unique fallback labels: one group per track (side-loaded, most embedded) ──
+
+    @Test
+    fun `subtitle tracks without language or label, each in its own group, get distinct numbers`() {
+        // Every side-loaded subtitle is its own MergingMediaSource child, hence its own group,
+        // at track index 0 — so is each embedded text track of a typical MKV.
+        setCurrentTracks(
+            singleTrackGroup(textFormat()),
+            singleTrackGroup(textFormat(language = "und")),
+            singleTrackGroup(textFormat(id = "online-1")),
+        )
+
+        val tracks = manager.getSubtitleTracks()
+
+        assertEquals(listOf("Subtitle 1", "Subtitle 2", "Subtitle 3"), tracks.map { it.label })
+        assertEquals(listOf("subtitle-0-0", "subtitle-1-0", "online-1"), tracks.map { it.id })
+    }
+
+    @Test
+    fun `a known language keeps its name and an unknown track is numbered by its place in the list`() {
+        val french = LanguageLabel.forCode("fr")!!
+        setCurrentTracks(
+            singleTrackGroup(textFormat(language = "fr")),
+            singleTrackGroup(textFormat()),
+            singleTrackGroup(textFormat(language = "und")),
+        )
+
+        val labels = manager.getSubtitleTracks().map { it.label }
+
+        assertEquals(listOf(french, "Subtitle 2", "Subtitle 3"), labels)
+    }
+
+    @Test
+    fun `audio tracks in separate groups without language get distinct numbers too`() {
+        setCurrentTracks(
+            singleTrackGroup(audioFormat(id = "a1")),
+            singleTrackGroup(audioFormat(id = "a2")),
+        )
+
+        assertEquals(listOf("Audio 1", "Audio 2"), manager.getAudioTracks().map { it.label })
+    }
+
+    // ── 7. re-prepare keeps the audio track the user chose ───────────────────
+    //
+    // A `TrackSelectionOverride` names a `TrackGroup`, and a re-prepare (online subtitle pick,
+    // "Réessayer") builds new ones. Once a side-loaded subtitle is merged in, Media3's
+    // `MergingMediaPeriod` also renames every group and format id to `"<child>:<id>"` — verified
+    // against media3-exoplayer-1.4.1 — so the old override matches nothing and Media3 silently
+    // falls back to its default audio track.
+
+    private val listenerSlot = slot<Player.Listener>()
+
+    private fun captureListener() {
+        every { player.addListener(capture(listenerSlot)) } just Runs
+    }
+
+    /** [group] as the primary child of a `MergingMediaSource` reports it. */
+    private fun merged(group: Tracks.Group): Tracks.Group {
+        val source = group.mediaTrackGroup
+        val formats = Array(source.length) { i ->
+            val format = source.getFormat(i)
+            format.buildUpon().setId("0:${format.id.orEmpty()}").build()
+        }
+        return Tracks.Group(
+            TrackGroup("0:${source.id}", *formats),
+            /* adaptiveSupported= */ false,
+            IntArray(source.length) { C.FORMAT_HANDLED },
+            BooleanArray(source.length) { false },
+        )
+    }
+
+    private fun tracksChanged(vararg groups: Tracks.Group) {
+        val tracks = Tracks(groups.toList())
+        every { player.currentTracks } returns tracks
+        // Nothing to notify when prepare registered no listener.
+        if (listenerSlot.isCaptured) listenerSlot.captured.onTracksChanged(tracks)
+    }
+
+    private fun prepareAgain() {
+        manager.prepare(MOVIE_URL, 47_000L, listOf(ExternalSubtitle("file:/data/1001.fr.srt", "fr")))
+    }
+
+    @Test
+    fun `a re-prepare that merges in a subtitle switches the chosen audio track back on`() {
+        captureListener()
+        val french = singleTrackGroup(audioFormat(id = "aud-fr", language = "fra"), selected = true)
+        val english = singleTrackGroup(audioFormat(id = "aud-en", language = "eng"))
+        setCurrentTracks(french, english)
+        manager.selectAudioTrack("aud-en")
+
+        prepareAgain()
+        val newEnglish = merged(english)
+        tracksChanged(merged(french), newEnglish)
+
+        assertEquals(
+            TrackSelectionOverride(newEnglish.mediaTrackGroup, 0),
+            currentParameters.overrides[newEnglish.mediaTrackGroup],
+        )
+    }
+
+    @Test
+    fun `tracks without a container id are matched on what they carry, not on their position id`() {
+        captureListener()
+        val first = singleTrackGroup(audioFormat(language = "fra", label = "VF"), selected = true)
+        val second = singleTrackGroup(audioFormat(language = "eng", label = "VO"))
+        setCurrentTracks(first, second)
+        manager.selectAudioTrack("audio-1-0")
+
+        prepareAgain()
+        val newSecond = merged(second)
+        tracksChanged(merged(first), newSecond)
+
+        assertEquals(
+            TrackSelectionOverride(newSecond.mediaTrackGroup, 0),
+            currentParameters.overrides[newSecond.mediaTrackGroup],
+        )
+    }
+
+    @Test
+    fun `the replaced media's tracks, or none yet, never consume the choice`() {
+        captureListener()
+        val french = singleTrackGroup(audioFormat(id = "aud-fr", language = "fra"), selected = true)
+        val english = singleTrackGroup(audioFormat(id = "aud-en", language = "eng"))
+        setCurrentTracks(french, english)
+        manager.selectAudioTrack("aud-en")
+
+        prepareAgain()
+        tracksChanged()
+        tracksChanged(french, english)
+        val newEnglish = merged(english)
+        tracksChanged(merged(french), newEnglish)
+
+        assertEquals(
+            TrackSelectionOverride(newEnglish.mediaTrackGroup, 0),
+            currentParameters.overrides[newEnglish.mediaTrackGroup],
+        )
+    }
+
+    @Test
+    fun `a retry on the very same tracks leaves the chosen override as it is`() {
+        captureListener()
+        val french = singleTrackGroup(audioFormat(id = "aud-fr", language = "fra"), selected = true)
+        val english = singleTrackGroup(audioFormat(id = "aud-en", language = "eng"))
+        setCurrentTracks(french, english)
+        manager.selectAudioTrack("aud-en")
+        val chosen = currentParameters
+
+        manager.prepare(MOVIE_URL, 47_000L, emptyList())
+        tracksChanged(french, english)
+
+        assertEquals(chosen, currentParameters)
+    }
+
+    @Test
+    fun `without an audio choice a re-prepare selects nothing by hand`() {
+        captureListener()
+        val french = singleTrackGroup(audioFormat(id = "aud-fr", language = "fra"), selected = true)
+        val english = singleTrackGroup(audioFormat(id = "aud-en", language = "eng"))
+        setCurrentTracks(french, english)
+
+        prepareAgain()
+        tracksChanged(merged(french), merged(english))
+
+        verify(exactly = 0) { player.trackSelectionParameters = any() }
+    }
+
+    @Test
+    fun `a choice made by hand after the re-prepare is never overridden by the old one`() {
+        captureListener()
+        val french = singleTrackGroup(audioFormat(id = "aud-fr", language = "fra"), selected = true)
+        val english = singleTrackGroup(audioFormat(id = "aud-en", language = "eng"))
+        setCurrentTracks(french, english)
+        manager.selectAudioTrack("aud-en")
+
+        prepareAgain()
+        val newFrench = merged(french)
+        val newEnglish = merged(english)
+        setCurrentTracks(newFrench, newEnglish)
+        manager.selectAudioTrack("0:aud-fr")
+        tracksChanged(newFrench, newEnglish)
+
+        assertEquals(
+            TrackSelectionOverride(newFrench.mediaTrackGroup, 0),
+            currentParameters.overrides[newFrench.mediaTrackGroup],
+        )
+        assertNull(currentParameters.overrides[newEnglish.mediaTrackGroup])
+    }
+
+    // ── 8. side-loaded subtitle ids survive the merge ────────────────────────
+    //
+    // `MergingMediaPeriod` (media3-exoplayer-1.4.1) renames every format to
+    // `"<child index>:" + (format.id ?: "")` and every group to `"<child index>:" + group.id`.
+    // The fixtures below are built exactly that way — never with the bare requested id.
+
+    /** A text group as `MergingMediaPeriod` reports child [child]'s single track of id [childFormatId]. */
+    private fun mergedTextGroup(child: Int, childFormatId: String?, language: String? = null): Tracks.Group =
+        Tracks.Group(
+            TrackGroup("$child:0", textFormat(id = "$child:${childFormatId.orEmpty()}", language = language)),
+            /* adaptiveSupported= */ false,
+            intArrayOf(C.FORMAT_HANDLED),
+            booleanArrayOf(false),
+        )
+
+    private fun prepareWithOnline(onlineTrackId: String) {
+        manager.prepare(
+            MOVIE_URL,
+            47_000L,
+            listOf(
+                ExternalSubtitle("http://example.com/subs/1.srt", "en"),
+                ExternalSubtitle("file:/data/1001.fr.srt", "fr", trackId = onlineTrackId),
+            ),
+        )
+    }
+
+    @Test
+    fun `a side-loaded subtitle is listed under the id prepare asked for, not the merged one`() {
+        prepareWithOnline("online-subtitle-1")
+        setCurrentTracks(
+            merged(singleTrackGroup(textFormat(id = "3", language = "eng"))),
+            mergedTextGroup(child = 1, childFormatId = null, language = "en"),
+            mergedTextGroup(child = 2, childFormatId = "online-subtitle-1", language = "fr"),
+        )
+
+        val ids = manager.getSubtitleTracks().map { it.id }
+
+        // Embedded and Xtream tracks keep the id they had before this fix.
+        assertEquals(listOf("0:3", "1:", "online-subtitle-1"), ids)
+    }
+
+    @Test
+    fun `selecting a side-loaded subtitle by its requested id overrides its merged group`() {
+        prepareWithOnline("online-subtitle-1")
+        val embedded = merged(singleTrackGroup(textFormat(id = "3", language = "eng")))
+        val online = mergedTextGroup(child = 2, childFormatId = "online-subtitle-1", language = "fr")
+        setCurrentTracks(embedded, mergedTextGroup(child = 1, childFormatId = null), online)
+
+        manager.selectSubtitleTrack("online-subtitle-1")
+
+        assertEquals(
+            TrackSelectionOverride(online.mediaTrackGroup, 0),
+            currentParameters.overrides[online.mediaTrackGroup],
+        )
+        assertNull(currentParameters.overrides[embedded.mediaTrackGroup])
+    }
+
+    @Test
+    fun `an embedded track sharing the requested id keeps its merged id`() {
+        prepareWithOnline("online-subtitle-1")
+        val embedded = merged(singleTrackGroup(textFormat(id = "online-subtitle-1", language = "eng")))
+        val online = mergedTextGroup(child = 2, childFormatId = "online-subtitle-1", language = "fr")
+        setCurrentTracks(embedded, online)
+
+        assertEquals(listOf("0:online-subtitle-1", "online-subtitle-1"), manager.getSubtitleTracks().map { it.id })
+        manager.selectSubtitleTrack("online-subtitle-1")
+        assertNull(currentParameters.overrides[embedded.mediaTrackGroup])
+        assertEquals(
+            TrackSelectionOverride(online.mediaTrackGroup, 0),
+            currentParameters.overrides[online.mediaTrackGroup],
+        )
+    }
+
+    @Test
+    fun `a merged id prepare did not ask for is left as Media3 reports it`() {
+        prepareWithOnline("online-subtitle-2")
+        // The previous pick's track, still reported by the replaced media.
+        setCurrentTracks(mergedTextGroup(child = 2, childFormatId = "online-subtitle-1"))
+
+        assertEquals(listOf("2:online-subtitle-1"), manager.getSubtitleTracks().map { it.id })
+        manager.selectSubtitleTrack("online-subtitle-1")
+        verify(exactly = 0) { player.trackSelectionParameters = any() }
+    }
+
+    @Test
+    fun `release forgets the requested side-loaded ids`() {
+        prepareWithOnline("online-subtitle-1")
+        manager.release()
+        injectPlayer(manager, player)
+        setCurrentTracks(mergedTextGroup(child = 2, childFormatId = "online-subtitle-1"))
+
+        assertEquals(listOf("2:online-subtitle-1"), manager.getSubtitleTracks().map { it.id })
+    }
+
+    private companion object {
+        const val MOVIE_URL = "http://example.com:8080/movie/u/p/42.mp4"
     }
 }

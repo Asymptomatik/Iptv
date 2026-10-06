@@ -184,7 +184,38 @@ class FakeCatalogCacheDao : CatalogCacheDao {
             .filter { it.accountKey == accountKey && it.categoryId == categoryId }
             .sortedBy { it.title }
 
-    override suspend fun getSeriesById(accountKey: String, id: String): SeriesEntity? = series[accountKey to id]
+    override suspend fun getSeriesById(accountKey: String, id: String): SeriesEntity? =
+        series[accountKey to id].also { runSeriesInterleaving() }
+
+    override suspend fun insertSeriesIfAbsent(series: SeriesEntity) {
+        this.series.putIfAbsent(series.accountKey to series.id, series)
+        runSeriesInterleaving()
+    }
+
+    override suspend fun updateSeriesDetailColumns(
+        accountKey: String,
+        id: String,
+        coverUrl: String?,
+        plot: String?,
+        rating: String?,
+    ) {
+        series.computeIfPresent(accountKey to id) { _, row -> row.copy(coverUrl = coverUrl, plot = plot, rating = rating) }
+    }
+
+    /**
+     * One-shot hook run right *after* the first series-table read or detail insert — i.e. between
+     * the steps of a series detail write. A test sets it to a concurrent list write to pin one
+     * interleaving deterministically. It models statement order only: it cannot prove that
+     * [CatalogCacheDao.upsertSeriesDetail]'s Room transaction is atomic (see the instrumented
+     * `CatalogCacheDaoSeriesDetailTest` for the real database).
+     */
+    var seriesInterleaving: (suspend () -> Unit)? = null
+
+    private suspend fun runSeriesInterleaving() {
+        val hook = seriesInterleaving ?: return
+        seriesInterleaving = null
+        hook()
+    }
 
     override suspend fun clearSeries() {
         onGlobalClear?.invoke()

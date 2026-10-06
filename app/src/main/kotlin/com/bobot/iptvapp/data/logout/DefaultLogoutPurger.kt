@@ -19,6 +19,7 @@ class DefaultLogoutPurger @Inject constructor(
     private val activePlaybackStopper: ActivePlaybackStopper,
     private val logoutFinalizer: LogoutFinalizer,
     private val credentialsProvider: CredentialsProvider,
+    private val downloadedSubtitlePurger: DownloadedSubtitlePurger,
 ) : LogoutPurger {
 
     override suspend fun logOut() {
@@ -114,6 +115,9 @@ class DefaultLogoutPurger @Inject constructor(
         step("le vidage des caches catalogue et EPG") {
             localCachePurger.purgeCatalogAndEpgCaches()
         }
+        step("la suppression des sous-titres téléchargés") {
+            downloadedSubtitlePurger.purgeDownloadedSubtitles()
+        }
     }
 
     /**
@@ -129,10 +133,12 @@ class DefaultLogoutPurger @Inject constructor(
         val roomRows = localCachePurger.countDownloadResidue()
         val storageResidue = downloadStoragePurger.hasStorageResidue()
         val catalogRows = localCachePurger.countCatalogResidue()
+        val subtitleResidue = downloadedSubtitlePurger.hasResidue()
         return listOfNotNull(
             "$roomRows téléchargement(s) en base".takeIf { roomRows > 0 },
             "des fichiers de téléchargement".takeIf { storageResidue },
             "$catalogRows ligne(s) de catalogue".takeIf { catalogRows > 0 },
+            "des sous-titres téléchargés".takeIf { subtitleResidue },
         ).takeIf { it.isNotEmpty() }?.joinToString(" et ")
     }
 

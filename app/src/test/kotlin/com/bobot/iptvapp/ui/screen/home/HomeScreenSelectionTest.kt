@@ -54,10 +54,11 @@ class HomeScreenSelectionTest {
 
     @Test
     fun `normalizedCategorySelectionFor falls back to the first available category when selection is stale`() {
-        val uiState = HomeUiState(seriesRows = listOf(actionRow, dramaRow))
+        // Chaines: Films and Series fall back to their "Nouveautés" chip instead.
+        val uiState = HomeUiState(liveRows = listOf(actionRow, dramaRow))
 
         val selection = uiState.normalizedCategorySelectionFor(
-            tab = HomeTab.SERIES,
+            tab = HomeTab.LIVE,
             selectedCategoryId = "unknown",
         )
 
@@ -136,11 +137,11 @@ class HomeScreenSelectionTest {
     }
 
     @Test
-    fun `other catalog tabs never get a Nouveautes selection`() {
+    fun `Chaines never gets a Nouveautes selection`() {
         val uiState = HomeUiState(liveRows = listOf(actionRow), seriesRows = listOf(dramaRow))
 
         assertEquals("action", uiState.normalizedCategorySelectionFor(HomeTab.LIVE, NEW_RELEASES_CATEGORY_ID))
-        assertEquals("drama", uiState.normalizedCategorySelectionFor(HomeTab.SERIES, null))
+        assertEquals("action", uiState.normalizedCategorySelectionFor(HomeTab.LIVE, null))
     }
 
     @Test
@@ -222,5 +223,65 @@ class HomeScreenSelectionTest {
         // The chips stay: the previous categories and Nouveautés are still selectable.
         assertEquals(NEW_RELEASES_CATEGORY_ID, uiState.normalizedCategorySelectionFor(HomeTab.MOVIES, null))
         assertEquals("drama", uiState.normalizedCategorySelectionFor(HomeTab.MOVIES, "drama"))
+    }
+
+    // --- Series "Nouveautés" ---
+
+    private val firstSeries = HomeCardItem(id = "series-1", title = "Serie (2025)", imageUrl = null, contentType = ContentType.SERIES)
+    private val secondSeries = HomeCardItem(id = "series-2", title = "Serie Bis", imageUrl = null, contentType = ContentType.SERIES)
+    private val seriesActionRow = HomeRow(categoryId = "s-action", title = "Action", items = listOf(secondSeries))
+    private val seriesDramaRow = HomeRow(categoryId = "s-drama", title = "Drame", items = listOf(firstSeries))
+
+    private fun seriesState(
+        items: List<HomeCardItem> = listOf(firstSeries, secondSeries),
+        publishedLanguage: String? = null,
+        selectedLanguage: String? = null,
+        loadState: CatalogTabLoadState = CatalogTabLoadState.LOADED,
+        rows: List<HomeRow> = listOf(seriesActionRow, seriesDramaRow),
+        isFailed: Boolean = false,
+    ) = HomeUiState(
+        seriesRows = rows,
+        selectedSeriesLanguage = selectedLanguage,
+        catalogTabLoadStates = mapOf(ContentType.SERIES to loadState),
+        seriesNewReleases = NewReleasesState(language = publishedLanguage, items = items, hasMore = true, isFailed = isFailed),
+    )
+
+    @Test
+    fun `Series defaults to Nouveautes, also when the selection is stale or before any category`() {
+        assertEquals(NEW_RELEASES_CATEGORY_ID, seriesState().normalizedCategorySelectionFor(HomeTab.SERIES, null))
+        assertEquals(NEW_RELEASES_CATEGORY_ID, seriesState().normalizedCategorySelectionFor(HomeTab.SERIES, "unknown"))
+        assertEquals(NEW_RELEASES_CATEGORY_ID, HomeUiState().normalizedCategorySelectionFor(HomeTab.SERIES, null))
+        assertEquals("s-drama", seriesState().normalizedCategorySelectionFor(HomeTab.SERIES, "s-drama"))
+    }
+
+    @Test
+    fun `the series Nouveautes grid row shows the series page, never the films one`() {
+        val uiState = seriesState().copy(newReleases = NewReleasesState(items = listOf(newReleaseCard)))
+
+        val row = uiState.selectedCategoryRowFor(HomeTab.SERIES, NEW_RELEASES_CATEGORY_ID)
+
+        assertEquals(listOf(firstSeries, secondSeries), row?.items)
+        assertEquals(firstSeries, uiState.initialFocusItemFor(HomeTab.SERIES, NEW_RELEASES_CATEGORY_ID))
+        assertEquals(listOf(newReleaseCard), uiState.selectedCategoryRowFor(HomeTab.MOVIES, NEW_RELEASES_CATEGORY_ID)?.items)
+    }
+
+    @Test
+    fun `series cards of another language are hidden while the picked one is merged`() {
+        val uiState = seriesState(publishedLanguage = "FR", selectedLanguage = "EN")
+
+        assertTrue(uiState.isSeriesNewReleasesPending)
+        assertEquals(emptyList<HomeCardItem>(), uiState.selectedCategoryRowFor(HomeTab.SERIES, NEW_RELEASES_CATEGORY_ID)?.items)
+        assertNull(uiState.initialFocusItemFor(HomeTab.SERIES, NEW_RELEASES_CATEGORY_ID))
+        assertTrue(uiState.isSeriesNewReleasesWaiting())
+    }
+
+    @Test
+    fun `series Nouveautes waits while loading or indexing, and settles when empty or failed`() {
+        assertTrue(seriesState(items = emptyList(), loadState = CatalogTabLoadState.LOADING).isSeriesNewReleasesWaiting())
+        assertTrue(seriesState(items = emptyList()).isSeriesNewReleasesWaiting())
+        // Loaded, no row for the language: terminal empty state.
+        assertFalse(seriesState(items = emptyList(), rows = emptyList()).isSeriesNewReleasesWaiting())
+        // Failed reload with the previous rows still shown: terminal too.
+        assertFalse(seriesState(items = emptyList(), isFailed = true).isSeriesNewReleasesWaiting())
     }
 }

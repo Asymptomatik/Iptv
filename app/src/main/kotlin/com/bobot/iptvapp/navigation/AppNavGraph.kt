@@ -6,6 +6,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
+import com.bobot.iptvapp.domain.model.SubtitleSearchContext
 import com.bobot.iptvapp.ui.screen.DetailPlaceholderScreen
 import com.bobot.iptvapp.ui.screen.downloads.DownloadsScreen
 import com.bobot.iptvapp.ui.screen.home.HomeScreen
@@ -94,10 +95,10 @@ fun AppNavGraph(
                 onNavigateToDetail = { type, id ->
                     navController.navigate(Detail(contentType = type, contentId = id))
                 },
-                onNavigateToPlayer = { url, id ->
+                onNavigateToPlayer = { url, id, subtitleSearchContext ->
                     // Task 23: "Reprendre" (Continue Watching) cards resume playback directly,
                     // bypassing the Detail screen — see HomeScreen KDoc "Navigation".
-                    navController.navigate(Player(streamUrl = url, streamId = id))
+                    navController.navigate(Player(url, id, subtitleSearchContext))
                 },
                 onNavigateToSearch = {
                     navController.navigate(Search)
@@ -115,8 +116,8 @@ fun AppNavGraph(
         composable<Downloads> {
             DownloadsScreen(
                 onNavigateBack = { navController.popBackStack() },
-                onPlay = { url, id ->
-                    navController.navigate(Player(streamUrl = url, streamId = id))
+                onPlay = { url, id, subtitleSearchContext ->
+                    navController.navigate(Player(url, id, subtitleSearchContext))
                 },
             )
         }
@@ -128,6 +129,11 @@ fun AppNavGraph(
         // `contentType` values, not a real destination for any of the three known types.
         composable<Detail> { backStackEntry ->
             val route = backStackEntry.toRoute<Detail>()
+            // Movies and episodes hand over a subtitle search context; live channels and the
+            // defensive fallback have nothing to search subtitles for and keep the bare route.
+            val onNavigateToVodPlayer: (String, String, SubtitleSearchContext?) -> Unit = { url, id, context ->
+                navController.navigate(Player(url, id, context))
+            }
             val onNavigateToPlayer: (String, String) -> Unit = { url, id ->
                 navController.navigate(Player(streamUrl = url, streamId = id))
             }
@@ -135,12 +141,12 @@ fun AppNavGraph(
             when (route.contentType) {
                 "movie" -> MovieDetailScreen(
                     movieId            = route.contentId,
-                    onNavigateToPlayer = onNavigateToPlayer,
+                    onNavigateToPlayer = onNavigateToVodPlayer,
                 )
 
                 "series" -> SeriesDetailScreen(
                     seriesId           = route.contentId,
-                    onNavigateToPlayer = onNavigateToPlayer,
+                    onNavigateToPlayer = onNavigateToVodPlayer,
                 )
 
                 "live" -> LiveDetailScreen(
@@ -168,6 +174,7 @@ fun AppNavGraph(
             PlayerScreen(
                 streamUrl      = route.streamUrl,
                 streamId       = route.streamId,
+                subtitleSearchContext = route.subtitleSearchContext(),
                 onNavigateBack = { navController.popBackStack() },
             )
         }

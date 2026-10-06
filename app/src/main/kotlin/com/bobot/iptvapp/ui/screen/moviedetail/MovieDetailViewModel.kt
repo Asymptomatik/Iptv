@@ -11,12 +11,14 @@ import com.bobot.iptvapp.domain.model.DownloadRequestData
 import com.bobot.iptvapp.domain.model.DownloadRequestId
 import com.bobot.iptvapp.domain.model.Movie
 import com.bobot.iptvapp.domain.model.OfflineDownload
+import com.bobot.iptvapp.domain.model.SubtitleSearchContext
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.repository.DownloadRepository
 import com.bobot.iptvapp.domain.repository.FavoritesRepository
 import com.bobot.iptvapp.domain.repository.PlaybackProgressRepository
 import com.bobot.iptvapp.domain.util.Resource
 import com.bobot.iptvapp.domain.util.displayTitle
+import com.bobot.iptvapp.domain.util.subtitleSearchContext
 import com.bobot.iptvapp.ui.util.DOWNLOAD_REFUSED_MESSAGE
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
@@ -67,7 +69,11 @@ data class MovieDetailUiState(
     val streamUrl: String? = null,
     val download: OfflineDownload? = null,
     val downloadMessage: String? = null,
-)
+) {
+    /** What the player needs for an online subtitle search, or `null` before [movie] loads. */
+    val subtitleSearchContext: SubtitleSearchContext?
+        get() = movie?.subtitleSearchContext()
+}
 
 /**
  * Hilt ViewModel driving [MovieDetailScreen] (Task 18) — follows the `@HiltViewModel` +

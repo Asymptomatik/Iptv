@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -69,6 +70,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.bobot.iptvapp.domain.model.SubtitleSearchContext
+import com.bobot.iptvapp.ui.components.DownloadMessageBanner
 import com.bobot.iptvapp.ui.components.GhostButton
 import com.bobot.iptvapp.ui.components.GlassSurface
 import com.bobot.iptvapp.ui.components.PrimaryButton
@@ -101,6 +104,8 @@ private const val CONTROLS_AUTO_HIDE_DELAY_MS = 5_000L
  *
  * @param streamUrl        Direct-play/HLS URL to play.
  * @param streamId         Xtream Codes stream/episode identifier.
+ * @param subtitleSearchContext Optional metadata for an online subtitle search, decoded from the
+ *                         route; `null` for live channels and routes that carried none.
  * @param onNavigateBack   Called when the user presses "Retour" on the error overlay.
  */
 @Composable
@@ -108,13 +113,18 @@ fun PlayerScreen(
     streamUrl: String,
     streamId: String,
     onNavigateBack: () -> Unit,
+    subtitleSearchContext: SubtitleSearchContext? = null,
     modifier: Modifier = Modifier,
     viewModel: PlayerViewModel = hiltViewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
     LaunchedEffect(streamUrl, streamId) {
-        viewModel.initialize(streamUrl = streamUrl, streamId = streamId)
+        viewModel.initialize(
+            streamUrl = streamUrl,
+            streamId = streamId,
+            subtitleSearchContext = subtitleSearchContext,
+        )
     }
 
     DisposableEffect(Unit) {
@@ -214,20 +224,56 @@ fun PlayerScreen(
     // auto-hide below: a panel that vanished mid-choice would be unusable.
     var trackSelectorVisible by remember { mutableStateOf(false) }
 
-    BackHandler(enabled = trackSelectorVisible) {
+    // Online subtitle search: a sub-view of the selector, swapped in its place while
+    // `onlineSubtitles.isPanelOpen` (ViewModel state, so a search in flight is cancelled with the
+    // panel — see PlayerViewModel.closeOnlineSubtitleSearch). Never available on a live channel.
+    val online = uiState.onlineSubtitles
+    val searchPanelVisible = online.isAvailable && online.isPanelOpen
+    val anyPanelVisible = trackSelectorVisible || searchPanelVisible
+    // Set once the user has been into the search, so coming back lands the D-pad on the row
+    // that opened it rather than at the top of the track list.
+    var returnedFromSearch by remember { mutableStateOf(false) }
+    // Set when the panels close, so the D-pad lands back on the CC button that opened them — the
+    // row holding the focus is gone with the panel. Cleared by the button once honoured.
+    var refocusTracksButton by remember { mutableStateOf(false) }
+
+    val closeOnlineSearch: () -> Unit = {
+        // The user has seen a failed pick's message by now; carrying it out of the panel would
+        // re-show it as a banner over the video.
+        viewModel.dismissOnlineSubtitleError()
+        viewModel.closeOnlineSubtitleSearch()
+    }
+    val closePanels: () -> Unit = {
+        if (searchPanelVisible) closeOnlineSearch()
         trackSelectorVisible = false
+        returnedFromSearch = false
+        refocusTracksButton = true
     }
 
-    // Reading `trackSelectorVisible` as a key (not just in the condition) is what makes closing
-    // the panel restart the timer instead of leaving the controls pinned open.
+    // BACK walks the panels one level at a time: search → track list → player. Disabled behind
+    // the error overlay, which hides both panels and must leave BACK to leave the player.
+    BackHandler(enabled = anyPanelVisible && !uiState.hasError) {
+        if (searchPanelVisible) {
+            closeOnlineSearch()
+            trackSelectorVisible = true
+            returnedFromSearch = true
+        } else {
+            closePanels()
+        }
+    }
+
+    // Reading `anyPanelVisible` as a key (not just in the condition) is what makes closing the
+    // panel restart the timer instead of leaving the controls pinned open. Covers the search
+    // panel too: results that vanished mid-reading, or a download that finished behind hidden
+    // controls, would be just as unusable.
     LaunchedEffect(
         uiState.isPlaying,
         uiState.isBuffering,
         uiState.hasError,
-        trackSelectorVisible,
+        anyPanelVisible,
         interactionTrigger,
     ) {
-        if (uiState.isPlaying && !uiState.isBuffering && !uiState.hasError && !trackSelectorVisible) {
+        if (uiState.isPlaying && !uiState.isBuffering && !uiState.hasError && !anyPanelVisible) {
             delay(CONTROLS_AUTO_HIDE_DELAY_MS)
             controlsVisible = false
         }
@@ -283,10 +329,10 @@ fun PlayerScreen(
                     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                 }
             },
-            update = { playerView ->
-                val exoPlayer: ExoCommonPlayer = viewModel.player
-                playerView.player = exoPlayer
-            },
+            // `null` once the screen is released or a logout revoked its session: the view is
+            // detached from the stopped player rather than handed a fresh one (see
+            // PlayerViewModel.player).
+            update = { playerView -> playerView.player = viewModel.player },
             onRelease = { playerView -> playerView.player = null },
         )
 
@@ -308,7 +354,7 @@ fun PlayerScreen(
             // to touch, so tap-to-hide still reaches the root Box underneath. It is also skipped
             // while the track selector is open, which brings its own, heavier scrim.
             AnimatedVisibility(
-                visible = controlsVisible && !trackSelectorVisible,
+                visible = controlsVisible && !anyPanelVisible,
                 enter = fadeIn(),
                 exit = fadeOut(),
                 modifier = Modifier.matchParentSize(),
@@ -327,7 +373,7 @@ fun PlayerScreen(
             // underneath it — the D-pad would walk straight out of the panel onto invisible
             // controls, which is the very trap the selector is meant to avoid.
             AnimatedVisibility(
-                visible = controlsVisible && !uiState.isBuffering && !trackSelectorVisible,
+                visible = controlsVisible && !uiState.isBuffering && !anyPanelVisible,
                 modifier = Modifier.align(Alignment.Center),
             ) {
                 PlayerCenterControls(
@@ -346,7 +392,7 @@ fun PlayerScreen(
             // subtitle leaves the band below it clear. Phones keep the bar on the edge: there is
             // far less height to give away, and the burned-in band is proportionally smaller.
             AnimatedVisibility(
-                visible = controlsVisible && !trackSelectorVisible,
+                visible = controlsVisible && !anyPanelVisible,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
@@ -366,25 +412,59 @@ fun PlayerScreen(
                     },
                     onOpenTrackSelector = {
                         onUserInteracted()
+                        returnedFromSearch = false
+                        refocusTracksButton = false
                         trackSelectorVisible = true
                     },
+                    focusTracksButton = refocusTracksButton,
+                    onTracksButtonFocused = { refocusTracksButton = false },
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
 
-            if (trackSelectorVisible) {
+            if (anyPanelVisible) {
                 // Dismiss scrim. Tap-detection rather than `clickable` for the same reason as the
                 // root surface above: a focusable full-screen node would swallow the D-pad before
-                // the panel ever saw it.
+                // the panel ever saw it. A tap outside closes both panels at once — touch has no
+                // reason to walk back one level the way BACK does. Keyed on which panel shows, so
+                // the detector never runs a `closePanels` captured for the other one.
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(Color.Black.copy(alpha = 0.55f))
-                        .pointerInput(Unit) {
-                            detectTapGestures(onTap = { trackSelectorVisible = false })
+                        .pointerInput(searchPanelVisible) {
+                            detectTapGestures(onTap = { closePanels() })
                         },
                 )
+            }
 
+            if (searchPanelVisible) {
+                OnlineSubtitleSearchPanel(
+                    state = online,
+                    context = subtitleSearchContext,
+                    onBack = {
+                        onUserInteracted()
+                        closeOnlineSearch()
+                        trackSelectorVisible = true
+                        returnedFromSearch = true
+                    },
+                    onRetry = {
+                        onUserInteracted()
+                        viewModel.retryOnlineSubtitleSearch()
+                    },
+                    onSelect = { subtitle ->
+                        onUserInteracted()
+                        viewModel.selectOnlineSubtitle(subtitle)
+                    },
+                    onDismissError = {
+                        onUserInteracted()
+                        viewModel.dismissOnlineSubtitleError()
+                    },
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .padding(Spacing.lg),
+                )
+            } else if (trackSelectorVisible) {
                 PlayerTrackSelectorPanel(
                     audioTracks = uiState.audioTracks,
                     subtitleTracks = uiState.subtitleTracks,
@@ -400,9 +480,27 @@ fun PlayerScreen(
                         onUserInteracted()
                         viewModel.disableSubtitles()
                     },
+                    onlineSearchAvailable = online.isAvailable,
+                    onOpenOnlineSearch = {
+                        onUserInteracted()
+                        viewModel.openOnlineSubtitleSearch()
+                    },
+                    focusOnlineSearchRow = returnedFromSearch,
                     modifier = Modifier
                         .align(Alignment.Center)
                         .padding(Spacing.lg),
+                )
+            }
+
+            // A pick that failed after its panel was closed: shown over the video, informational
+            // only, gone on its own (see DownloadMessageBanner) — the video never stopped.
+            if (!searchPanelVisible) {
+                DownloadMessageBanner(
+                    message = online.applyError,
+                    onShown = viewModel::dismissOnlineSubtitleError,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .widthIn(max = 480.dp),
                 )
             }
         }
@@ -435,8 +533,11 @@ fun PlayerScreen(
  * content description (see [PlayerOrientationToggleButton]).
  * @param onToggleOrientation Invoked when the orientation button is pressed.
  * @param onOpenTrackSelector Invoked when the "CC" button is pressed. That button only renders
- * when [hasSelectableTracks] holds for [uiState]'s tracks, so this is never called for a stream
- * with nothing to choose from.
+ * when [shouldShowTracksButton] holds for [uiState], so this is never called for a stream with
+ * nothing to choose from and no online search to offer.
+ * @param focusTracksButton Whether that button should take the focus when it (re)appears — set
+ * when the track panels close (see [PlayerTracksButton]'s `takeFocus`).
+ * @param onTracksButtonFocused Invoked once that request has been honoured.
  */
 @Composable
 private fun PlayerControlsOverlay(
@@ -450,6 +551,8 @@ private fun PlayerControlsOverlay(
     onToggleOrientation: () -> Unit,
     onOpenTrackSelector: () -> Unit,
     modifier: Modifier = Modifier,
+    focusTracksButton: Boolean = false,
+    onTracksButtonFocused: () -> Unit = {},
 ) {
     var dragPositionMs by remember { mutableStateOf<Long?>(null) }
     val displayedPositionMs = dragPositionMs ?: uiState.currentPositionMs
@@ -555,11 +658,21 @@ private fun PlayerControlsOverlay(
                     }
                 }
 
-                // Right zone — audio/subtitle selector, shown only when the stream actually
-                // offers a choice (see hasSelectableTracks).
+                // Right zone — audio/subtitle selector, shown when the stream offers a choice or
+                // an online subtitle search can bring one (see shouldShowTracksButton).
                 Box(modifier = Modifier) {
-                    if (hasSelectableTracks(uiState.audioTracks, uiState.subtitleTracks)) {
-                        PlayerTracksButton(onClick = onOpenTrackSelector)
+                    if (
+                        shouldShowTracksButton(
+                            audioTracks = uiState.audioTracks,
+                            subtitleTracks = uiState.subtitleTracks,
+                            onlineSearchAvailable = uiState.onlineSubtitles.isAvailable,
+                        )
+                    ) {
+                        PlayerTracksButton(
+                            onClick = onOpenTrackSelector,
+                            takeFocus = focusTracksButton,
+                            onFocusTaken = onTracksButtonFocused,
+                        )
                     }
                 }
             }

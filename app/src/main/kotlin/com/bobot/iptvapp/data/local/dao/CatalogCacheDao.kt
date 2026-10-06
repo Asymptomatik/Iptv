@@ -1,7 +1,10 @@
 package com.bobot.iptvapp.data.local.dao
 
 import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Upsert
 import com.bobot.iptvapp.data.local.entity.CatalogSyncEntity
 import com.bobot.iptvapp.data.local.entity.CategoryEntity
@@ -194,6 +197,35 @@ interface CatalogCacheDao {
      */
     @Query("SELECT * FROM series WHERE accountKey = :accountKey AND id = :id LIMIT 1")
     suspend fun getSeriesById(accountKey: String, id: String): SeriesEntity?
+
+    /**
+     * Writes a series as read by its **detail** call (`get_series_info`), without ever overwriting
+     * the title, year and category a list call (`get_series`) cached for it.
+     *
+     * Those three fields drive the Series "Nouveautés" order and the category rows read back from
+     * Room on a cold start; the detail's may differ, and its `category_id` may be absent. Cover,
+     * plot and rating are refreshed from the detail.
+     *
+     * The merge happens *in SQL, at write time* — never from a row read beforehand in Kotlin — so a
+     * list write landing concurrently can't be overwritten by a stale snapshot: an existing row is
+     * only `UPDATE`d on the detail columns, and an absent one inserted with `OR IGNORE`, which keeps
+     * a list row inserted meanwhile. The transaction makes the pair a single write; each statement
+     * alone already leaves list-owned columns to the list. (`INSERT … ON CONFLICT DO UPDATE` would
+     * be one statement but needs SQLite 3.24, i.e. API 30, above this app's minSdk.)
+     */
+    @Transaction
+    suspend fun upsertSeriesDetail(series: SeriesEntity) {
+        insertSeriesIfAbsent(series)
+        updateSeriesDetailColumns(series.accountKey, series.id, series.coverUrl, series.plot, series.rating)
+    }
+
+    /** First half of [upsertSeriesDetail]: inserts [series] unless the row already exists. */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertSeriesIfAbsent(series: SeriesEntity)
+
+    /** Second half of [upsertSeriesDetail]: refreshes only the columns the detail call owns. */
+    @Query("UPDATE series SET coverUrl = :coverUrl, plot = :plot, rating = :rating WHERE accountKey = :accountKey AND id = :id")
+    suspend fun updateSeriesDetailColumns(accountKey: String, id: String, coverUrl: String?, plot: String?, rating: String?)
 
     /** Deletes all series metadata rows, across every account. */
     @Query("DELETE FROM series")

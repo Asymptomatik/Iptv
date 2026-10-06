@@ -181,7 +181,13 @@ class HomeMovieSortTest {
 
         openTab("Series")
         composeTestRule.onNodeWithTag(MOVIE_SORT_CONTROL_TEST_TAG).assertDoesNotExist()
-        composeTestRule.onNode(hasText(NEW_RELEASES_LABEL) and hasClickAction()).assertDoesNotExist()
+        // Series has its own "Nouveautés" chip and order label (series-date-sort), never the Films
+        // control — the only Nouveautés chip on screen is under the Series category selector.
+        composeTestRule
+            .onNode(hasText(NEW_RELEASES_LABEL) and hasClickAction() and hasAnyAncestor(hasTestTag("category-selector-series")))
+            .assertExists()
+        categoryChip(NEW_RELEASES_LABEL).assertDoesNotExist()
+        composeTestRule.onNodeWithTag(SERIES_SORT_CONTROL_TEST_TAG).assertExists()
     }
 
     @Test

@@ -205,6 +205,8 @@ class DefaultLogoutPurgerTest {
     private val recordingPlaybackStopper = RecordingActivePlaybackStopper()
     private val recordingFinalizer = RecordingLogoutFinalizer()
 
+    private val downloadedSubtitles = FakeDownloadedSubtitlePurger(onPurge = { journal += "online-subtitles" })
+
     private val purger = DefaultLogoutPurger(
         markerStore = RecordingMarkerStore(markerStore),
         downloadStoragePurger = recordingStoragePurger,
@@ -213,6 +215,7 @@ class DefaultLogoutPurgerTest {
         activePlaybackStopper = recordingPlaybackStopper,
         logoutFinalizer = recordingFinalizer,
         credentialsProvider = RecordingCredentialsProvider(credentials),
+        downloadedSubtitlePurger = downloadedSubtitles,
     )
 
     private fun download(id: String) = DownloadEntity(
@@ -257,6 +260,7 @@ class DefaultLogoutPurgerTest {
                     "media3-cache",
                     "room-downloads",
                     "room-catalog-epg",
+                    "online-subtitles",
                     "finalize",
                 ),
                 journal,
@@ -313,6 +317,49 @@ class DefaultLogoutPurgerTest {
         assertEquals(emptyList<DownloadEntity>(), downloadDao.currentRows)
         assertFalse(markerStore.pending)
     }
+
+    // ── Downloaded online subtitles ───────────────────────────────────────────
+    //
+    // A subtitle fetched for a title says what was watched on this account, so it does not
+    // outlive the session any more than the downloads index does.
+
+    @Test
+    fun `logging out deletes the downloaded online subtitles`() = runTest(testDispatcher) {
+        seedAccountAWithDownloads()
+        downloadedSubtitles.files += "opensubtitles-222-fr.srt"
+
+        purger.logOut()
+
+        assertTrue(downloadedSubtitles.files.isEmpty())
+        assertFalse(markerStore.pending)
+    }
+
+    @Test
+    fun `a subtitle written back behind the purge is caught before the marker goes`() =
+        runTest(testDispatcher) {
+            seedAccountAWithDownloads()
+            downloadedSubtitles.resurrectOnPurgeCount = 1
+
+            purger.logOut()
+
+            assertTrue(downloadedSubtitles.files.isEmpty())
+            assertEquals(2, journal.count { it == "online-subtitles" })
+            assertFalse(markerStore.pending)
+        }
+
+    @Test
+    fun `a subtitle purge that fails keeps the purge pending and the credentials intact`() =
+        runTest(testDispatcher) {
+            seedAccountAWithDownloads()
+            downloadedSubtitles.files += "opensubtitles-222-fr.srt"
+            downloadedSubtitles.failWith = java.io.IOException("stockage indisponible")
+
+            val thrown = runCatching { purger.logOut() }.exceptionOrNull()
+
+            assertTrue("attendu: LogoutPurgeException, obtenu: $thrown", thrown is LogoutPurgeException)
+            assertTrue(markerStore.pending)
+            assertNotNull(credentials.getCredentials())
+        }
 
     // ── Failure and retry ─────────────────────────────────────────────────────
 
@@ -417,6 +464,7 @@ class DefaultLogoutPurgerTest {
             activePlaybackStopper = RecordingActivePlaybackStopper(),
             logoutFinalizer = RecordingLogoutFinalizer(),
             credentialsProvider = RecordingCredentialsProvider(credentials),
+            downloadedSubtitlePurger = FakeDownloadedSubtitlePurger(),
         )
 
         assertTrue(purgerOverResidue.recoverIfNeeded())

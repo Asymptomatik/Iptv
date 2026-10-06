@@ -36,7 +36,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.bobot.iptvapp.domain.model.DownloadState
 import com.bobot.iptvapp.domain.model.OfflineDownload
+import com.bobot.iptvapp.domain.model.SubtitleSearchContext
 import com.bobot.iptvapp.domain.util.StreamTitle
+import com.bobot.iptvapp.domain.util.subtitleSearchContext
 import com.bobot.iptvapp.ui.components.DownloadMessageBanner
 import com.bobot.iptvapp.ui.components.FocusableTextButton
 import com.bobot.iptvapp.ui.components.GhostButton
@@ -60,7 +62,7 @@ import com.bobot.iptvapp.ui.theme.LayoutDimens
 @Composable
 fun DownloadsScreen(
     onNavigateBack: () -> Unit,
-    onPlay: (streamUrl: String, streamId: String) -> Unit,
+    onPlay: (streamUrl: String, streamId: String, subtitleSearchContext: SubtitleSearchContext?) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: DownloadsViewModel = hiltViewModel(),
 ) {
@@ -81,7 +83,7 @@ fun DownloadsScreen(
 internal fun DownloadsContent(
     uiState: DownloadsUiState,
     onNavigateBack: () -> Unit,
-    onPlay: (streamUrl: String, streamId: String) -> Unit,
+    onPlay: (streamUrl: String, streamId: String, subtitleSearchContext: SubtitleSearchContext?) -> Unit,
     onPause: (String) -> Unit,
     onResume: (String) -> Unit,
     onRemove: (String) -> Unit,
@@ -162,7 +164,7 @@ internal fun DownloadsContent(
 @Composable
 private fun DownloadCard(
     download: OfflineDownload,
-    onPlay: (streamUrl: String, streamId: String) -> Unit,
+    onPlay: (streamUrl: String, streamId: String, subtitleSearchContext: SubtitleSearchContext?) -> Unit,
     onPause: (String) -> Unit,
     onResume: (String) -> Unit,
     onRemove: (String) -> Unit,
@@ -228,7 +230,7 @@ private fun DownloadCard(
 @Composable
 private fun DownloadActions(
     download: OfflineDownload,
-    onPlay: (streamUrl: String, streamId: String) -> Unit,
+    onPlay: (streamUrl: String, streamId: String, subtitleSearchContext: SubtitleSearchContext?) -> Unit,
     onPause: (String) -> Unit,
     onResume: (String) -> Unit,
     onRemove: (String) -> Unit,
@@ -247,7 +249,7 @@ private fun DownloadActions(
             DownloadState.COMPLETED -> {
                 GhostButton(
                     label = "Lire",
-                    onClick = { onPlay(download.streamUrl, download.contentId) },
+                    onClick = { onPlay(download.streamUrl, download.contentId, download.subtitleSearchContext()) },
                 )
             }
 

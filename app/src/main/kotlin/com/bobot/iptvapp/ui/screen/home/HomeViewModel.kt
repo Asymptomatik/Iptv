@@ -13,6 +13,7 @@ import com.bobot.iptvapp.domain.model.Episode
 import com.bobot.iptvapp.domain.model.LanguageFilterState
 import com.bobot.iptvapp.domain.model.Movie
 import com.bobot.iptvapp.domain.model.Series
+import com.bobot.iptvapp.domain.model.SubtitleSearchContext
 import com.bobot.iptvapp.domain.model.XtreamCredentials
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.repository.FavoritesRepository
@@ -23,6 +24,7 @@ import com.bobot.iptvapp.domain.util.MovieSortMode
 import com.bobot.iptvapp.domain.util.displayName
 import com.bobot.iptvapp.domain.util.displayTitle
 import com.bobot.iptvapp.domain.util.languageTag
+import com.bobot.iptvapp.domain.util.subtitleSearchContext
 import com.bobot.iptvapp.domain.util.Resource
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
@@ -67,6 +69,8 @@ import javax.inject.Inject
  *                          [com.bobot.iptvapp.navigation.Detail] — Continue Watching cards resume
  *                          playback immediately on click, matching Netflix-style behavior, rather
  *                          than opening a detail page first.
+ * @property subtitleSearchContext Set alongside [resumeStreamUrl] and forwarded with it to
+ *                          [com.bobot.iptvapp.navigation.Player]; `null` on every other card.
  */
 data class HomeCardItem(
     val id: String,
@@ -74,6 +78,7 @@ data class HomeCardItem(
     val imageUrl: String?,
     val contentType: ContentType,
     val resumeStreamUrl: String? = null,
+    val subtitleSearchContext: SubtitleSearchContext? = null,
 )
 
 /**
@@ -191,6 +196,10 @@ private data class HomeSectionResources(
  * @property selectedMovieSortMode The "Nouveautés" order the user picked, published as soon as it
  *                            is picked — [newReleases] catches up off the main thread, see
  *                            [isNewReleasesPending].
+ * @property seriesNewReleases The Series tab's "Nouveautés" view, always in
+ *                            [MovieSortMode.RECENT_RELEASE] ("Sortie récente", the only order offered
+ *                            for series) — see [HomeViewModel] KDoc "Nouveautés". Empty until the
+ *                            Series tab is opened.
  */
 /**
  * Where one catalog tab ([ContentType.LIVE] / [ContentType.MOVIE] / [ContentType.SERIES]) stands in
@@ -234,6 +243,7 @@ data class HomeUiState(
     val catalogTabLoadStates: Map<ContentType, CatalogTabLoadState> = emptyMap(),
     val newReleases: NewReleasesState = NewReleasesState(),
     val selectedMovieSortMode: MovieSortMode = MovieSortMode.RECENT_RELEASE,
+    val seriesNewReleases: NewReleasesState = NewReleasesState(),
 ) {
     /**
      * `true` between a new order or language being picked and [newReleases] being recomputed for
@@ -249,6 +259,14 @@ data class HomeUiState(
      */
     val isNewReleasesLoading: Boolean
         get() = catalogTabLoadStates[ContentType.MOVIE] == CatalogTabLoadState.LOADING
+
+    /** Series equivalent of [isNewReleasesPending] — a single order, so only the language can lag. */
+    val isSeriesNewReleasesPending: Boolean
+        get() = seriesNewReleases.language != selectedSeriesLanguage
+
+    /** Series equivalent of [isNewReleasesLoading]. */
+    val isSeriesNewReleasesLoading: Boolean
+        get() = catalogTabLoadStates[ContentType.SERIES] == CatalogTabLoadState.LOADING
 
     /** `true` once at least one row exists in any section — used to pick which visual state to render. */
     val hasAnyRows: Boolean
@@ -504,6 +522,13 @@ data class HomeUiState(
  *    fresh index in the new job. The old job is cancelled and a result stamped with an older
  *    generation is dropped, so [onRetry] can never publish a card from the previous catalogue.
  *
+ * The Series tab gets the same view, [HomeUiState.seriesNewReleases], built the same way by
+ * [collectSeriesNewReleases] over [seriesState] with a [SeriesDiscoveryIndex], with one order only
+ * — release year descending ([SeriesReleaseYear]: title year first, then the list call's
+ * `releaseDate` year when plausible). No `get_series_info` is made, and the key is built from the
+ * list snapshot, so opening a series never moves it. Series have no added date: `last_modified` is
+ * not one, so no "Ajout récent" order is offered.
+ *
  * @param catalogRepository Read access to categories and content lists for all three content types.
  * @param favoritesRepository Read access to the active profile's favorites list.
  * @param playbackProgressRepository Read access to the active profile's Continue Watching history.
@@ -593,6 +618,15 @@ class HomeViewModel @Inject constructor(
 
     /** Bumped by every MOVIE (re)load; only the current generation may publish "Nouveautés". Main thread only. */
     private var newReleasesGeneration = 0
+
+    /** Cards the Series "Nouveautés" view is asked for; reset to one page by a language change or a reload. */
+    private val seriesNewReleasesLimit = MutableStateFlow(NEW_RELEASES_PAGE_SIZE)
+
+    /** The Series categories of the current load, as resolved by [loadCategoryScopedCatalogUseCase]. */
+    private val seriesCategoriesState = MutableStateFlow<List<Category>>(emptyList())
+
+    /** Bumped by every SERIES (re)load; only the current generation may publish. Main thread only. */
+    private var seriesNewReleasesGeneration = 0
 
     // ── Per-tab language filter state — see class KDoc "Per-tab language filter" ─────────────────
 
@@ -836,6 +870,7 @@ class HomeViewModel @Inject constructor(
             // Another language is another list: "Nouveautés" goes back to its first page.
             newReleasesQuery.update { it.copy(limit = NEW_RELEASES_PAGE_SIZE) }
         }
+        if (contentType == ContentType.SERIES) seriesNewReleasesLimit.value = NEW_RELEASES_PAGE_SIZE
         when (contentType) {
             ContentType.LIVE -> liveLanguageFilterState.update { it.withSelection(language) }
             ContentType.MOVIE -> movieLanguageFilterState.update { it.withSelection(language) }
@@ -870,6 +905,14 @@ class HomeViewModel @Inject constructor(
             return
         }
         newReleasesQuery.update { it.copy(limit = maxOf(it.limit, published.items.size + NEW_RELEASES_PAGE_SIZE)) }
+    }
+
+    /** Series equivalent of [onLoadMoreNewReleases]; only the language can make the published page stale. */
+    fun onLoadMoreSeriesNewReleases() {
+        val published = _uiState.value.seriesNewReleases
+        if (!published.hasMore) return
+        if (published.language != seriesLanguageFilterState.value.selected) return
+        seriesNewReleasesLimit.update { maxOf(it, published.items.size + NEW_RELEASES_PAGE_SIZE) }
     }
 
     /**
@@ -916,7 +959,9 @@ class HomeViewModel @Inject constructor(
         // and the first state emission would flash the empty state (QA finding M3).
         markCatalogTabLoadState(contentType, CatalogTabLoadState.LOADING)
         if (contentType == ContentType.MOVIE) resetNewReleases()
+        if (contentType == ContentType.SERIES) resetSeriesNewReleases()
         val newReleasesGeneration = newReleasesGeneration
+        val seriesNewReleasesGeneration = seriesNewReleasesGeneration
         catalogTabJobs[contentType] = viewModelScope.launch {
             when (contentType) {
                 ContentType.LIVE -> loadCatalogTab(
@@ -949,18 +994,22 @@ class HomeViewModel @Inject constructor(
                     )
                 }
 
-                ContentType.SERIES -> loadCatalogTab(
-                    contentType = ContentType.SERIES,
-                    categoriesFlow = catalogRepository.observeSeriesCategories(),
-                    itemsState = seriesState,
-                    rowsState = seriesRowsState,
-                    languageFilterState = seriesLanguageFilterState,
-                    categoryIdOf = Series::categoryId,
-                    toCard = { series: Series -> toCardItem(series) },
-                    fetchCategoryItems = { categoryId ->
-                        catalogRepository.getSeriesList(categoryId).first { it !is Resource.Loading }
-                    },
-                )
+                ContentType.SERIES -> {
+                    launch { collectSeriesNewReleases(seriesNewReleasesGeneration) }
+                    loadCatalogTab(
+                        contentType = ContentType.SERIES,
+                        categoriesFlow = catalogRepository.observeSeriesCategories(),
+                        itemsState = seriesState,
+                        rowsState = seriesRowsState,
+                        languageFilterState = seriesLanguageFilterState,
+                        categoryIdOf = Series::categoryId,
+                        toCard = { series: Series -> toCardItem(series) },
+                        fetchCategoryItems = { categoryId ->
+                            catalogRepository.getSeriesList(categoryId).first { it !is Resource.Loading }
+                        },
+                        onCategoriesResolved = { seriesCategoriesState.value = it },
+                    )
+                }
             }
         }
     }
@@ -1095,6 +1144,44 @@ class HomeViewModel @Inject constructor(
             .flowOn(defaultDispatcher)
             .collect { state ->
                 if (generation == newReleasesGeneration) _uiState.update { it.copy(newReleases = state) }
+            }
+    }
+
+    /** Series equivalent of [resetNewReleases]. */
+    private fun resetSeriesNewReleases() {
+        seriesNewReleasesGeneration++
+        seriesCategoriesState.value = emptyList()
+        seriesNewReleasesLimit.value = NEW_RELEASES_PAGE_SIZE
+        _uiState.update { it.copy(seriesNewReleases = NewReleasesState()) }
+    }
+
+    /** Series equivalent of [collectNewReleases], over [seriesState] with a [SeriesDiscoveryIndex]. */
+    private suspend fun collectSeriesNewReleases(generation: Int) {
+        val index = SeriesDiscoveryIndex(
+            // Same bound as the films': an announced series may carry next year.
+            latestPlausibleYear = Calendar.getInstance().get(Calendar.YEAR) + 1,
+            toCard = { series: Series -> toCardItem(series) },
+        )
+        combine(
+            seriesState,
+            seriesCategoriesState,
+            seriesLanguageFilterState.map { it.selected }.distinctUntilChanged(),
+            seriesNewReleasesLimit,
+        ) { seriesResource, categories, selectedLanguage, limit ->
+            if (seriesResource is Resource.Error) {
+                return@combine NewReleasesState(language = selectedLanguage, isFailed = true)
+            }
+            val series = (seriesResource as? Resource.Success)?.data ?: return@combine null
+            index.ingest(series)
+            val categoryIds = filterCatalogByLanguageUseCase.filterCategories(categories, selectedLanguage).map { it.id }
+            val page = index.page(categoryIds, limit)
+            NewReleasesState(language = selectedLanguage, items = page.items, hasMore = page.hasMore)
+        }
+            .filterNotNull()
+            .distinctUntilChanged()
+            .flowOn(defaultDispatcher)
+            .collect { state ->
+                if (generation == seriesNewReleasesGeneration) _uiState.update { it.copy(seriesNewReleases = state) }
             }
     }
 
@@ -1586,6 +1673,7 @@ class HomeViewModel @Inject constructor(
             imageUrl = movie.posterUrl,
             contentType = ContentType.MOVIE,
             resumeStreamUrl = streamUrl,
+            subtitleSearchContext = movie.subtitleSearchContext(),
         )
     }
 
@@ -1608,6 +1696,8 @@ class HomeViewModel @Inject constructor(
             imageUrl = series.coverUrl,
             contentType = ContentType.SERIES,
             resumeStreamUrl = streamUrl,
+            // The card shows the series, but subtitles must match the episode being resumed.
+            subtitleSearchContext = episode.subtitleSearchContext(series),
         )
     }
 }

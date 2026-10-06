@@ -10,6 +10,7 @@ import com.bobot.iptvapp.domain.model.DownloadState
 import com.bobot.iptvapp.domain.model.Movie
 import com.bobot.iptvapp.domain.model.OfflineDownload
 import com.bobot.iptvapp.domain.model.PlaybackProgress
+import com.bobot.iptvapp.domain.model.SubtitleSearchContext
 import com.bobot.iptvapp.domain.model.XtreamCredentials
 import com.bobot.iptvapp.domain.repository.CatalogRepository
 import com.bobot.iptvapp.domain.repository.DownloadRepository
@@ -152,6 +153,26 @@ class MovieDetailViewModelTest {
         assertNull(state.errorMessage)
         assertEquals(movie, state.movie)
         assertEquals("http://example.com:8080/movie/alice/secret/m1.mkv", state.streamUrl)
+    }
+
+    @Test
+    fun `loaded movie exposes a subtitle search context with its visible title and year`() {
+        coEvery { catalogRepository.getMovieDetail(movieId) } returns
+            Resource.Success(movie.copy(title = "FR - Explosion Totale"))
+
+        initialize()
+
+        assertEquals(
+            SubtitleSearchContext(SubtitleSearchContext.Kind.MOVIE, title = "Explosion Totale", year = 2023),
+            viewModel.uiState.value.subtitleSearchContext,
+        )
+    }
+
+    @Test
+    fun `no subtitle search context before the movie has loaded`() {
+        createViewModel()
+
+        assertNull(viewModel.uiState.value.subtitleSearchContext)
     }
 
     @Test

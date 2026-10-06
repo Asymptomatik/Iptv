@@ -67,6 +67,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.bobot.iptvapp.domain.model.ContentType
+import com.bobot.iptvapp.domain.model.SubtitleSearchContext
 import com.bobot.iptvapp.domain.util.MovieSortMode
 import com.bobot.iptvapp.ui.components.CategoryChip
 import com.bobot.iptvapp.ui.components.FocusableCard
@@ -107,7 +108,7 @@ import com.bobot.iptvapp.ui.util.rememberIsTvDevice
 @Composable
 fun HomeScreen(
     onNavigateToDetail: (contentType: String, contentId: String) -> Unit,
-    onNavigateToPlayer: (streamUrl: String, streamId: String) -> Unit,
+    onNavigateToPlayer: (streamUrl: String, streamId: String, subtitleSearchContext: SubtitleSearchContext?) -> Unit,
     onNavigateToSearch: () -> Unit,
     onNavigateToSettings: () -> Unit,
     onNavigateToDownloads: () -> Unit,
@@ -121,7 +122,7 @@ fun HomeScreen(
         onCardClick = { item ->
             val resumeUrl = item.resumeStreamUrl
             if (resumeUrl != null) {
-                onNavigateToPlayer(resumeUrl, item.id)
+                onNavigateToPlayer(resumeUrl, item.id, item.subtitleSearchContext)
             } else {
                 onNavigateToDetail(item.contentType.toDetailContentType(), item.id)
             }
@@ -135,6 +136,7 @@ fun HomeScreen(
         onLanguageSelected = viewModel::onLanguageSelected,
         onMovieSortModeSelected = viewModel::onMovieSortModeSelected,
         onLoadMoreNewReleases = viewModel::onLoadMoreNewReleases,
+        onLoadMoreSeriesNewReleases = viewModel::onLoadMoreSeriesNewReleases,
         modifier = modifier,
     )
 }
@@ -192,6 +194,12 @@ internal const val NEW_RELEASES_EMPTY_LABEL = "Aucun film pour le moment."
 /** Semantics test tag on the "Nouveautés" order control (see [homeMovieSortControl]). */
 internal const val MOVIE_SORT_CONTROL_TEST_TAG = "movie-sort-control"
 
+/** Series equivalent of [NEW_RELEASES_EMPTY_LABEL]. */
+internal const val SERIES_NEW_RELEASES_EMPTY_LABEL = "Aucune série pour le moment."
+
+/** Semantics test tag on the Series "Nouveautés" order label (see [homeSeriesSortControl]). */
+internal const val SERIES_SORT_CONTROL_TEST_TAG = "series-sort-control"
+
 /** User-facing name of a "Nouveautés" order. */
 internal val MovieSortMode.label: String
     get() = when (this) {
@@ -205,6 +213,10 @@ internal enum class HomeTab(val label: String) {
     MOVIES("Films"),
     SERIES("Series"),
 }
+
+/** Tabs whose default selection is the paged "Nouveautés" view. */
+private val HomeTab.hasNewReleases: Boolean
+    get() = this == HomeTab.MOVIES || this == HomeTab.SERIES
 
 /**
  * Maps a catalog [HomeTab] to the [ContentType] whose on-demand loading it triggers via
@@ -253,6 +265,7 @@ private fun HomeUiState.firstRowItemFor(tab: HomeTab): HomeCardItem? = when (tab
  *
  * Films falls back to the synthetic "Nouveautés" row instead (see [newReleasesRow]), which is
  * therefore selected by default even once categories exist, and stays selectable before any has.
+ * Series does the same with its own "Nouveautés" ([seriesNewReleasesRow]).
  */
 internal fun HomeUiState.selectedCategoryRowFor(
     tab: HomeTab,
@@ -261,7 +274,11 @@ internal fun HomeUiState.selectedCategoryRowFor(
     if (tab == HomeTab.HOME) return null
     val rows = rowsFor(tab)
     val explicit = rows.firstOrNull { it.categoryId == selectedCategoryId }
-    return if (tab == HomeTab.MOVIES) explicit ?: newReleasesRow() else explicit ?: rows.firstOrNull()
+    return when (tab) {
+        HomeTab.MOVIES -> explicit ?: newReleasesRow()
+        HomeTab.SERIES -> explicit ?: seriesNewReleasesRow()
+        else -> explicit ?: rows.firstOrNull()
+    }
 }
 
 /**
@@ -285,6 +302,22 @@ internal fun HomeUiState.isNewReleasesWaiting(): Boolean =
     isLoadingFor(HomeTab.MOVIES) || isNewReleasesPending || (movieRows.isNotEmpty() && !newReleases.isFailed)
 
 /**
+ * Series equivalent of [newReleasesRow]: empty while a newly picked language is being merged
+ * ([HomeUiState.isSeriesNewReleasesPending]).
+ */
+private fun HomeUiState.seriesNewReleasesRow(): HomeRow = HomeRow(
+    categoryId = NEW_RELEASES_CATEGORY_ID,
+    title = NEW_RELEASES_LABEL,
+    items = if (isSeriesNewReleasesPending) emptyList() else seriesNewReleases.items,
+)
+
+/** Series equivalent of [isNewReleasesWaiting]. */
+internal fun HomeUiState.isSeriesNewReleasesWaiting(): Boolean =
+    isLoadingFor(HomeTab.SERIES) ||
+        isSeriesNewReleasesPending ||
+        (seriesRows.isNotEmpty() && !seriesNewReleases.isFailed)
+
+/**
  * The Films grid's load-more: "Nouveautés" is already paged by [HomeViewModel], so it asks it for
  * the next page; an ordinary category grows the local page count through [onNextGridPage].
  */
@@ -296,7 +329,7 @@ internal fun movieGridLoadMore(
 
 /**
  * Selected category id for a catalog [tab], normalized to the first available row when stale/null
- * — or to [NEW_RELEASES_CATEGORY_ID] on Films.
+ * — or to [NEW_RELEASES_CATEGORY_ID] on Films and Series.
  */
 internal fun HomeUiState.normalizedCategorySelectionFor(
     tab: HomeTab,
@@ -316,9 +349,9 @@ internal fun HomeUiState.initialFocusItemFor(
 
     return when (tab) {
         HomeTab.HOME -> firstRowItemFor(tab)
-        // Films always has a selected row ("Nouveautés" at worst): no fallback onto a card the
-        // user cannot see, e.g. while "Nouveautés" is being re-sorted.
-        HomeTab.MOVIES -> selectedCategoryRowFor(tab, selectedCategoryId)?.items?.firstOrNull()
+        // Films and Series always have a selected row ("Nouveautés" at worst): no fallback onto a
+        // card the user cannot see, e.g. while "Nouveautés" is being re-sorted.
+        HomeTab.MOVIES, HomeTab.SERIES -> selectedCategoryRowFor(tab, selectedCategoryId)?.items?.firstOrNull()
         else -> selectedCategoryRowFor(tab, selectedCategoryId)?.items?.firstOrNull() ?: firstRowItemFor(tab)
     }
 }
@@ -326,12 +359,12 @@ internal fun HomeUiState.initialFocusItemFor(
 /**
  * `true` once [tab] has a hero or at least one row — drives per-tab loading/error/empty selection.
  *
- * Always `true` for Films: its language chips, "Nouveautés" and the order control must stay on
- * screen with no film at all — loading, failed, or a language whose categories hold none — or a
- * full-screen state would leave the user no way back to "Toutes" or another language.
+ * Always `true` for Films and Series: their language chips, "Nouveautés" and the order control
+ * must stay on screen with no title at all — loading, failed, or a language whose categories hold
+ * none — or a full-screen state would leave the user no way back to "Toutes" or another language.
  */
 private fun HomeUiState.hasContentFor(tab: HomeTab): Boolean =
-    tab == HomeTab.MOVIES || heroItemFor(tab) != null || rowsFor(tab).isNotEmpty()
+    tab == HomeTab.MOVIES || tab == HomeTab.SERIES || heroItemFor(tab) != null || rowsFor(tab).isNotEmpty()
 
 /**
  * `true` while [tab] still has content on the way — QA finding M3.
@@ -385,6 +418,7 @@ internal fun HomeContent(
     onLanguageSelected: (ContentType, String?) -> Unit = { _, _ -> },
     onMovieSortModeSelected: (MovieSortMode) -> Unit = {},
     onLoadMoreNewReleases: () -> Unit = {},
+    onLoadMoreSeriesNewReleases: () -> Unit = {},
 ) {
     // rememberSaveable, not remember — QA finding Y1. Opening a channel or a film destroys this
     // composable; on BACK, plain remember handed the user Accueil again and lost wherever they
@@ -428,6 +462,7 @@ internal fun HomeContent(
                 onLanguageSelected = onLanguageSelected,
                 onMovieSortModeSelected = onMovieSortModeSelected,
                 onLoadMoreNewReleases = onLoadMoreNewReleases,
+                onLoadMoreSeriesNewReleases = onLoadMoreSeriesNewReleases,
             )
         }
 
@@ -727,6 +762,7 @@ private fun HomeRowsContent(
     onLanguageSelected: (ContentType, String?) -> Unit,
     onMovieSortModeSelected: (MovieSortMode) -> Unit,
     onLoadMoreNewReleases: () -> Unit,
+    onLoadMoreSeriesNewReleases: () -> Unit,
 ) {
     val isTv = rememberIsTvDevice()
     val horizontalPadding = if (isTv) LayoutDimens.ContentPaddingTv else LayoutDimens.ContentPaddingPhone
@@ -808,27 +844,27 @@ private fun HomeRowsContent(
         uiState.movieRows,
         uiState.seriesRows,
     ) {
-        // Films takes its initial focus once per visit instead — see below.
-        if (selectedTab != HomeTab.MOVIES) runCatching { initialFocusRequester.requestFocus() }
+        // Films and Series take their initial focus once per visit instead — see below.
+        if (!selectedTab.hasNewReleases) runCatching { initialFocusRequester.requestFocus() }
     }
 
-    // Films: categories and "Nouveautés" pages land for ~30-40 s, and re-requesting focus on every
-    // emission would pull the user off the chips or the order control each time. The first card
-    // gets focus once, as soon as there is one — unless the user already moved into the list
+    // Films/Series: categories and "Nouveautés" pages land for ~30-40 s, and re-requesting focus on
+    // every emission would pull the user off the chips or the order control each time. The first
+    // card gets focus once, as soon as there is one — unless the user already moved into the list
     // meanwhile; after that focus stays wherever the user put it.
-    var moviesInitialFocusDone by remember(selectedTab) { mutableStateOf(false) }
+    var newReleasesInitialFocusDone by remember(selectedTab) { mutableStateOf(false) }
     var listHasFocus by remember { mutableStateOf(false) }
     val hasRowsFocusTarget = rowsFocusTarget != null
     LaunchedEffect(selectedTab, hasRowsFocusTarget) {
-        if (selectedTab != HomeTab.MOVIES || moviesInitialFocusDone || !hasRowsFocusTarget) return@LaunchedEffect
+        if (!selectedTab.hasNewReleases || newReleasesInitialFocusDone || !hasRowsFocusTarget) return@LaunchedEffect
         if (listHasFocus) {
-            moviesInitialFocusDone = true
+            newReleasesInitialFocusDone = true
             return@LaunchedEffect
         }
         // The grid row carrying the requester may only be laid out on the next frame.
         repeat(2) {
             if (runCatching { initialFocusRequester.requestFocus() }.isSuccess) {
-                moviesInitialFocusDone = true
+                newReleasesInitialFocusDone = true
                 return@LaunchedEffect
             }
             withFrameNanos { }
@@ -855,8 +891,13 @@ private fun HomeRowsContent(
         if (selectedTab == HomeTab.MOVIES) listState.scrollToItem(0)
     }
 
+    // Series: same rule as Films, for its only choice — the language.
+    var lastSeriesLanguage by rememberSaveable { mutableStateOf(uiState.selectedSeriesLanguage) }
     LaunchedEffect(uiState.selectedSeriesLanguage) {
+        if (uiState.selectedSeriesLanguage == lastSeriesLanguage) return@LaunchedEffect
+        lastSeriesLanguage = uiState.selectedSeriesLanguage
         selectedSeriesCategoryId = null
+        if (selectedTab == HomeTab.SERIES) listState.scrollToItem(0)
     }
 
     LaunchedEffect(selectedTab, uiState.liveRows, uiState.movieRows, uiState.seriesRows) {
@@ -1057,13 +1098,38 @@ private fun HomeRowsContent(
                         horizontalPadding = horizontalPadding,
                         onLanguageSelected = { language -> onLanguageSelected(ContentType.SERIES, language) },
                     )
+                    // "Nouveautés" first, then the categories in their usual order.
                     homeCategorySelectorRow(
                         key = "category-selector-series",
-                        rows = uiState.seriesRows,
+                        rows = listOf(NEW_RELEASES_CHIP_ROW) + uiState.seriesRows,
                         selectedCategoryId = selectedCategoryRow?.categoryId,
                         horizontalPadding = horizontalPadding,
                         onCategorySelected = { selectedSeriesCategoryId = it },
                     )
+                    val showsNewReleases = selectedCategoryRow?.categoryId == NEW_RELEASES_CATEGORY_ID
+                    if (showsNewReleases) {
+                        homeSeriesSortControl(
+                            isCatalogPartial = uiState.isSeriesNewReleasesLoading,
+                            horizontalPadding = horizontalPadding,
+                        )
+                        if (selectedCategoryRow?.items.isNullOrEmpty()) {
+                            if (uiState.isSeriesNewReleasesWaiting()) {
+                                item(key = "series-new-releases-pending") {
+                                    HomeNewReleasesPending(
+                                        isSorting = uiState.isSeriesNewReleasesPending,
+                                        horizontalPadding = horizontalPadding,
+                                    )
+                                }
+                            } else {
+                                item(key = "series-new-releases-empty") {
+                                    HomeNewReleasesEmpty(
+                                        horizontalPadding = horizontalPadding,
+                                        text = SERIES_NEW_RELEASES_EMPTY_LABEL,
+                                    )
+                                }
+                            }
+                        }
+                    }
                     homeCategoryGridSection(
                         sectionTitle = selectedCategoryRow?.title ?: "Series",
                         row = selectedCategoryRow,
@@ -1073,8 +1139,14 @@ private fun HomeRowsContent(
                         onCardClick = onCardClick,
                         initialFocusItem = rowsFocusTarget,
                         initialFocusRequester = initialFocusRequester,
-                        visibleItemCount = gridVisibleItemCount,
-                        onLoadMore = { gridPageCount++ },
+                        // Same paging split as Films' "Nouveautés".
+                        visibleItemCount = if (showsNewReleases) Int.MAX_VALUE else gridVisibleItemCount,
+                        onLoadMore = movieGridLoadMore(
+                            showsNewReleases = showsNewReleases,
+                            onLoadMoreNewReleases = onLoadMoreSeriesNewReleases,
+                            onNextGridPage = { gridPageCount++ },
+                        ),
+                        hasMoreAfterRow = showsNewReleases && uiState.seriesNewReleases.hasMore,
                     )
                 }
             }
@@ -1325,6 +1397,42 @@ private fun LazyListScope.homeMovieSortControl(
 }
 
 /**
+ * Series counterpart of [homeMovieSortControl]. Series have one order only — no added date exists
+ * for them — so it is a plain label, not a chip: a focus stop with nothing to choose would only cost
+ * D-pad presses on the way to the first card.
+ */
+private fun LazyListScope.homeSeriesSortControl(
+    isCatalogPartial: Boolean,
+    horizontalPadding: Dp,
+) {
+    item(key = SERIES_SORT_CONTROL_TEST_TAG) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = horizontalPadding, vertical = LayoutDimens.LazyRowFocusPadding)
+                .testTag(SERIES_SORT_CONTROL_TEST_TAG),
+            horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Trier par : ${MovieSortMode.RECENT_RELEASE.label}",
+                style = MaterialTheme.typography.labelLarge,
+                color = TextSecondary,
+            )
+            if (isCatalogPartial) {
+                Text(
+                    text = "Catalogue en cours de chargement",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+/**
  * Stand-in for an empty "Nouveautés" grid while its films are on the way: still being indexed, or
  * re-sorted for the order/language just picked ([isSorting]) — the previous cards are hidden
  * meanwhile rather than shown under the new choice. See [HomeNewReleasesEmpty] for when none are.
@@ -1356,9 +1464,9 @@ private fun HomeNewReleasesPending(isSorting: Boolean, horizontalPadding: Dp) {
  * under the language chips, so the user can pick another language from here.
  */
 @Composable
-private fun HomeNewReleasesEmpty(horizontalPadding: Dp) {
+private fun HomeNewReleasesEmpty(horizontalPadding: Dp, text: String = NEW_RELEASES_EMPTY_LABEL) {
     Text(
-        text = NEW_RELEASES_EMPTY_LABEL,
+        text = text,
         style = MaterialTheme.typography.bodyMedium,
         color = TextSecondary,
         modifier = Modifier

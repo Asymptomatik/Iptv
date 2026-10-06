@@ -1,5 +1,6 @@
 package com.bobot.iptvapp.navigation
 
+import com.bobot.iptvapp.domain.model.SubtitleSearchContext
 import kotlinx.serialization.Serializable
 
 /**
@@ -84,9 +85,50 @@ data class Detail(
  * @param streamUrl Direct stream URL resolved by the Xtream Codes client (Task 6).
  * @param streamId  Xtream Codes stream identifier, used for EPG lookup (Task 20)
  *                  and Continue Watching resume tracking (Task 23).
+ *
+ * The `subtitle*` fields are a flattened, optional [SubtitleSearchContext] — flat primitives so
+ * Navigation's argument encoding needs no custom `NavType`. They all default to `null`, so live
+ * channels and any route built with only [streamUrl] / [streamId] keep working unchanged. Build
+ * routes through the secondary constructor and read them back with [subtitleSearchContext].
  */
 @Serializable
 data class Player(
     val streamUrl: String,
     val streamId: String,
-) : AppRoute
+    val subtitleKind: String? = null,
+    val subtitleTitle: String? = null,
+    val subtitleYear: Int? = null,
+    val subtitleSeriesTitle: String? = null,
+    val subtitleSeasonNumber: Int? = null,
+    val subtitleEpisodeNumber: Int? = null,
+) : AppRoute {
+
+    constructor(
+        streamUrl: String,
+        streamId: String,
+        subtitleSearchContext: SubtitleSearchContext?,
+    ) : this(
+        streamUrl = streamUrl,
+        streamId = streamId,
+        subtitleKind = subtitleSearchContext?.kind?.name,
+        subtitleTitle = subtitleSearchContext?.title,
+        subtitleYear = subtitleSearchContext?.year,
+        subtitleSeriesTitle = subtitleSearchContext?.seriesTitle,
+        subtitleSeasonNumber = subtitleSearchContext?.seasonNumber,
+        subtitleEpisodeNumber = subtitleSearchContext?.episodeNumber,
+    )
+
+    /** The carried context, or `null` when absent or malformed (unknown kind, blank title). */
+    fun subtitleSearchContext(): SubtitleSearchContext? {
+        val kind = SubtitleSearchContext.Kind.entries.firstOrNull { it.name == subtitleKind } ?: return null
+        val title = subtitleTitle?.takeIf { it.isNotBlank() } ?: return null
+        return SubtitleSearchContext(
+            kind = kind,
+            title = title,
+            year = subtitleYear,
+            seriesTitle = subtitleSeriesTitle,
+            seasonNumber = subtitleSeasonNumber,
+            episodeNumber = subtitleEpisodeNumber,
+        )
+    }
+}

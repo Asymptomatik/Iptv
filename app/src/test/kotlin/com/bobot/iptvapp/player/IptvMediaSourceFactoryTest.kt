@@ -1,11 +1,21 @@
 package com.bobot.iptvapp.player
 
 import android.net.Uri
+import android.util.Log
+import androidx.media3.common.C
+import androidx.media3.common.Format
+import androidx.media3.common.MimeTypes
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.FileDataSource
 import androidx.media3.datasource.cache.Cache
+import androidx.media3.exoplayer.analytics.PlayerId
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.MergingMediaSource
+import androidx.media3.exoplayer.source.ProgressiveMediaExtractor
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.extractor.ExtractorsFactory
+import androidx.media3.extractor.text.SubtitleExtractor
 import com.bobot.iptvapp.domain.model.ExternalSubtitle
 import io.mockk.every
 import io.mockk.mockk
@@ -15,9 +25,14 @@ import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import java.io.File
+import java.net.URI
 
 /**
  * Unit tests for [IptvMediaSourceFactory]'s external subtitle side-loading (Task 3).
@@ -54,7 +69,7 @@ import org.junit.Test
  * the stub being consulted at all.
  *
  * ## The "usable subtitle" tests below still depend on `isReturnDefaultValues = true`
- * Once a subtitle URL passes the blank/scheme guards, building its [SingleSampleMediaSource]
+ * Once a subtitle URL passes the blank/scheme guards, building its subtitle [ProgressiveMediaSource]
  * constructs a real [androidx.media3.common.Format], whose constructor normalizes the language
  * code via `Util.normalizeLanguageCode` → `TextUtils.isEmpty` (another unstubbed `android.jar`
  * call) — the exact same environment dependency [ExoPlayerManagerTest]'s KDoc documents for
@@ -64,7 +79,11 @@ import org.junit.Test
  */
 class IptvMediaSourceFactoryTest {
 
+    @get:Rule
+    val tmp = TemporaryFolder()
+
     private lateinit var factory: IptvMediaSourceFactory
+    private lateinit var subtitleDirectory: File
 
     @Before
     fun setUp() {
@@ -72,11 +91,24 @@ class IptvMediaSourceFactoryTest {
         every { Uri.parse(any()) } answers {
             val input = firstArg<String>()
             mockk(relaxed = true) {
-                every { scheme } returns if (input == BLANK_SCHEME_SUBTITLE_URL) "" else "http"
+                when {
+                    input == BLANK_SCHEME_SUBTITLE_URL -> every { scheme } returns ""
+                    // A file: Uri carries its real path — FileDataSource opens exactly uri.path.
+                    input.startsWith("file:") -> {
+                        every { scheme } returns "file"
+                        every { path } returns File(URI(input)).path
+                    }
+                    else -> every { scheme } returns "http"
+                }
             }
         }
 
-        factory = IptvMediaSourceFactory(mockk<OkHttpClient>(relaxed = true), mockk<Cache>(relaxed = true))
+        subtitleDirectory = tmp.newFolder("online_subtitles")
+        factory = IptvMediaSourceFactory(
+            mockk<OkHttpClient>(relaxed = true),
+            mockk<Cache>(relaxed = true),
+            subtitleDirectory,
+        )
     }
 
     @After
@@ -85,6 +117,7 @@ class IptvMediaSourceFactoryTest {
         // every other test class run in the same JVM (ExoPlayerManagerTest, PlayerViewModelTest,
         // MovieMapperTest, ...), silently corrupting any of their own Uri usages.
         unmockkStatic(Uri::class)
+        unmockkStatic(Log::class)
     }
 
     // ── empty / all-unusable external subtitles → plain video source, no wrapping ──────
@@ -198,6 +231,127 @@ class IptvMediaSourceFactoryTest {
         )
     }
 
+    // ── side-loaded subtitles reach the TextRenderer as cues ────────────────────────────
+    //
+    // Media3 1.4.1's TextRenderer refuses anything but `application/x-media3-cues` (and CEA-608/708)
+    // unless legacy decoding is enabled: a raw SubRip sample fails its `checkState` as soon as the
+    // track is selected. The subtitle has to be parsed while it is extracted, as
+    // DefaultMediaSourceFactory does by default — ProgressiveMediaSource + SubtitleExtractor.
+
+    @Test
+    fun `an online subtitle is extracted into cues carrying the id, language and flags it was asked for`() {
+        val file = File(subtitleDirectory, "222.fr.srt").apply { writeText("1\n") }
+
+        val source = factory.create(
+            streamUrl = "http://example.com:8080/movie/u/p/1.mp4",
+            externalSubtitles = listOf(
+                ExternalSubtitle(url = file.toURI().toString(), language = "fr", trackId = "online-subtitle-1"),
+            ),
+        )
+
+        val format = extractedSubtitleFormat(mergingMediaSourceChildren(source as MergingMediaSource)[1])
+        assertEquals(MimeTypes.APPLICATION_MEDIA3_CUES, format.sampleMimeType)
+        assertEquals(MimeTypes.APPLICATION_SUBRIP, format.codecs)
+        assertEquals("online-subtitle-1", format.id)
+        assertEquals("fr", format.language)
+        assertEquals(C.ROLE_FLAG_SUBTITLE, format.roleFlags)
+        assertEquals("never auto-selected", 0, format.selectionFlags)
+    }
+
+    @Test
+    fun `an Xtream subtitle is extracted into cues too, of the type its URL names`() {
+        val source = factory.create(
+            streamUrl = "http://example.com:8080/movie/u/p/1.mp4",
+            externalSubtitles = listOf(ExternalSubtitle(url = "http://example.com/subs/1.vtt", language = "en")),
+        )
+
+        val format = extractedSubtitleFormat(mergingMediaSourceChildren(source as MergingMediaSource)[1])
+        assertEquals(MimeTypes.APPLICATION_MEDIA3_CUES, format.sampleMimeType)
+        assertEquals(MimeTypes.TEXT_VTT, format.codecs)
+        assertNull(format.id)
+        assertEquals(0, format.selectionFlags)
+    }
+
+    // ── downloaded (file:) subtitles → read from the online subtitle directory only ─────
+
+    @Test
+    fun `a downloaded subtitle is actually read from disk through the factory's data source`() {
+        val srt = "1\n00:00:01,000 --> 00:00:02,000\nBonjour\n".toByteArray()
+        val file = File(subtitleDirectory, "222.fr.srt").apply { writeBytes(srt) }
+        val uri = Uri.parse(file.toURI().toString())
+
+        val dataSourceFactory = factory.subtitleDataSourceFactory(uri)
+
+        assertTrue(dataSourceFactory is FileDataSource.Factory)
+        val dataSource = dataSourceFactory!!.createDataSource()
+        val length = dataSource.open(DataSpec(uri))
+        val read = ByteArray(length.toInt())
+        var offset = 0
+        while (offset < read.size) offset += dataSource.read(read, offset, read.size - offset)
+        dataSource.close()
+        assertEquals(srt.size.toLong(), length)
+        assertEquals(String(srt), String(read))
+    }
+
+    @Test
+    fun `a downloaded subtitle is side-loaded next to the video source`() {
+        val file = File(subtitleDirectory, "222.fr.srt").apply { writeText("1\n") }
+
+        val source = factory.create(
+            streamUrl = "http://example.com:8080/movie/u/p/1.mp4",
+            externalSubtitles = listOf(ExternalSubtitle(url = file.toURI().toString(), language = "fr")),
+        )
+
+        assertTrue(source is MergingMediaSource)
+        assertEquals(2, mergingMediaSourceChildren(source as MergingMediaSource).size)
+    }
+
+    @Test
+    fun `a file subtitle outside the online subtitle directory is refused, and playback falls back`() {
+        val outside = tmp.newFile("secret.srt").apply { writeText("1\n") }
+        val escaping = subtitleDirectory.toURI().toString() + "../secret.srt"
+
+        assertNull(factory.subtitleDataSourceFactory(Uri.parse(outside.toURI().toString())))
+        assertNull(factory.subtitleDataSourceFactory(Uri.parse(escaping)))
+        val source = factory.create(
+            streamUrl = "http://example.com:8080/movie/u/p/1.mp4",
+            externalSubtitles = listOf(ExternalSubtitle(url = outside.toURI().toString(), language = "fr")),
+        )
+        assertFalse(source is MergingMediaSource)
+    }
+
+    @Test(expected = FileDataSource.FileDataSourceException::class)
+    fun `a downloaded subtitle purged before playback fails to open rather than reading anything`() {
+        val uri = Uri.parse(File(subtitleDirectory, "222.fr.srt").toURI().toString())
+
+        factory.subtitleDataSourceFactory(uri)!!.createDataSource().open(DataSpec(uri))
+    }
+
+    // ── a skipped subtitle never logs its URL ───────────────────────────────────────────
+
+    @Test
+    fun `a subtitle that fails to build is skipped with a warning that reveals neither its URL nor the error text`() {
+        mockkStatic(Log::class)
+        val logged = mutableListOf<String>()
+        every { Log.w(any(), any<String>()) } answers { logged += secondArg<String>(); 0 }
+        every { Log.w(any(), any<String>(), any()) } answers {
+            logged += secondArg<String>() + " " + thirdArg<Throwable>().stackTraceToString(); 0
+        }
+        every { Log.w(any(), any<Throwable>()) } answers { logged += secondArg<Throwable>().stackTraceToString(); 0 }
+        every { Uri.parse(SENTINEL_SUBTITLE_URL) } throws IllegalArgumentException("unparseable $SENTINEL_SUBTITLE_URL")
+
+        val source = factory.create(
+            streamUrl = "http://example.com:8080/movie/u/p/1.mp4",
+            externalSubtitles = listOf(ExternalSubtitle(url = SENTINEL_SUBTITLE_URL, language = "fr")),
+        )
+
+        assertFalse(source is MergingMediaSource)
+        assertEquals(1, logged.size)
+        listOf("sentinel-host", "SENTINEL_USER", "SENTINEL_PASS", "unparseable").forEach { secret ->
+            assertFalse("log must not contain $secret: ${logged.single()}", logged.single().contains(secret))
+        }
+    }
+
     /**
      * Reaches into [MergingMediaSource]'s private `mediaSources` field via reflection — the class
      * has no public accessor for its children — to assert the exact number/order of sources it
@@ -211,8 +365,29 @@ class IptvMediaSourceFactoryTest {
         return (field.get(source) as Array<MediaSource>).toList()
     }
 
+    /**
+     * The [Format] the extractor of side-loaded [source] hands to the player's `TrackOutput` —
+     * reached by reflection (media3-exoplayer/extractor 1.4.1 field names) since neither
+     * [ProgressiveMediaSource] nor its extractor adapter expose them. Fails unless [source] is a
+     * [ProgressiveMediaSource] whose single extractor is a [SubtitleExtractor].
+     */
+    private fun extractedSubtitleFormat(source: MediaSource): Format {
+        assertTrue("expected a ProgressiveMediaSource, got ${source.javaClass.simpleName}", source is ProgressiveMediaSource)
+        val adapter = (privateField(source, "progressiveMediaExtractorFactory") as ProgressiveMediaExtractor.Factory)
+            .createProgressiveMediaExtractor(PlayerId.UNSET)
+        val extractor = (privateField(adapter, "extractorsFactory") as ExtractorsFactory).createExtractors().single()
+        assertTrue("expected a SubtitleExtractor, got ${extractor.javaClass.simpleName}", extractor is SubtitleExtractor)
+        return privateField(extractor, "format") as Format
+    }
+
+    private fun privateField(target: Any, name: String): Any? =
+        target.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(target)
+
     private companion object {
         /** A URL for which the [Uri.parse] stub in [setUp] deliberately returns a blank scheme. */
         const val BLANK_SCHEME_SUBTITLE_URL = "schemeless-subtitle.srt"
+
+        /** Shaped like an Xtream subtitle URL, whose path carries the account's credentials. */
+        const val SENTINEL_SUBTITLE_URL = "http://sentinel-host:8080/movie/SENTINEL_USER/SENTINEL_PASS/1.srt"
     }
 }

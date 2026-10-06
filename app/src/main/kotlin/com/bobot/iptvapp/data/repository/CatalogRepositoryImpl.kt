@@ -798,10 +798,17 @@ class CatalogRepositoryImpl @Inject constructor(
      * [Season.toEntity] / [Episode.toEntity] require the parent [Series.id] to be
      * injected explicitly since it is denormalised at the entity layer (not present on
      * the domain models).
+     *
+     * A series already cached from its list call keeps that call's title, year and category: the
+     * Series "Nouveautés" order and the category rows read them back from Room on a cold start, so
+     * opening the detail screen must not move the series or take it out of its category (the
+     * detail's `category_id` may be absent). Cover, plot and rating are refreshed from the detail.
+     * The merge is done by [CatalogCacheDao.upsertSeriesDetail] at write time, never from a row read
+     * here first: a list write landing in between would otherwise be overwritten by that snapshot.
      */
     private suspend fun persistSeriesDetailQuietly(accountKey: AccountKey, series: Series) {
         persistQuietly {
-            catalogCacheDao.upsertSeries(listOf(series).toEntity(accountKey))
+            catalogCacheDao.upsertSeriesDetail(series.toEntity(accountKey))
             catalogCacheDao.upsertSeasons(series.seasons.map { it.toEntity(series.id, accountKey) })
             catalogCacheDao.upsertEpisodes(
                 series.seasons.flatMap { season -> season.episodes.toEntity(series.id, accountKey) },
